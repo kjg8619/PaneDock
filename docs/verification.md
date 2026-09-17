@@ -1954,6 +1954,95 @@ nil은 "최전면이 아니다"가 아니라 "판정할 수 없다"인데, 그�
 | 제외 | `.omp/`(개인 설정), `.build/`·`dist/`(빌드 산출물, gitignore) |
 | 포함하지 않는 것 | 자격증명, 셸 이력, 전체 환경변수, 진단 로그, cmux 설정 파일 |
 
+## V12. 2026-09-17 — Ghostty와 cmux 둘 다 따라가기 (자동 선택)
+
+### V12.1 배경과 결정
+
+V11까지 GUI는 **Ghostty 전용**이었고 cmux는 CLI 실험 경로뿐이었다. 사용자가
+"둘 다 잡을 수 있게"를 방향으로 확정했고, 선택 방식은 **auto(최전면 앱을 따라간다)** 로 정했다.
+
+| 결정 | 내용 |
+| --- | --- |
+| 선택 규칙 | 최전면 앱이 목록의 호스트면 그 호스트 → 아니면 **마지막 호스트** → 아직 없으면 **기본 호스트(Ghostty)** |
+| 둘 다 뒤에 있을 때 | 마지막 대상이 **"유지 중"**으로 남는다(새 규칙을 만들지 않고 기존 `held`를 그대로 쓴다) |
+| 판정 불가 | 최전면을 **알 수 없으면**(nil) "최전면 아님"으로 단정하지 않고 위 2·3 규칙으로 내려간다 |
+| 명시 선택 | `--adapter ghostty` / `--adapter cmux`로 고정할 수 있다(자동 전환 없음) |
+| 조회 비용 | **고른 호스트 하나만** 조회한다. 다른 호스트가 꺼져 있어도 추적에 영향이 없다 |
+| 실패 처리 | 고른 호스트의 조회 실패는 **그대로 보고**한다. 조용히 다른 호스트로 갈아타지 않는다 |
+
+### V12.2 구현
+
+| 파일 | 변경 |
+| --- | --- |
+| `FocusProbeCore/TerminalHostRouter.swift` | **신규.** 호스트 목록·최전면 판정·마지막 선택 기억. `TerminalHostAdapter`를 구현해 **프로브·반영·표시 코드를 그대로 재사용**한다 |
+| `FocusProbeCore/CmuxAdapter.swift` | `FrontmostAppChecking`을 `frontmostBundleIdentifier()`로 확장(판정 불가 = nil), `isFrontmost`는 확장 메서드로 |
+| `FocusProbeCore/GhosttyAdapter.swift` | `GhosttyAdapter.bundleIdentifier` 추가. `TerminalHostMapping`이 `factory`를 갖도록 이동 |
+| `FocusProbeCore/ContextStore.swift` | `useFactory(_:)` — 표시 묶음을 **관측을 만든 Adapter의 factory**로 변환 |
+| `FocusProbeCore/GhosttyAdapter.swift` (`SnapshotApplier`) | `apply` 시작에서 factory를 맞춘다(대상·사유 판정 전) |
+| `FocusProbeCore/DockState.swift` | `hostAppID` 추가 |
+| `PaneDockApp/LaunchOptions.swift` | `--adapter auto\|ghostty\|cmux`(기본 auto), `makeHostAdapter`(가짜 모드는 라우팅하지 않음) |
+| `PaneDockApp/DockView.swift` | 헤더에 **현재 호스트** 표시, 상태 줄의 하드코딩된 "Ghostty 최전면" 제거 |
+| `PaneDockApp/AppDelegate.swift` · `main.swift` | 시작 로그에 `adapter=`, self-check에 `adapter`/`host`/`cwdSource` 줄 |
+
+**설계 요점:** 라우터는 **Adapter 하나처럼 동작**한다. `snapshot()`이 고른 호스트를 기억하고
+이후 위임(`focusedRecord`·`records`·`noTargetReason`·`factory`·오류 문구)이 모두 그 호스트로 간다.
+스냅샷과 레코드 변환이 다른 호스트에서 나오면 **다른 pane의 경로를 현재 대상으로 표시**하게 되므로,
+`apply`가 매 관측마다 factory를 맞춰 신원(`adapterID`·`hostAppID`)과 경로 출처를 함께 바꾼다.
+
+```
+PaneDock --adapter auto      # 기본: 최전면 앱을 따라간다
+PaneDock --adapter ghostty   # Ghostty만
+PaneDock --adapter cmux      # cmux만
+```
+
+### V12.3 검증
+
+#### 합성 검사 — 104/104 (기존 99 + 라우터 5)
+
+| 검사 | 확인 내용 | 결과 |
+| --- | --- | --- |
+| 라우터 | 최전면 호스트를 따르고 **고른 호스트만** 조회한다(조회 횟수로 확인) | PASS |
+| 라우터 | 둘 다 최전면이 아니면 **마지막 호스트를 유지**한다 | PASS |
+| 라우터 | 최전면을 **판정할 수 없으면** 기본으로 시작하고 이후에는 마지막을 유지한다 | PASS |
+| 라우터 | 고른 호스트의 실패를 숨기지 않고 **다른 호스트로 갈아타지 않는다** | PASS |
+| 라우터 | 호스트가 바뀌면 **신원과 경로 출처가 함께** 바뀐다(`ghostty:terminal.workingDirectory` → `cmux:sidebar-state.focused_cwd`) | PASS |
+
+#### 실제 관측 — 최전면이 cmux일 때 (에이전트 수행, 14:56)
+
+| 모드 | display | host | cwdSource | 경로 | pane |
+| --- | --- | --- | --- | --- | --- |
+| **auto** | tracked | **cmux** | `cmux:sidebar-state.focused_cwd` | `…/tool/PaneDock` | `43007C41-…`(cmux surface) |
+| `--adapter ghostty` | held | ghostty | `ghostty:terminal.workingDirectory` | `/Users/kangjingoo` | `54DBC13A-…`(Ghostty terminal) |
+| `--adapter cmux` | tracked | cmux | `cmux:sidebar-state.focused_cwd` | `…/tool/PaneDock` | `43007C41-…` |
+
+→ **auto가 최전면 앱(cmux)을 골랐고**, 호스트가 바뀌면 신원·경로 출처·대상이 함께 바뀐다.
+`ghostty` 강제 모드가 `held`인 것은 Ghostty가 최전면이 아니기 때문이다(정상).
+
+#### 실제 관측 — GUI (에이전트 수행, AX로 창에 그려진 텍스트 확인)
+
+```
+PaneDock startup: mode=live adapter=auto … catalog=loaded projects=2
+EVENT refresh=1 display=tracked folder=PaneDock path=…/tool/PaneDock pane=43007C41-… project=-
+화면:  상태: 추적 중   추적 소스: cmux   43007C41 · cmux 최전면
+```
+
+`metaText`에 **하드코딩된 "Ghostty 최전면"** 이 있어 cmux를 따라가면서도 Ghostty라고 표시됐다.
+이번에 호스트 이름을 실제 값으로 바꿨다(위 화면은 수정 후 관측).
+
+#### 미확인
+
+| # | 항목 | 왜 |
+| --- | --- | --- |
+| 1 | **auto가 Ghostty를 고르는 실측** | 최전면이 Ghostty여야 하는데, 에이전트는 앱을 강제로 활성화하지 않는다. 규칙 자체는 합성 검사로 확인 |
+| 2 | 터미널이 아닌 panel(F) | V11과 동일 — 실제 cmux에 브라우저 panel이 없었다 |
+| 3 | 중첩 TUI·원격 경로 | 범위 밖 |
+
+### V12.4 범위와 남은 것
+
+- **메뉴로 런타임 전환은 넣지 않았다.** 소스는 실행 인자로만 고른다(재시작 필요). 필요해지면 별도 단계.
+- **두 호스트를 동시에 조회하지 않는다.** 고른 하나만 조회하므로 비용이 늘지 않는다.
+- V11의 미확인 2번(터미널이 아닌 panel)은 그대로 남는다.
+
 ---
 
 ## 정정 이력

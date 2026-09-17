@@ -17,7 +17,7 @@ guard let options = parseLaunchOptions(Array(CommandLine.arguments.dropFirst()))
 
 // 창을 띄우지 않고 1회만 확인한다. GUI를 실제로 띄우지 않고도 상태·계획을 검증할 수 있다.
 if options.selfCheck {
-    let probe = GhosttyProbe(adapter: makeGhosttyAdapter(options))
+    let probe = GhosttyProbe(adapter: makeHostAdapter(options))
     _ = probe.refresh()
     let snapshot = probe.diagnostic()
     let state = DockStateBuilder.make(
@@ -28,12 +28,15 @@ if options.selfCheck {
         lock: DockLock()
     )
 
-    print("mode        \(options.isFake ? "fake(\(options.fake!.rawValue))" : "live(ghostty)")")
+    print("mode        \(options.isFake ? "fake(\(options.fake!.rawValue))" : "live")")
+    print("adapter     \(options.hostSource.rawValue)")
     print("display     \(state.display.rawValue)")
     print("folderName  \(state.folderName)")
     print("fullPath    \(state.fullPath ?? "-")")
     print("previous    \(state.previousPath ?? "-")")
     print("paneID      \(state.paneID ?? "-")")
+    print("host        \(state.hostAppID ?? "-")")
+    print("cwdSource   \(snapshot.current.cwdSource?.rawValue ?? "-")")
     print("frontmost   \(state.hostFrontmost.map(String.init) ?? "-")")
     print("detail      \(state.detail ?? "-")")
 

@@ -34,6 +34,12 @@ struct DockView: View {
                     .clipShape(Capsule())
                     .accessibilityLabel("상태: \(stateLabel)")
                 Spacer()
+                if let host = model.state.hostAppID {
+                    Text(host)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("추적 소스: \(host)")
+                }
                 if let observed = model.state.observedAt {
                     Text(Self.timeFormatter.string(from: observed))
                         .font(.caption2).foregroundStyle(.secondary)
@@ -217,8 +223,10 @@ struct DockView: View {
     private var metaText: String {
         var parts: [String] = []
         if let pane = model.state.paneID { parts.append(String(pane.prefix(8))) }
+        // 호스트 이름을 고정하지 않는다. 자동 모드에서는 Ghostty와 cmux가 바뀐다.
+        let host = model.state.hostAppID ?? "터미널"
         if let frontmost = model.state.hostFrontmost {
-            parts.append(frontmost ? "Ghostty 최전면" : "Ghostty 비활성")
+            parts.append(frontmost ? "\(host) 최전면" : "\(host) 비활성")
         }
         return parts.isEmpty ? "대상 없음" : parts.joined(separator: " · ")
     }

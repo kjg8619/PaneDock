@@ -19,27 +19,53 @@ struct LaunchOptions {
     var moveTo: CGPoint?
     /// 진단용: 시작 후 이 시간(ms) 뒤에 메뉴의 "프로젝트 설정 다시 읽기"와 **같은 동작**을 한 번 수행한다.
     var reloadAfterMilliseconds: Int?
+    /// 추적할 터미널 소스. 기본은 자동(최전면 앱을 따라간다).
+    var hostSource: HostSource = .auto
 
     var isFake: Bool { fake != nil }
 }
 
+/// 추적할 터미널 소스.
+///
+/// `auto`는 **최전면 앱을 따라간다**: Ghostty가 앞에 있으면 Ghostty, cmux가 앞에 있으면 cmux,
+/// 둘 다 뒤에 있으면 마지막 대상을 유지한다. 판정할 수 없으면 기본 호스트(Ghostty)로 시작한다.
+enum HostSource: String, CaseIterable {
+    case auto
+    case ghostty
+    case cmux
+
+    var label: String {
+        switch self {
+        case .auto: return "자동"
+        case .ghostty: return "Ghostty"
+        case .cmux: return "cmux"
+        }
+    }
+}
+
 let usageText = """
-PaneDock — Ghostty 전용 최소 Dock (0.1a)
+PaneDock — 포커스된 터미널 pane을 따라가는 최소 Dock
 
 사용법:
-  PaneDock [--interval <ms>] [--hidden]
+  PaneDock [--interval <ms>] [--hidden] [--adapter <auto|ghostty|cmux>]
   PaneDock --fake <steady|toggle|missing>
-  PaneDock --self-check [--fake <scenario>]
+  PaneDock --self-check [--fake <scenario>] [--adapter <auto|ghostty|cmux>]
 
 옵션:
   --interval <ms>   재조회 주기 (기본 1000)
   --hidden          창을 화면에 올리지 않고 시작(메뉴 막대에서 다시 표시)
-  --fake <mode>     가짜 입력 모드. 실제 Ghostty에 붙지 않으며 창에 [FAKE]로 표시된다
+  --adapter <name>  추적 소스. auto(기본)=최전면 앱을 따라간다 | ghostty | cmux
+  --fake <mode>     가짜 입력 모드. 실제 터미널에 붙지 않으며 창에 [FAKE]로 표시된다
   --self-check      창을 띄우지 않고 1회 조회 결과와 실행 계획만 출력한다
   --help            이 도움말
 
+추적 소스:
+  auto   Ghostty가 앞에 있으면 Ghostty, cmux가 앞에 있으면 cmux를 따른다.
+         둘 다 앞에 없으면 마지막 대상을 "유지 중"으로 남긴다.
+  ghostty / cmux   그 터미널만 따른다(자동 전환 없음).
+
 범위:
-  Ghostty 한 창의 직접 pane과 로컬 셸만 대상으로 한다.
+  각 터미널의 직접 pane과 로컬 셸만 대상으로 한다.
   다중 창, 중첩 멀티플렉서(herdr·tmux), SSH 내부 경로는 지원하지 않는다.
 
 상태:
@@ -90,6 +116,13 @@ func parseLaunchOptions(_ arguments: [String]) -> LaunchOptions? {
             options.stateLogPath = arguments[index]
         case "--hidden":
             options.hidden = true
+        case "--adapter":
+            index += 1
+            guard index < arguments.count, let source = HostSource(rawValue: arguments[index]) else {
+                FileHandle.standardError.write(Data("--adapter requires auto|ghostty|cmux\n".utf8))
+                exit(2)
+            }
+            options.hostSource = source
         case "--move-to":
             index += 1
             guard index < arguments.count else {
@@ -120,12 +153,35 @@ func parseLaunchOptions(_ arguments: [String]) -> LaunchOptions? {
     return options
 }
 
-/// 가짜 모드와 실제 연결 모드를 명확히 가른다. 가짜일 때만 스텁 러너를 쓴다.
-func makeGhosttyAdapter(_ options: LaunchOptions) -> GhosttyAdapter {
+/// 추적 소스를 만든다.
+///
+/// - `auto`(기본): 최전면 앱이 Ghostty면 Ghostty, cmux면 cmux. 둘 다 뒤에 있으면 마지막 대상을
+///   유지하고, 아직 고른 적이 없으면 Ghostty로 시작한다(`TerminalHostRouter`).
+/// - `ghostty` / `cmux`: 그 호스트만 따른다(자동 전환 없음).
+/// - **가짜 모드는 라우팅하지 않는다.** 결정적 검사를 위해 Ghostty 스텁 하나만 쓴다.
+func makeHostAdapter(_ options: LaunchOptions) -> TerminalHostAdapter {
     if let fake = options.fake {
         return GhosttyAdapter(runner: FakeAppleScriptRunner(scenario: fake))
     }
-    return GhosttyAdapter()
+    switch options.hostSource {
+    case .ghostty:
+        return GhosttyAdapter()
+    case .cmux:
+        return CmuxAdapter()
+    case .auto:
+        return TerminalHostRouter(
+            hosts: [
+                TerminalHostRouter.Host(
+                    adapter: GhosttyAdapter(),
+                    bundleIdentifier: GhosttyAdapter.bundleIdentifier
+                ),
+                TerminalHostRouter.Host(
+                    adapter: CmuxAdapter(),
+                    bundleIdentifier: CmuxAdapter.bundleIdentifier
+                ),
+            ]
+        )
+    }
 }
 
 /// 프로젝트 카탈로그 경로. `--projects-path` > 기본 경로. 가짜 모드는 파일을 쓰지 않는다.

@@ -37,7 +37,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         settings = store
 
         let model = DockModel(
-            adapter: makeGhosttyAdapter(options),
+            adapter: makeHostAdapter(options),
             isFake: options.isFake,
             stateLogPath: options.stateLogPath
         )
@@ -148,7 +148,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let frame = panel?.frame ?? .zero
         let notice = startupNotice.isEmpty ? "-" : startupNotice.replacingOccurrences(of: "\n", with: " / ")
         let catalog = catalogStore.map { "\($0.outcome.label) projects=\($0.catalog.projects.count) diagnostics=\($0.diagnostics.count)" } ?? "-"
-        let line = "PaneDock startup: mode=\(mode) settings=\(outcome) file=\(file) "
+        let line = "PaneDock startup: mode=\(mode) adapter=\(options.hostSource.rawValue) settings=\(outcome) file=\(file) "
             + "catalog=\(catalog) "
             + "origin=(\(Int(frame.origin.x)),\(Int(frame.origin.y))) size=\(Int(frame.width))x\(Int(frame.height)) "
             + "hotKey=\(hotKey) hotKeyStatus=\(hotKeyRegistration.message) notice=\(notice)\n"

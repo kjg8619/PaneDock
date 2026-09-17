@@ -39,7 +39,7 @@ public final class ContextStore {
     private var cache: [String: CurrentWorkInfo] = [:]
     private let resolver: FocusResolver
     private let validator: PathValidating
-    private let factory: WorkInfoFactory
+    private var factory: WorkInfoFactory
     private let clock: () -> Date
 
     public init(
@@ -70,6 +70,15 @@ public final class ContextStore {
 
     public func noteFailure(_ text: String) {
         lastFailure = text
+    }
+
+    /// 표시 묶음 변환에 쓸 factory를 바꾼다.
+    ///
+    /// **관측을 만든 Adapter의 factory로 맞춘다.** 라우터가 호스트를 바꾸면
+    /// 신원(`adapterID`·`hostAppID`)과 경로 출처도 함께 바뀌어야 한다.
+    /// 다른 호스트의 레코드를 이 factory로 변환하면 **없는 신원을 만들어내게 된다.**
+    public func useFactory(_ factory: WorkInfoFactory) {
+        self.factory = factory
     }
 
     /// 실제 포커스 pane으로 대상을 맞춘다.

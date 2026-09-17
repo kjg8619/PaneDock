@@ -397,7 +397,7 @@ public enum SelfTest {
         directories: Set<String>,
         identifies: [CmuxIdentify],
         sidebars: [CmuxSidebarState],
-        frontmost: StubFrontmostApp = StubFrontmostApp(true)
+        frontmost: StubFrontmostApp = StubFrontmostApp(CmuxAdapter.bundleIdentifier)
     ) -> (adapter: CmuxAdapter, store: ContextStore, resolver: FocusResolver, validator: StubValidator) {
         makeHostStore(
             CmuxAdapter(client: StubCmuxQueries(identifies: identifies, sidebars: sidebars), frontmost: frontmost),
@@ -592,6 +592,7 @@ public enum SelfTest {
         results.append(contentsOf: settingsChecks())
         results.append(contentsOf: projectChecks())
         results.append(contentsOf: cmuxChecks())
+        results.append(contentsOf: hostRouterChecks())
         return results
     }
 
@@ -1665,13 +1666,13 @@ public enum SelfTest {
     }
 
     private final class StubFrontmostApp: FrontmostAppChecking, @unchecked Sendable {
-        var value: Bool?
+        var bundleIdentifier: String?
 
-        init(_ value: Bool?) {
-            self.value = value
+        init(_ bundleIdentifier: String?) {
+            self.bundleIdentifier = bundleIdentifier
         }
 
-        func isFrontmost(_ bundleIdentifier: String) -> Bool? { value }
+        func frontmostBundleIdentifier() -> String? { bundleIdentifier }
     }
 
     /// cmux의 4단계(window → workspace → pane → surface)를 그대로 담는다.
@@ -1847,7 +1848,7 @@ public enum SelfTest {
 
         // E: cmux가 최전면이 아니면 마지막으로 확인한 대상을 "유지 중"으로 구분한다.
         do {
-            let frontmost = StubFrontmostApp(true)
+            let frontmost = StubFrontmostApp(CmuxAdapter.bundleIdentifier)
             let (adapter, store, resolver, validator) = makeCmuxStore(
                 directories: ["/work/a"],
                 identifies: [
@@ -1862,7 +1863,8 @@ public enum SelfTest {
             )
             TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
             let wasTracked = store.current?.focusStatus == .tracked
-            frontmost.value = false
+            // 다른 앱이 최전면이 된다(판정 가능하지만 cmux가 아니다).
+            frontmost.bundleIdentifier = "com.example.other"
             TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
             results.append(
                 check(
@@ -1965,7 +1967,7 @@ public enum SelfTest {
         // F-3: 연결 실패는 경로 없이 구분하고, 사유는 cmux라고 말한다.
         do {
             let probe = GhosttyProbe(
-                adapter: CmuxAdapter(client: StubCmuxQueries(failure: .notRunning), frontmost: StubFrontmostApp(false)),
+                adapter: CmuxAdapter(client: StubCmuxQueries(failure: .notRunning), frontmost: StubFrontmostApp(nil)),
                 validator: StubValidator(directories: [])
             )
             probe.refresh()
@@ -2020,6 +2022,235 @@ public enum SelfTest {
             )
         } catch {
             results.append(check("회귀: Ghostty는 대상이 없어도 새 규칙으로 대상을 지우지 않는다", false, "\(error)"))
+        }
+
+        return results
+    }
+
+    // MARK: - 여러 호스트 라우팅 (V12)
+
+    /// 라우터 검사용 Adapter. **조회 횟수를 세어** "고른 호스트만 조회했는지"를 확인한다.
+    private final class StubHostAdapter: TerminalHostAdapter, @unchecked Sendable {
+        let stubName: String
+        private let paneID: String
+        private let tabID: String
+        private let path: String?
+        private let source: CWDSource
+        private let failure: TerminalHostQueryError?
+        private(set) var queryCount = 0
+
+        init(
+            name: String,
+            paneID: String,
+            tabID: String = "ws-1",
+            path: String? = "/work/a",
+            source: CWDSource = .ghosttyWorkingDirectory,
+            failure: TerminalHostQueryError? = nil
+        ) {
+            self.stubName = name
+            self.paneID = paneID
+            self.tabID = tabID
+            self.path = path
+            self.source = source
+            self.failure = failure
+        }
+
+        var appName: String { stubName }
+        var appleScriptRequirement: String? { nil }
+
+        var factory: WorkInfoFactory {
+            WorkInfoFactory(adapterID: stubName, hostAppID: stubName, machineID: "local", defaultCWDSource: source)
+        }
+
+        func unsupportedVersionReason(_ version: String?) -> String? { nil }
+
+        func snapshot() throws -> TerminalHostSnapshot {
+            queryCount += 1
+            if let failure { throw failure }
+            return TerminalHostSnapshot(
+                version: nil,
+                frontmost: true,
+                frontWindowID: "win-1",
+                selectedTabID: tabID,
+                focusedTerminalID: paneID,
+                focusedWorkingDirectory: path,
+                focusedPanelIsTerminal: true,
+                terminals: [
+                    TerminalHostTerminal(
+                        terminalID: paneID,
+                        windowID: "win-1",
+                        tabID: tabID,
+                        workingDirectory: path,
+                        name: nil
+                    )
+                ]
+            )
+        }
+
+        func focusedRecord(in snapshot: TerminalHostSnapshot) -> PaneRecord? {
+            guard let target = snapshot.target else { return nil }
+            return PaneRecord(
+                paneID: target.terminalID,
+                workspaceID: target.windowID,
+                tabID: target.tabID,
+                terminalID: target.terminalID,
+                cwd: target.workingDirectory,
+                foregroundCWD: nil,
+                focused: true,
+                revision: nil,
+                title: nil
+            )
+        }
+
+        func records(in snapshot: TerminalHostSnapshot) -> [PaneRecord] { [] }
+
+        func noTargetReason(in snapshot: TerminalHostSnapshot) -> String { "no target (\(stubName))" }
+    }
+
+    /// 최전면 앱을 바꿀 수 있는 checker.
+    private static func makeRouter(
+        ghostty: StubHostAdapter,
+        cmux: StubHostAdapter,
+        frontmost: StubFrontmostApp
+    ) -> TerminalHostRouter {
+        TerminalHostRouter(
+            hosts: [
+                TerminalHostRouter.Host(adapter: ghostty, bundleIdentifier: "com.mitchellh.ghostty"),
+                TerminalHostRouter.Host(adapter: cmux, bundleIdentifier: "com.cmuxterm.app"),
+            ],
+            frontmost: frontmost
+        )
+    }
+
+    private static func hostRouterChecks() -> [CheckResult] {
+        var results: [CheckResult] = []
+
+        // 최전면 앱을 따라가고, **고른 호스트만** 조회한다.
+        do {
+            let ghostty = StubHostAdapter(name: "ghostty", paneID: "term-A", path: "/work/a")
+            let cmux = StubHostAdapter(name: "cmux", paneID: "panel-B", path: "/work/b", source: .cmuxFocusedCWD)
+            let frontmost = StubFrontmostApp("com.mitchellh.ghostty")
+            let router = makeRouter(ghostty: ghostty, cmux: cmux, frontmost: frontmost)
+
+            let first = try router.snapshot()
+            frontmost.bundleIdentifier = "com.cmuxterm.app"
+            let second = try router.snapshot()
+
+            results.append(
+                check(
+                    "라우터: 최전면 호스트를 따르고 고른 호스트만 조회한다",
+                    router.currentHostName == "cmux"
+                        && first.target?.terminalID == "term-A"
+                        && second.target?.terminalID == "panel-B"
+                        && ghostty.queryCount == 1
+                        && cmux.queryCount == 1,
+                    "ghostty=\(ghostty.queryCount)회 cmux=\(cmux.queryCount)회 chosen=\(router.currentHostName)"
+                )
+            )
+        } catch {
+            results.append(check("라우터: 최전면 호스트를 따르고 고른 호스트만 조회한다", false, "\(error)"))
+        }
+
+        // 둘 다 뒤에 있으면 **마지막 호스트를 유지**한다.
+        do {
+            let ghostty = StubHostAdapter(name: "ghostty", paneID: "term-A", path: "/work/a")
+            let cmux = StubHostAdapter(name: "cmux", paneID: "panel-B", path: "/work/b", source: .cmuxFocusedCWD)
+            let frontmost = StubFrontmostApp("com.cmuxterm.app")
+            let router = makeRouter(ghostty: ghostty, cmux: cmux, frontmost: frontmost)
+
+            _ = try router.snapshot()
+            frontmost.bundleIdentifier = "com.example.other"   // 둘 다 최전면이 아니다
+            _ = try router.snapshot()
+
+            results.append(
+                check(
+                    "라우터: 둘 다 최전면이 아니면 마지막 호스트를 유지한다",
+                    router.currentHostName == "cmux" && cmux.queryCount == 2 && ghostty.queryCount == 0,
+                    "chosen=\(router.currentHostName) cmux=\(cmux.queryCount)회 ghostty=\(ghostty.queryCount)회"
+                )
+            )
+        } catch {
+            results.append(check("라우터: 둘 다 최전면이 아니면 마지막 호스트를 유지한다", false, "\(error)"))
+        }
+
+        // 판정할 수 없으면(nil) "최전면 아님"으로 단정하지 않고 기본·마지막 규칙으로 내려간다.
+        do {
+            let ghostty = StubHostAdapter(name: "ghostty", paneID: "term-A", path: "/work/a")
+            let cmux = StubHostAdapter(name: "cmux", paneID: "panel-B", path: "/work/b", source: .cmuxFocusedCWD)
+            let frontmost = StubFrontmostApp(nil)
+            let router = makeRouter(ghostty: ghostty, cmux: cmux, frontmost: frontmost)
+
+            let initial = router.currentHostName
+            _ = try router.snapshot()
+            frontmost.bundleIdentifier = "com.cmuxterm.app"
+            _ = try router.snapshot()
+            frontmost.bundleIdentifier = nil
+            _ = try router.snapshot()
+
+            results.append(
+                check(
+                    "라우터: 최전면을 판정할 수 없으면 기본 호스트로 시작하고 이후에는 마지막을 유지한다",
+                    initial == "ghostty" && router.currentHostName == "cmux",
+                    "initial=\(initial) after=\(router.currentHostName)"
+                )
+            )
+        } catch {
+            results.append(check("라우터: 최전면을 판정할 수 없으면 기본 호스트로 시작하고 이후에는 마지막을 유지한다", false, "\(error)"))
+        }
+
+        // 고른 호스트의 실패를 숨기지 않는다 — 조용히 다른 호스트로 갈아타지 않는다.
+        do {
+            let ghostty = StubHostAdapter(name: "ghostty", paneID: "term-A", path: "/work/a")
+            let cmux = StubHostAdapter(
+                name: "cmux", paneID: "panel-B", path: "/work/b", source: .cmuxFocusedCWD, failure: .notRunning
+            )
+            let router = makeRouter(ghostty: ghostty, cmux: cmux, frontmost: StubFrontmostApp("com.cmuxterm.app"))
+            let probe = GhosttyProbe(adapter: router, validator: StubValidator(directories: ["/work/a", "/work/b"]))
+            probe.refresh()
+            let failure = probe.store.lastFailure ?? ""
+
+            results.append(
+                check(
+                    "라우터: 고른 호스트의 실패를 숨기지 않고 다른 호스트로 갈아타지 않는다",
+                    probe.store.connection == .unavailable
+                        && ghostty.queryCount == 0
+                        && failure.contains("cmux")
+                        && !failure.contains("Ghostty"),
+                    "connection=\(probe.store.connection.rawValue) ghostty조회=\(ghostty.queryCount)회 failure=\(failure)"
+                )
+            )
+        }
+
+        // 호스트가 바뀌면 **신원과 경로 출처가 함께** 바뀐다.
+        do {
+            let ghostty = StubHostAdapter(name: "ghostty", paneID: "term-A", path: "/work/a")
+            let cmux = StubHostAdapter(name: "cmux", paneID: "panel-B", path: "/work/b", source: .cmuxFocusedCWD)
+            let frontmost = StubFrontmostApp("com.mitchellh.ghostty")
+            let router = makeRouter(ghostty: ghostty, cmux: cmux, frontmost: frontmost)
+            let (adapter, store, resolver, validator) = makeHostStore(router, directories: ["/work/a", "/work/b"])
+
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let ghosttySource = store.current?.cwdSource
+            let ghosttyAdapter = store.current?.identity.adapterID
+            let ghosttyPath = store.current?.reportedCWD
+
+            frontmost.bundleIdentifier = "com.cmuxterm.app"
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+
+            results.append(
+                check(
+                    "라우터: 호스트가 바뀌면 신원과 경로 출처가 함께 바뀐다",
+                    ghosttySource == .ghosttyWorkingDirectory && ghosttyAdapter == "ghostty" && ghosttyPath == "/work/a"
+                        && store.current?.cwdSource == .cmuxFocusedCWD
+                        && store.current?.identity.adapterID == "cmux"
+                        && store.current?.identity.paneID == "panel-B"
+                        && store.current?.reportedCWD == "/work/b"
+                        && store.previous?.reportedCWD == "/work/a",
+                    "\(ghosttyAdapter ?? "-")/\(ghosttySource?.rawValue ?? "-") → \(store.current?.identity.adapterID ?? "-")/\(store.current?.cwdSource?.rawValue ?? "-")"
+                )
+            )
+        } catch {
+            results.append(check("라우터: 호스트가 바뀌면 신원과 경로 출처가 함께 바뀐다", false, "\(error)"))
         }
 
         return results

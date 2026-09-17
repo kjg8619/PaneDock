@@ -13,7 +13,7 @@ import Foundation
 public struct WorkspaceFrontmostAppChecker: FrontmostAppChecking {
     public init() {}
 
-    public func isFrontmost(_ bundleIdentifier: String) -> Bool? {
-        NSWorkspace.shared.frontmostApplication.map { $0.bundleIdentifier == bundleIdentifier }
+    public func frontmostBundleIdentifier() -> String? {
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier
     }
 }

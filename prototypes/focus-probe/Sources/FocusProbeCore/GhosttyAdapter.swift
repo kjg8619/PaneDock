@@ -59,6 +59,8 @@ public struct OsaScriptRunner: AppleScriptRunning {
 ///
 /// 전송 수단이 달라도(Ghostty=AppleScript, cmux=소켓 CLI) 같은 스냅샷·반영 코드를 쓴다.
 public protocol TerminalHostMapping: Sendable {
+    /// 레코드를 표시 묶음으로 옮길 때 쓰는 변환기(신원·경로 출처를 정한다).
+    var factory: WorkInfoFactory { get }
     /// 스냅샷에서 포커스 대상 레코드. 대상이 없으면 nil.
     func focusedRecord(in snapshot: TerminalHostSnapshot) -> PaneRecord?
     /// 모든 터미널 레코드. 비활성 pane 관측(시나리오 C)에 쓴다.
@@ -73,7 +75,6 @@ public protocol TerminalHostAdapter: TerminalHostMapping {
     var appName: String { get }
     /// AppleScript 사용에 필요한 조건 문구. 요구사항이 없으면 nil.
     var appleScriptRequirement: String? { get }
-    var factory: WorkInfoFactory { get }
     /// 지원하지 않는 버전이면 사유, 지원하거나 판단할 수 없으면 nil.
     func unsupportedVersionReason(_ version: String?) -> String?
     func snapshot() throws -> TerminalHostSnapshot
@@ -264,6 +265,10 @@ public enum TerminalHostSnapshotApplier {
         resolver: FocusResolver,
         validator: PathValidating
     ) -> Result {
+        // 표시 묶음은 **관측을 만든 Adapter의 factory**로 변환한다. 라우터가 호스트를 바꾸면
+        // 신원과 경로 출처도 함께 바뀐다(대상·사유 판정 전에 맞춘다).
+        store.useFactory(adapter.factory)
+
         guard let target = snapshot.target, let targetRecord = adapter.focusedRecord(in: snapshot) else {
             // 사유 문구는 Adapter가 정한다. "대상 없음"과 "터미널이 아닌 패널"을 구분한다.
             store.noteFailure(adapter.noTargetReason(in: snapshot))
@@ -316,6 +321,8 @@ public enum TerminalHostSnapshotApplier {
 /// **하지 않는 것**: 창/탭/터미널 생성, 입력 전송, 포커스 변경, 화면 내용 읽기.
 public struct GhosttyAdapter: TerminalHostAdapter {
     public static let adapterID = "ghostty"
+    /// Ghostty 앱의 번들 식별자. 라우터가 최전면 판정에 쓴다(설치본 Info.plist에서 확인).
+    public static let bundleIdentifier = "com.mitchellh.ghostty"
     /// AppleScript 지원 도입 버전(공식 문서). 이보다 낮으면 `incompatible`로 표시한다.
     public static let minimumVersion = "1.3.0"
 

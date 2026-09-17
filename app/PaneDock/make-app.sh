@@ -57,5 +57,8 @@ else
 fi
 
 echo "생성됨: $APP"
-echo "실행:    open \"$APP\"        # 실제 Ghostty 연결"
-echo "        open \"$APP\" --args --fake steady   # 가짜 데이터 모드"
+echo "실행:    open \"$APP\"                              # 자동(최전면 앱을 따라간다)"
+echo "        open \"$APP\" --args --adapter cmux        # cmux만"
+echo "        open \"$APP\" --args --adapter ghostty     # Ghostty만"
+echo "        open \"$APP\" --args --fake steady         # 가짜 데이터 모드"
+echo "종료:    메뉴 막대 PaneDock > PaneDock 종료  (또는 ⌘Q)"

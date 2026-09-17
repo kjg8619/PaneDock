@@ -79,7 +79,7 @@ final class DockModel: ObservableObject {
     /// 호출 중에는 이 값으로 고정해, **우리 자신의 활성화를 작업 위치 이동으로 해석하지 않는다.**
     private var frozenHostFrontmost: Bool?
 
-    init(adapter: GhosttyAdapter, isFake: Bool, stateLogPath: String? = nil) {
+    init(adapter: TerminalHostAdapter, isFake: Bool, stateLogPath: String? = nil) {
         self.probe = GhosttyProbe(adapter: adapter)
         self.isFake = isFake
         self.stateLog = stateLogPath.map(StateLog.init(path:))

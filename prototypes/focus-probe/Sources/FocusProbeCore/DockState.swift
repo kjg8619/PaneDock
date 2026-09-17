@@ -61,6 +61,8 @@ public struct DockState: Equatable, Sendable {
     /// 직전에 표시하던 위치. "이전 위치"로만 쓴다.
     public var previousPath: String?
     public var paneID: String?
+    /// 지금 따라가고 있는 터미널 소스의 앱 식별자(`ghostty` / `cmux`). 확인 전이면 nil.
+    public var hostAppID: String?
     public var hostFrontmost: Bool?
     public var observedAt: Date?
     /// 오류·안내 사유. 사용자에게 그대로 보여줄 수 있는 문장.
@@ -137,6 +139,7 @@ public enum DockStateBuilder {
             fullPath: path,
             previousPath: previous?.reportedCWD,
             paneID: active?.identity.paneID,
+            hostAppID: active?.identity.hostAppID,
             hostFrontmost: active?.hostFrontmost,
             observedAt: active?.observedAt,
             detail: detail,
