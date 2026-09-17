@@ -131,7 +131,7 @@ struct DockView: View {
             actionCluster
         }
         .padding(.horizontal, 14)
-        .frame(height: DockBarLayout.barHeight)
+        .frame(height: model.effectiveAppearance.size.barHeight)
         // 빈 영역에서만 창을 끌 수 있다. 버튼 위에서는 클릭이 그대로 동작한다.
         .background(WindowDragHandle())
     }
@@ -197,6 +197,8 @@ struct DockView: View {
                     image: itemIconImage(for: entry.item),
                     label: entry.item.name,
                     item: .item(entry.index),
+                    // 아이콘 중심 모드는 **등록 항목의 라벨만** 줄인다. 툴팁·접근성 이름은 남긴다.
+                    showsLabel: model.effectiveAppearance.labelMode.showsItemLabels,
                     help: itemHelp(for: entry.item),
                     action: { model.performItem(at: entry.index, source: .mouse) }
                 )
@@ -255,6 +257,7 @@ struct DockView: View {
         label: String,
         item: DockModel.FocusItem,
         enabled: Bool = true,
+        showsLabel: Bool = true,
         help: String,
         action: @escaping () -> Void
     ) -> some View {
@@ -265,10 +268,12 @@ struct DockView: View {
                 } else {
                     Image(systemName: icon).font(.system(size: 11, weight: .medium))
                 }
-                Text(label).font(.caption).lineLimit(1)
+                if showsLabel {
+                    Text(label).font(.caption).lineLimit(1)
+                }
             }
             .padding(.horizontal, 9)
-            .padding(.vertical, 7)
+            .padding(.vertical, model.effectiveAppearance.size.chipVerticalPadding)
             // 칩은 **압축되지 않게** 고정한다. 압축되면 라벨이 사라져 아이콘만 남는다.
             // 넘치는 링크는 인라인 수를 줄이고 "+N"으로 알린다.
             .fixedSize(horizontal: true, vertical: false)

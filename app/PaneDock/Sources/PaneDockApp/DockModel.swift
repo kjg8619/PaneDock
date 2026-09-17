@@ -84,6 +84,48 @@ final class DockModel: ObservableObject {
     /// **저장/취소 전에는 실제 구성에 반영되지 않는다.** 편집 범위는 열 때 정해지고,
     /// 터미널 포커스가 바뀌어도 자동으로 바뀌지 않는다.
     @Published private(set) var draft: ProjectCatalogDraft?
+    /// 저장된 Dock 외형.
+    @Published private(set) var appearance: DockAppearance = .default
+    /// 편집창에서 **미리 보는** 외형. 저장 전에는 디스크에 쓰지 않는다.
+    @Published private(set) var previewAppearance: DockAppearance?
+
+    /// 화면이 실제로 쓸 외형(미리보기 우선).
+    var effectiveAppearance: DockAppearance { previewAppearance ?? appearance }
+
+    /// 저장된 외형을 반영한다(시작 시·저장 후).
+    func applyAppearance(_ appearance: DockAppearance) {
+        self.appearance = appearance
+        previewAppearance = nil
+        onLayoutChange?()
+    }
+
+    /// 편집창에서 외형을 **미리** 바꾼다. 디스크에는 쓰지 않는다.
+    func previewAppearanceChange(_ appearance: DockAppearance) {
+        previewAppearance = appearance
+        stateLog?.appendEvent("appearance=preview size=\(appearance.size.rawValue) label=\(appearance.labelMode.rawValue) color=\(appearance.colorMode.rawValue)")
+        onLayoutChange?()
+    }
+
+    /// 외형 저장 요청. AppDelegate가 설정 파일에 쓰고 성공 여부를 돌려준다.
+    var onSaveAppearance: ((DockAppearance) -> (message: String, succeeded: Bool))?
+
+    /// 미리보기를 버리고 저장된 외형으로 돌아간다(취소·창 닫기).
+    func discardAppearancePreview() {
+        guard previewAppearance != nil else { return }
+        previewAppearance = nil
+        stateLog?.appendEvent("appearance=preview result=discarded")
+        onLayoutChange?()
+    }
+
+    /// 미리보기 외형을 저장한다.
+    func saveAppearancePreview() {
+        guard let previewAppearance else { return }
+        let result = onSaveAppearance?(previewAppearance) ?? (message: "저장할 수 없습니다: 설정을 쓸 수 없습니다", succeeded: false)
+        editorNotice = result.message
+        stateLog?.appendEvent("appearance=save result=\(result.succeeded ? "ok" : "failed")")
+        if result.succeeded { self.previewAppearance = nil }
+    }
+
     /// 편집창 안내(저장 결과·충돌·검증 실패). 없으면 nil.
     @Published private(set) var editorNotice: String?
 
@@ -376,6 +418,8 @@ final class DockModel: ObservableObject {
     func beginEditing(scope: ItemScope? = nil) {
         // 편집을 시작할 때 **상세 보기는 접는다**(편집창과 겹쳐 화면이 복잡해지지 않게).
         hideDetails()
+        // 편집창은 **지금 저장된 외형**에서 시작한다(미리보기는 열 때 초기화).
+        previewAppearance = nil
         let chosen = scope ?? (resolution.hasProject ? ItemScope.project(id: resolution.projectID) : .common)
         // 없는 프로젝트를 가리키면 공통으로 떨어진다.
         let safe = ProjectCatalogDraft(catalog: catalog, scope: chosen).isScopeAvailable(chosen) ? chosen : .common
@@ -388,6 +432,8 @@ final class DockModel: ObservableObject {
     func cancelEditing() {
         draft = nil
         editorNotice = nil
+        // 미리보기 외형도 버린다(저장한 외형으로 돌아간다).
+        discardAppearancePreview()
         stateLog?.appendEvent("editor=close result=cancelled")
         onCloseEditor?()
     }
@@ -588,6 +634,12 @@ final class DockModel: ObservableObject {
             newProjectName = ""
             newProjectRoot = ""
         }
+    }
+
+    /// 편집창의 **저장**: 모양 미리보기와 항목 초안을 함께 저장한다.
+    func saveAll() {
+        if previewAppearance != nil { saveAppearancePreview() }
+        if draft != nil { saveDraft() }
     }
 
     /// 초안을 저장한다. 파일 쓰기는 AppDelegate가 하고, 여기서는 결과만 받는다.

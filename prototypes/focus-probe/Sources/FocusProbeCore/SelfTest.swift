@@ -602,6 +602,7 @@ public enum SelfTest {
         results.append(contentsOf: dockBarChecks())
         results.append(contentsOf: itemEditorChecks())
         results.append(contentsOf: editorFlowChecks())
+        results.append(contentsOf: appearanceChecks())
         return results
     }
 
@@ -3132,6 +3133,81 @@ public enum SelfTest {
                 )
             )
             try? FileManager.default.removeItem(at: directory)
+        }
+
+        return results
+    }
+
+    // MARK: - 외형 설정 (V16)
+
+    private static func appearanceChecks() -> [CheckResult] {
+        var results: [CheckResult] = []
+
+        // 1) 이전 설정 파일(외형 필드 없음)은 **기본 외형**으로 동작한다
+        do {
+            let url = temporarySettingsURL()
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let legacy = #"{"schemaVersion":1,"hotKey":"controlOptionCommandD","hotKeyEnabled":true,"windowOrigin":{"x":11,"y":22}}"#
+            try? legacy.data(using: .utf8)?.write(to: url)
+            let store = SettingsStore(url: url)
+            let settings = store.settings
+            results.append(
+                check(
+                    "V16: 외형 필드가 없던 설정은 기본 외형으로 실행된다",
+                    settings.appearance == .default
+                        && settings.appearance.size == .regular
+                        && settings.appearance.labelMode == .nameAndIcon
+                        && settings.appearance.colorMode == .system
+                        && settings.windowOrigin?.x == 11 && settings.windowOrigin?.y == 22,
+                    "외형=\(settings.appearance.size.rawValue)/\(settings.appearance.labelMode.rawValue)/\(settings.appearance.colorMode.rawValue) 창위치보존=\(settings.windowOrigin?.x ?? -1)"
+                )
+            )
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 2) 외형을 저장해도 **창 위치·단축키를 덮어쓰지 않는다**
+        do {
+            let url = temporarySettingsURL()
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let store = SettingsStore(url: url)
+            store.update {
+                $0.windowOrigin = StoredOrigin(x: 7, y: 9)
+                $0.hotKey = .controlOptionCommandD
+                $0.appearance.size = .large
+                $0.appearance.labelMode = .iconOnly
+                $0.appearance.colorMode = .dark
+            }
+            let reopened = SettingsStore(url: url).settings
+            results.append(
+                check(
+                    "V16: 외형 저장은 다른 설정(창 위치·단축키)을 덮어쓰지 않는다",
+                    reopened.appearance.size == .large
+                        && reopened.appearance.labelMode == .iconOnly
+                        && reopened.appearance.colorMode == .dark
+                        && reopened.windowOrigin?.x == 7 && reopened.windowOrigin?.y == 9
+                        && reopened.hotKeyEnabled,
+                    "외형=\(reopened.appearance.size.rawValue)/\(reopened.appearance.labelMode.rawValue) 창위치=\(reopened.windowOrigin?.x ?? -1) 단축키=\(reopened.hotKeyEnabled)"
+                )
+            )
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 3) 세 크기·두 라벨 모드가 실제로 구분되고, 아이콘 중심은 라벨만 줄인다
+        do {
+            let heights = DockSizeSetting.allCases.map(\.barHeight)
+            let distinct = Set(heights).count == DockSizeSetting.allCases.count
+            let ascending = heights == heights.sorted()
+            let paddingAscending = DockSizeSetting.allCases.map(\.chipVerticalPadding) == DockSizeSetting.allCases.map(\.chipVerticalPadding).sorted()
+            results.append(
+                check(
+                    "V16: 세 크기가 서로 다르고, 아이콘 중심은 라벨만 줄인다",
+                    distinct && ascending && paddingAscending
+                        && DockLabelMode.iconOnly.showsItemLabels == false
+                        && DockLabelMode.nameAndIcon.showsItemLabels
+                        && DockAppearance.default.size == .regular,
+                    "높이=\(heights) 라벨모드=\(DockLabelMode.iconOnly.showsItemLabels)/\(DockLabelMode.nameAndIcon.showsItemLabels)"
+                )
+            )
         }
 
         return results

@@ -54,8 +54,8 @@ public enum DockBarLayout {
         return max(minimumBarWidth, min(maximumWidth(visibleFrameWidth: availableWidth), needed))
     }
 
-    /// 창 전체 높이(바 + 상세 보기).
-    public static func windowHeight(detailsVisible: Bool) -> CGFloat {
+    /// 창 전체 높이(바 + 상세 보기). 바 높이는 외형 설정에서 온다.
+    public static func windowHeight(detailsVisible: Bool, barHeight: CGFloat = barHeight) -> CGFloat {
         barHeight + (detailsVisible ? detailsHeight : 0)
     }
 }

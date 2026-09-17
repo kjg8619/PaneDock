@@ -52,6 +52,13 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         model.onLayoutChange = { [weak self] in self?.applyPanelSize() }
         // Dock 편집: 별도 창을 띄우고, 저장은 **사용자가 저장을 눌렀을 때만** 파일에 쓴다.
         model.onOpenEditor = { [weak self] in self?.openEditor() }
+        // 외형 저장: 설정 파일에만 쓴다(projects.json은 건드리지 않는다).
+        model.onSaveAppearance = { [weak self] appearance in
+            guard let self else { return (message: "저장할 수 없습니다", succeeded: false) }
+            self.settings?.update { $0.appearance = appearance }
+            self.model?.applyAppearance(appearance)
+            return (message: "모양을 저장했습니다.", succeeded: true)
+        }
         model.onCloseEditor = { [weak self] in self?.closeEditor() }
         model.onSaveDraft = { [weak self] catalog in
             guard let self else { return (message: "저장할 수 없습니다", succeeded: false) }
@@ -70,6 +77,8 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         model.setSettingsNotice(startupNotice.isEmpty ? nil : startupNotice)
         self.model = model
 
+        // 저장된 외형을 반영하고 시작한다(없던 설정이면 기본 외형).
+        model.applyAppearance(store.settings.appearance)
         let panel = makePanel(model: model)
         panel.delegate = self
         self.panel = panel
@@ -341,8 +350,11 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         guard let panel, let model else { return }
         let size = ScreenGeometry.dockBarSize(
             linkCount: model.resolution.allItems.count,
-            detailsVisible: model.isDetailsVisible
+            detailsVisible: model.isDetailsVisible,
+            barHeight: model.effectiveAppearance.size.barHeight
         )
+        // 색상 모드는 패널 외형으로 적용한다(SwiftUI 선호 색상보다 확실하다).
+        panel.appearance = Self.panelAppearance(for: model.effectiveAppearance.colorMode)
         // 테두리 없는 패널이라 프레임 크기 == 내용 크기다. 그래도 읽는 값은 프레임 하나로 통일한다.
         let current = panel.frame.size
         // 창 크기를 바꾼 이유와 결과를 남긴다(위치가 밀리는 문제를 눈이 아니라 로그로 본다).
@@ -393,9 +405,20 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
+    /// 색상 모드 → 패널 외형.
+    static func panelAppearance(for mode: DockColorMode) -> NSAppearance? {
+        switch mode {
+        case .system: return nil
+        case .light: return NSAppearance(named: .aqua)
+        case .dark: return NSAppearance(named: .darkAqua)
+        }
+    }
+
     /// 편집창을 닫는다(저장 성공·취소). **추적 대상·잠금 상태는 건드리지 않는다.**
     @MainActor
     private func closeEditor() {
+        // 닫을 때 미리보기 외형을 버린다(저장하지 않은 모양은 남지 않는다).
+        model?.discardAppearancePreview()
         editorWindow?.close()
     }
 

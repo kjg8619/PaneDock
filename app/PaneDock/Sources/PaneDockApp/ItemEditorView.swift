@@ -36,6 +36,8 @@ struct ItemEditorView: View {
                     .font(.callout).foregroundStyle(.secondary)
             }
             Divider()
+            appearanceSection
+            Divider()
             footer
         }
         .padding(16)
@@ -251,6 +253,77 @@ struct ItemEditorView: View {
         }
     }
 
+    // MARK: - 모양 (항목 편집과 구분되는 영역)
+
+    private var appearanceSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "paintbrush")
+                Text("모양").font(.caption).bold()
+                Text("바꾸면 Dock에 바로 보입니다. 저장을 눌러야 유지됩니다.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
+            HStack(spacing: 16) {
+                appearancePicker(
+                    "크기",
+                    selection: appearanceBinding(\.size, set: { value in
+                        var next = model.effectiveAppearance
+                        next.size = value
+                        model.previewAppearanceChange(next)
+                    }),
+                    options: DockSizeSetting.allCases,
+                    titleFor: { $0.label }
+                )
+                appearancePicker(
+                    "항목 표시",
+                    selection: appearanceBinding(\.labelMode, set: { value in
+                        var next = model.effectiveAppearance
+                        next.labelMode = value
+                        model.previewAppearanceChange(next)
+                    }),
+                    options: DockLabelMode.allCases,
+                    titleFor: { $0.label }
+                )
+                appearancePicker(
+                    "색상 모드",
+                    selection: appearanceBinding(\.colorMode, set: { value in
+                        var next = model.effectiveAppearance
+                        next.colorMode = value
+                        model.previewAppearanceChange(next)
+                    }),
+                    options: DockColorMode.allCases,
+                    titleFor: { $0.label }
+                )
+            }
+        }
+    }
+
+    private func appearanceBinding<T: Hashable>(
+        _ get: @escaping (DockAppearance) -> T,
+        set: @escaping (T) -> Void
+    ) -> Binding<T> {
+        Binding(get: { get(model.effectiveAppearance) }, set: set)
+    }
+
+    private func appearancePicker<T: Hashable>(
+        _ title: String,
+        selection: Binding<T>,
+        options: [T],
+        titleFor: @escaping (T) -> String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption2).foregroundStyle(.secondary)
+            Picker(title, selection: selection) {
+                ForEach(options, id: \.self) { option in
+                    Text(titleFor(option)).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 210)
+            .labelsHidden()
+        }
+    }
+
     // MARK: - 푸터
 
     private var footer: some View {
@@ -267,7 +340,7 @@ struct ItemEditorView: View {
                     .font(.caption2).foregroundStyle(.orange)
             }
             Spacer()
-            Button("저장") { model.saveDraft() }
+            Button("저장") { model.saveAll() }
                 .buttonStyle(.borderedProminent)
                 .disabled(model.draft == nil)
                 .help("편집한 구성을 디스크에 기록합니다")

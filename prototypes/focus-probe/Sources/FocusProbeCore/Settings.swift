@@ -36,20 +36,38 @@ public struct StoredOrigin: Codable, Equatable, Sendable {
 /// **저장하지 않는 것:** 현재 pane ID, 실시간 경로, 잠금 상태.
 /// 이것들은 재시작하면 새로 조회한 유효한 작업 정보로 다시 정해진다.
 public struct PaneDockSettings: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
+
+    /// 모든 필드를 **없어도 기본값으로** 읽는다.
+    ///
+    /// 이전 설정 파일에 새 필드(예: `appearance`)가 없어도 **기존 모습으로 그대로 실행**돼야 한다.
+    /// 합성 디코더를 쓰면 필드가 하나 늘 때마다 예전 파일이 "손상"으로 보인다(V16에서 실제로 발생).
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = ((try? container.decodeIfPresent(Int.self, forKey: .schemaVersion)) ?? nil) ?? 1
+        appearance = ((try? container.decodeIfPresent(DockAppearance.self, forKey: .appearance)) ?? nil) ?? .default
+        windowOrigin = (try? container.decodeIfPresent(StoredOrigin.self, forKey: .windowOrigin)) ?? nil
+        hotKey = ((try? container.decodeIfPresent(HotKeyChoice.self, forKey: .hotKey)) ?? nil) ?? .controlOptionCommandD
+        hotKeyEnabled = ((try? container.decodeIfPresent(Bool.self, forKey: .hotKeyEnabled)) ?? nil) ?? true
+    }
+
 
     public var schemaVersion: Int
     public var windowOrigin: StoredOrigin?
     public var hotKey: HotKeyChoice
     public var hotKeyEnabled: Bool
+    /// Dock 외형(크기·항목 표시·색상 모드). **없던 파일에서는 기본 외형**으로 동작한다.
+    public var appearance: DockAppearance
 
     public init(
         schemaVersion: Int = PaneDockSettings.currentSchemaVersion,
+        appearance: DockAppearance = .default,
         windowOrigin: StoredOrigin? = nil,
         hotKey: HotKeyChoice = .controlOptionCommandD,
         hotKeyEnabled: Bool = true
     ) {
         self.schemaVersion = schemaVersion
+        self.appearance = appearance
         self.windowOrigin = windowOrigin
         self.hotKey = hotKey
         self.hotKeyEnabled = hotKeyEnabled
