@@ -117,13 +117,15 @@ final class DockModel: ObservableObject {
         onLayoutChange?()
     }
 
-    /// 미리보기 외형을 저장한다.
-    func saveAppearancePreview() {
-        guard let previewAppearance else { return }
+    /// 미리보기 외형을 저장한다. **성공 여부를 돌려준다.**
+    @discardableResult
+    func saveAppearancePreview() -> Bool {
+        guard let previewAppearance else { return true }
         let result = onSaveAppearance?(previewAppearance) ?? (message: "저장할 수 없습니다: 설정을 쓸 수 없습니다", succeeded: false)
         editorNotice = result.message
         stateLog?.appendEvent("appearance=save result=\(result.succeeded ? "ok" : "failed")")
         if result.succeeded { self.previewAppearance = nil }
+        return result.succeeded
     }
 
     /// 편집창 안내(저장 결과·충돌·검증 실패). 없으면 nil.
@@ -638,29 +640,46 @@ final class DockModel: ObservableObject {
 
     /// 편집창의 **저장**: 모양 미리보기와 항목 초안을 함께 저장한다.
     func saveAll() {
-        if previewAppearance != nil { saveAppearancePreview() }
-        if draft != nil { saveDraft() }
+        var saved: [String] = []
+        var failed: [String] = []
+        if previewAppearance != nil {
+            if saveAppearancePreview() { saved.append("모양") } else { failed.append("모양") }
+        }
+        // 항목은 **창을 닫지 않고** 저장한다(모양이 실패했는데 창이 닫히면 실패가 가려진다).
+        if draft != nil {
+            if saveDraft(closeOnSuccess: false) { saved.append("항목") } else { failed.append("항목") }
+        }
+        guard failed.isEmpty else {
+            // 하나만 저장된 상태를 "전체 성공"으로 보여주지 않는다.
+            editorNotice = "일부만 저장했습니다 — 저장됨: \(saved.isEmpty ? "없음" : saved.joined(separator: ", ")) / 실패: \(failed.joined(separator: ", "))"
+            stateLog?.appendEvent("editor=save result=partial saved=\(saved.count) failed=\(failed.count)")
+            return
+        }
+        // 전부 저장됐을 때만 창을 닫는다.
+        if !saved.isEmpty { draft = nil; onCloseEditor?() }
     }
 
     /// 초안을 저장한다. 파일 쓰기는 AppDelegate가 하고, 여기서는 결과만 받는다.
     ///
     /// 성공하면 AppDelegate가 **기존 재로딩 경로**로 즉시 반영한다(선택 취소 포함).
-    func saveDraft() {
-        guard let draft else { return }
+    @discardableResult
+    func saveDraft(closeOnSuccess: Bool = true) -> Bool {
+        guard let draft else { return false }
         let problems = draft.fatalProblems()
         guard problems.isEmpty else {
             editorNotice = "저장할 수 없습니다:\n" + problems.prefix(3).joined(separator: "\n")
             stateLog?.appendEvent("editor=save result=refused problems=\(problems.count)")
-            return
+            return false
         }
         let result = onSaveDraft?(draft.catalog) ?? (message: "저장할 수 없습니다: 설정 파일을 사용할 수 없습니다", succeeded: false)
         editorNotice = result.message
         stateLog?.appendEvent("editor=save result=\(result.succeeded ? "ok" : "failed")")
-        // 저장에 성공하면 편집을 끝내고 **창도 닫는다**(구성은 재로딩으로 이미 반영됐다).
+        // 저장에 성공하면 편집을 끝낸다(구성은 재로딩으로 이미 반영됐다). 창은 요청에 따라 닫는다.
         if result.succeeded {
             self.draft = nil
-            onCloseEditor?()
+            if closeOnSuccess { onCloseEditor?() }
         }
+        return result.succeeded
     }
 
     /// 마우스 hover 표시를 갱신한다. 벗어나면 그 항목일 때만 지운다.

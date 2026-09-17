@@ -54,8 +54,16 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         model.onOpenEditor = { [weak self] in self?.openEditor() }
         // 외형 저장: 설정 파일에만 쓴다(projects.json은 건드리지 않는다).
         model.onSaveAppearance = { [weak self] appearance in
-            guard let self else { return (message: "저장할 수 없습니다", succeeded: false) }
-            self.settings?.update { $0.appearance = appearance }
+            guard let self, let settings = self.settings else {
+                return (message: "저장할 수 없습니다: 설정 저장소를 열지 못했습니다", succeeded: false)
+            }
+            if let reason = settings.writeBlockedReason {
+                return (message: "모양을 저장하지 않았습니다: \(reason)", succeeded: false)
+            }
+            // 파일에 실제로 써진 경우에만 성공으로 보고한다(쓰기 실패를 "저장했습니다"로 보이지 않게).
+            guard settings.update({ $0.appearance = appearance }) else {
+                return (message: "모양을 저장하지 못했습니다: 설정 파일에 쓰지 못했습니다", succeeded: false)
+            }
             self.model?.applyAppearance(appearance)
             return (message: "모양을 저장했습니다.", succeeded: true)
         }
@@ -220,8 +228,9 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let line = "PaneDock startup: mode=\(mode) adapter=\(options.hostSource.rawValue) settings=\(outcome) file=\(file) "
             + "catalog=\(catalog) "
             + "origin=(\(Int(frame.origin.x)),\(Int(frame.origin.y))) size=\(Int(frame.width))x\(Int(frame.height)) "
-            + "appearance=\(model?.effectiveAppearance.size.rawValue ?? "-")/\(model?.effectiveAppearance.labelMode.rawValue ?? "-") "
+            + "appearance=\(model?.effectiveAppearance.size.rawValue ?? "-")/\(model?.effectiveAppearance.labelMode.rawValue ?? "-")/\(model?.effectiveAppearance.colorMode.rawValue ?? "-") "
             + "panel=\(Int(panel?.frame.width ?? 0))x\(Int(panel?.frame.height ?? 0)) "
+            + "panelAppearance=\(panel?.appearance?.name.rawValue ?? "nil") "
             + "hotKey=\(hotKey) hotKeyStatus=\(hotKeyRegistration.message) notice=\(notice)\n"
             + "PaneDock menu: \(menuSummary())\n"
         FileHandle.standardError.write(Data(line.utf8))
@@ -327,6 +336,8 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
+        // 색상 모드는 **창을 만들 때도** 적용한다(레이아웃이 일어나야 적용되면 시작 화면이 시스템 색으로 남는다).
+        panel.appearance = Self.panelAppearance(for: model.effectiveAppearance.colorMode)
         // 최소 크기는 **가장 작은 외형**을 기준으로 한다(작게 모드가 클램프되지 않게).
         panel.minSize = NSSize(
             width: DockBarLayout.minimumBarWidth,
@@ -366,7 +377,8 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             "layout want=\(Int(size.width))x\(Int(size.height)) "
                 + "frame=\(Int(current.width))x\(Int(current.height)) "
                 + "origin=(\(Int(panel.frame.origin.x)),\(Int(panel.frame.origin.y))) "
-                + "details=\(model.isDetailsVisible)"
+                + "details=\(model.isDetailsVisible) "
+                + "panelAppearance=\(panel.appearance?.name.rawValue ?? "nil")"
         )
         guard abs(current.width - size.width) > 0.5 || abs(current.height - size.height) > 0.5 else {
             model.appendEvent("layout result=unchanged")
@@ -400,6 +412,8 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             )
             window.title = options.isFake ? "[FAKE] Dock 편집" : "Dock 편집"
             window.isReleasedWhenClosed = false
+            // 창의 닫기 버튼·Cmd+W로 닫아도 **취소와 같게** 처리한다(저장하지 않은 모양·초안이 남지 않게).
+            window.delegate = self
             window.contentView = NSHostingView(rootView: ItemEditorView(model: model))
             window.center()
             editorWindow = window
@@ -474,6 +488,13 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     func windowWillClose(_ notification: Notification) {
+        if let window = notification.object as? NSWindow, window === editorWindow {
+            // 저장하지 않은 초안·미리보기가 남아 있으면 취소로 정리한다(닫아도 저장되지 않는다).
+            if model?.draft != nil || model?.previewAppearance != nil {
+                model?.cancelEditing()
+            }
+            return
+        }
         endInvocation()
     }
 

@@ -114,6 +114,14 @@ public final class SettingsStore {
         return true
     }
 
+    /// 쓸 수 없을 때 **이유**. 쓸 수 있으면 nil. UI가 "왜 저장이 안 되는지"를 그대로 보여줄 수 있게 한다.
+    public var writeBlockedReason: String? {
+        if case .unsupportedVersion(let found) = outcome {
+            return "설정 파일이 더 새로운 버전(v\(found))이라 덮어쓰지 않습니다"
+        }
+        return nil
+    }
+
     public var isMemoryOnly: Bool { url == nil }
 
     public var fileURL: URL? { url }
@@ -171,23 +179,28 @@ public final class SettingsStore {
 
     // MARK: - 변경
 
-    public func update(_ mutate: (inout PaneDockSettings) -> Void) {
+    /// 값을 바꾸고 **파일에 쓴다.** 쓰기 결과를 돌려준다(실패를 성공으로 보고하지 않기 위해).
+    @discardableResult
+    public func update(_ mutate: (inout PaneDockSettings) -> Void) -> Bool {
         var next = settings
         mutate(&next)
         next.schemaVersion = PaneDockSettings.currentSchemaVersion
         settings = next
-        save()
+        return save()
     }
 
     public func resetWindowOrigin() {
         update { $0.windowOrigin = nil }
     }
 
-    public func save() {
-        guard canWrite, let url else { return }
+    /// 파일에 쓴다. **성공 여부를 돌려준다**(호출자가 "저장했습니다"를 잘못 띄우지 않게).
+    @discardableResult
+    public func save() -> Bool {
+        guard let url else { return true }   // 메모리 전용: 쓸 파일이 없다
+        guard canWrite else { return false } // 지원하지 않는 버전 파일은 덮어쓰지 않는다
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(settings) else { return }
+        guard let data = try? encoder.encode(settings) else { return false }
 
         do {
             try FileManager.default.createDirectory(
@@ -203,8 +216,10 @@ public final class SettingsStore {
             } else {
                 try FileManager.default.moveItem(at: temporary, to: url)
             }
+            return true
         } catch {
-            // 저장 실패는 치명적이지 않다. 다음 변경에서 다시 시도한다.
+            // 저장 실패는 치명적이지 않다. 다음 변경에서 다시 시도한다. 다만 **성공으로 보고하지는 않는다.**
+            return false
         }
     }
 }
