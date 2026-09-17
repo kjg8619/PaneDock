@@ -39,6 +39,11 @@ public final class ContextStore {
     private var cache: [String: CurrentWorkInfo] = [:]
     /// 지금 표시 중인 대상이 나온 Adapter. 출처가 바뀌면 같은 pane ID라도 다른 대상으로 본다.
     private var currentSourceID: String?
+    /// 지금 표시 중인 대상이 **포커스 확인(true)** 관측을 한 번이라도 받았는지.
+    ///
+    /// 판정 불가(nil)만 받은 대상은 "마지막으로 확인한 대상"이 아니라 **조회 후보**다.
+    /// 그 구분 없이 경로만으로 실행을 허용하면, 확인한 적 없는 경로를 현재 작업처럼 실행하게 된다(V14).
+    public private(set) var hasConfirmedCurrentTarget = false
     private let resolver: FocusResolver
     private let validator: PathValidating
     private var factory: WorkInfoFactory
@@ -103,6 +108,8 @@ public final class ContextStore {
             resolver.invalidateForSourceChange()
         }
         currentSourceID = sourceID
+        // 대상이 바뀌면 "확인된 적 있음"도 처음으로 되돌린다.
+        hasConfirmedCurrentTarget = false
         let generation = resolver.setTarget(record.paneID)
         current = factory.pendingWorkInfo(
             for: record,
@@ -138,6 +145,11 @@ public final class ContextStore {
             validator: validator,
             hostFrontmost: observation.hostFrontmost
         )
+        // 현재 대상이 **포커스 확인**을 받았으면 "확인된 대상"이 된다.
+        // 판정 불가(nil)만 받은 대상은 여기서 확인되지 않는다 — 조회 후보일 뿐이다.
+        if observation.hostFrontmost == true {
+            hasConfirmedCurrentTarget = true
+        }
         current = factory.currentWorkInfo(
             from: observation.record,
             generation: observation.generation,
@@ -175,6 +187,8 @@ public final class ContextStore {
         guard let existing = current else { return }
         previous = existing
         resolver.clearTarget()
+        // 대상이 사라졌으므로 "확인된 대상"도 아니다.
+        hasConfirmedCurrentTarget = false
         current = factory.unresolvedWorkInfo(generation: resolver.generation, connection: connection)
     }
 }

@@ -63,6 +63,12 @@ public struct DockState: Equatable, Sendable {
     public var paneID: String?
     /// 지금 따라가고 있는 터미널 소스의 앱 식별자(`ghostty` / `cmux`). 확인 전이면 nil.
     public var hostAppID: String?
+    /// 경로를 만든 Adapter(`ghostty` / `cmux`). 상세 보기에서만 쓴다.
+    public var adapterID: String?
+    /// 경로 출처(`ghostty:terminal.workingDirectory` 등). 상세 보기에서만 쓴다.
+    public var cwdSource: String?
+    /// 연결 상태. 상세 보기에서만 쓴다.
+    public var connectionStatus: ConnectionStatus?
     public var hostFrontmost: Bool?
     public var observedAt: Date?
     /// 오류·안내 사유. 사용자에게 그대로 보여줄 수 있는 문장.
@@ -92,7 +98,8 @@ public enum DockStateBuilder {
         connection: ConnectionStatus,
         failure: String?,
         lock: DockLock,
-        hostFrontmostOverride: Bool? = nil
+        hostFrontmostOverride: Bool? = nil,
+        hasConfirmedTarget: Bool = true
     ) -> DockState {
         var active = lock.info ?? current
         // 호출 중에는 "바깥 앱 최전면" 판정만 덮어쓴다.
@@ -117,13 +124,22 @@ public enum DockStateBuilder {
             display = .locked
             detail = nil
         } else if let active, active.pathStatus == .valid {
-            // 경로는 유효하다. 포커스가 확인됐으면 추적 중, 아니면 유지 중이다.
-            display = active.focusStatus == .tracked ? .tracked : .held
-            // 다만 **포커스를 확인하지 못한 것**과 "최전면이 아닌 것"은 다르다.
-            // 경로 유효성은 그대로 두고(오류로 만들지 않는다) 사유만 밝힌다.
-            detail = active.focusStatus == .unknown
-                ? "포커스 확인 불가 — 마지막으로 확인한 대상을 표시 중입니다"
-                : nil
+            if active.focusStatus == .unknown, !hasConfirmedTarget {
+                // 포커스를 확인하지 못했고, 이 대상이 확인된 적도 없다.
+                // 경로가 존재하는 것은 **조회 후보**라는 뜻이지 현재 작업이라는 뜻이 아니다.
+                // 그래서 실행을 허용하지 않는다(확인 중과 같은 취급).
+                display = .pending
+                detail = "포커스 확인 불가 — 아직 확인한 대상이 없어 조회 후보만 표시합니다"
+            } else {
+                // 포커스가 확인됐으면 추적 중, 아니면 유지 중이다.
+                display = active.focusStatus == .tracked ? .tracked : .held
+                // **포커스를 확인하지 못한 것**과 "최전면이 아닌 것"은 다르다.
+                // 경로 유효성은 그대로 두고(오류로 만들지 않는다) 사유만 밝힌다.
+                // "마지막으로 확인한 대상"이라고 말하려면 실제로 확인한 적이 있어야 한다.
+                detail = active.focusStatus == .unknown
+                    ? "포커스 확인 불가 — 마지막으로 확인한 대상을 표시 중입니다"
+                    : nil
+            }
         } else if active == nil || active?.pathStatus == .pending {
             display = .pending
             detail = failure
@@ -145,6 +161,9 @@ public enum DockStateBuilder {
             previousPath: previous?.reportedCWD,
             paneID: active?.identity.paneID,
             hostAppID: active?.identity.hostAppID,
+            adapterID: active?.identity.adapterID,
+            cwdSource: active?.cwdSource?.rawValue,
+            connectionStatus: active?.connectionStatus,
             hostFrontmost: active?.hostFrontmost,
             observedAt: active?.observedAt,
             detail: detail,

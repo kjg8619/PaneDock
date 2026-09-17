@@ -42,6 +42,8 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             stateLogPath: options.stateLogPath
         )
         model.onHide = { [weak self] in self?.hidePanel() }
+        // 상세 보기 토글·프로젝트 변경으로 크기가 달라지면 창을 다시 맞춘다.
+        model.onLayoutChange = { [weak self] in self?.applyPanelSize() }
         let catalogStore = makeCatalogStore()
         self.catalogStore = catalogStore
         applyCatalog(to: model, from: catalogStore, isReload: false)
@@ -58,6 +60,11 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let panel = makePanel(model: model)
         panel.delegate = self
         self.panel = panel
+
+        // 진단용: 상세 보기를 연 상태로 시작한다(창 크기도 함께 맞춘다).
+        if options.detailsAtLaunch {
+            model.showDetails()
+        }
 
         installStatusItem(model: model)
         installHotKey(model: model)
@@ -231,8 +238,12 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     // MARK: - 창
 
     private func makePanel(model: DockModel) -> NSPanel {
+        let size = ScreenGeometry.dockBarSize(
+            linkCount: model.project?.links.count ?? 0,
+            detailsVisible: model.isDetailsVisible
+        )
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 260),
+            contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.nonactivatingPanel, .titled, .closable, .utilityWindow, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -243,18 +254,40 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
-        // 배경 드래그를 끈다. 헤더의 전용 드래그 영역만 창을 옮긴다(버튼과 충돌하지 않는다).
+        panel.minSize = NSSize(
+            width: DockBarLayout.minimumBarWidth,
+            height: DockBarLayout.barHeight
+        )
+        // 배경 드래그를 끈다. 바의 전용 드래그 영역만 창을 옮긴다(버튼과 충돌하지 않는다).
         panel.isMovableByWindowBackground = false
         panel.contentView = NSHostingView(rootView: DockView(model: model))
 
-        let size = panel.frame.size
+        // 저장된 위치가 있으면 그대로 쓰고, 없으면 화면 하단이 기본이다.
         let saved = settings?.settings.windowOrigin
         let origin = ScreenGeometry.resolve(
             origin: saved.map { CGPoint(x: $0.x, y: $0.y) },
-            size: size
+            size: panel.frame.size
         )
         panel.setFrameOrigin(origin)
         return panel
+    }
+
+    /// 지금 내용에 맞춰 창 크기를 맞춘다.
+    ///
+    /// 좌하단 좌표를 유지하므로 **바는 제자리에 있고 상세 보기가 위로 펼쳐진다.**
+    /// 크기가 바뀌어 화면 밖으로 나가면 보이는 영역으로 보정한다(저장 위치는 건드리지 않는다).
+    private func applyPanelSize() {
+        guard let panel, let model else { return }
+        let size = ScreenGeometry.dockBarSize(
+            linkCount: model.project?.links.count ?? 0,
+            detailsVisible: model.isDetailsVisible
+        )
+        guard abs(panel.frame.width - size.width) > 0.5 || abs(panel.frame.height - size.height) > 0.5 else {
+            return
+        }
+        let origin = panel.frame.origin
+        panel.setFrame(NSRect(origin: origin, size: size), display: true)
+        panel.setFrameOrigin(ScreenGeometry.resolve(origin: origin, size: panel.frame.size))
     }
 
     /// 위치 저장. 드래그 중에는 매번 쓰지 않고 잠깐 멈췄을 때 한 번만 쓴다.
@@ -280,6 +313,8 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     /// 사용자가 명시적으로 호출했다. 이때만 활성화하고 키보드 포커스를 준다.
     private func showPanel() {
         guard let panel else { return }
+        // 숨겨진 동안 내용이 바뀌었을 수 있다. 크기를 먼저 맞춘다.
+        applyPanelSize()
         NSApplication.shared.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         model?.setDockInvoked(true)
@@ -328,7 +363,11 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     /// true면 이벤트를 소비한다.
     private func handleKey(_ event: NSEvent) -> Bool {
         switch event.keyCode {
-        case 53: // esc
+        case 53: // esc — 상세 보기가 열려 있으면 그것부터 닫는다
+            if model?.isDetailsVisible == true {
+                model?.hideDetails()
+                return true
+            }
             hidePanel()
             return true
         case 48: // tab / shift-tab

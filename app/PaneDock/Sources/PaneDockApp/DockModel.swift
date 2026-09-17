@@ -18,6 +18,10 @@ final class DockModel: ObservableObject {
         case openFolder
         case copyPath
         case lock
+        /// 상세 보기 열기.
+        case more
+        /// 상세 보기 닫기.
+        case detailsClose
         case hide
         case quit
 
@@ -27,6 +31,8 @@ final class DockModel: ObservableObject {
             case .openFolder: return "openFolder"
             case .copyPath: return "copyPath"
             case .lock: return "lock"
+            case .more: return "more"
+            case .detailsClose: return "detailsClose"
             case .hide: return "hide"
             case .quit: return "quit"
             }
@@ -46,6 +52,11 @@ final class DockModel: ObservableObject {
     @Published private(set) var refreshCount = 0
     /// 키보드 포커스가 놓인 항목. 호출했을 때만 값이 있다.
     @Published private(set) var focusedItem: FocusItem?
+    /// 마우스가 올라간 항목. 키보드 선택과 **다르게** 표시하기 위해 따로 둔다.
+    ///
+    /// SwiftUI `@State`는 이 빌드 환경(Command Line Tools만, 매크로 플러그인 없음)에서 쓸 수 없어
+    /// `focusedItem`과 같은 방식으로 모델이 들고 있는다.
+    @Published private(set) var hoveredItem: FocusItem?
     /// 현재 표시 대상에 해당하는 프로젝트. 없으면 기본 Dock으로 동작한다.
     @Published private(set) var project: ProjectResolution?
     /// 설정 파일 관련 안내(손상·미래 버전 등). 없으면 nil.
@@ -55,6 +66,11 @@ final class DockModel: ObservableObject {
 
     /// 창 숨기기 요청. AppDelegate가 처리한다.
     var onHide: (() -> Void)?
+
+    /// 상세 보기 표시 여부. 창 크기는 AppDelegate가 이 값에 맞춘다.
+    @Published private(set) var isDetailsVisible = false
+    /// 창 크기 재계산 요청. AppDelegate가 처리한다.
+    var onLayoutChange: (() -> Void)?
 
     private let probe: GhosttyProbe
     private let queue = DispatchQueue(label: "pane-dock.probe")
@@ -75,6 +91,11 @@ final class DockModel: ObservableObject {
 
     /// 사용자가 명시적으로 Dock을 호출한 상태인지.
     private var isDockInvoked = false
+    /// 마지막 조회 시점에 **현재 대상이 포커스 확인을 받은 적 있는지**.
+    /// 판정 불가일 때 "마지막으로 확인한 대상"이라고 말해도 되는지 판단하는 데 쓴다.
+    private var confirmedTarget = true
+    /// 마지막으로 창 크기를 맞췄을 때의 링크 수(불필요한 리사이즈를 피한다).
+    private var lastLayoutLinkCount = 0
     /// 호출 직전에 마지막으로 확인한 "바깥 앱 최전면" 값.
     /// 호출 중에는 이 값으로 고정해, **우리 자신의 활성화를 작업 위치 이동으로 해석하지 않는다.**
     private var frozenHostFrontmost: Bool?
@@ -112,10 +133,12 @@ final class DockModel: ObservableObject {
             _ = probe.refresh()
             let snapshot = probe.diagnostic()
             let failure = probe.store.lastFailure
+            let confirmed = probe.store.hasConfirmedCurrentTarget
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.snapshot = snapshot
                 self.failureText = failure
+                self.confirmedTarget = confirmed
                 self.isRefreshing = false
                 self.refreshCount += 1
                 self.rebuildState()
@@ -133,7 +156,8 @@ final class DockModel: ObservableObject {
             lock: lock,
             // 호출 중에는 최전면 판정만 호출 직전 값으로 고정한다.
             // 연결 오류·경로 무효화는 그대로 드러난다.
-            hostFrontmostOverride: isDockInvoked ? frozenHostFrontmost : nil
+            hostFrontmostOverride: isDockInvoked ? frozenHostFrontmost : nil,
+            hasConfirmedTarget: confirmedTarget
         )
         // 화면에 반영한 것과 **같은 값**을 실행 대상으로 고정한다.
         actionInfo = lock.info ?? effectiveCurrent
@@ -141,6 +165,12 @@ final class DockModel: ObservableObject {
         // 표시된 링크와 실행 대상이 어긋나지 않게 하기 위해서다.
         project = actionInfo?.reportedCWD.flatMap {
             ProjectResolver.resolve(cwd: $0, catalog: catalog, catalogDiagnostics: catalogDiagnostics)
+        }
+        // 프로젝트가 바뀌어 링크 수가 달라지면 바 너비도 달라진다.
+        let linkCount = project?.links.count ?? 0
+        if linkCount != lastLayoutLinkCount {
+            lastLayoutLinkCount = linkCount
+            onLayoutChange?()
         }
         stateLog?.append(
             refresh: refreshCount,
@@ -244,15 +274,64 @@ final class DockModel: ObservableObject {
     }
 
     /// 지금 화면에서 이동할 수 있는 항목들. 링크가 먼저, 고정 버튼이 뒤에 온다.
+    ///
+    /// 상세 보기가 열려 있으면 **모든 링크**가 이동 대상이다(인라인에서 밀린 항목 포함).
+    /// 숨기기·종료는 상세 보기 안에 있으므로 열렸을 때만 순회한다.
     var focusItems: [FocusItem] {
         var items: [FocusItem] = []
         if let project {
-            for index in project.links.indices {
+            let count = isDetailsVisible ? project.links.count : visibleLinkCount
+            for index in 0..<min(count, project.links.count) {
                 items.append(.link(index))
             }
         }
-        items.append(contentsOf: [.openFolder, .copyPath, .lock, .hide, .quit])
+        items.append(contentsOf: [.openFolder, .copyPath, .lock])
+        items.append(isDetailsVisible ? .detailsClose : .more)
+        if isDetailsVisible {
+            items.append(contentsOf: [.hide, .quit])
+        }
         return items
+    }
+
+    /// 바에 인라인으로 그릴 링크 수. 화면 너비와 항목 수로 정해진다.
+    var visibleLinkCount: Int {
+        DockBarLayout.linkBudget(
+            total: project?.links.count ?? 0,
+            availableWidth: ScreenGeometry.fallbackFrame.width
+        ).visible
+    }
+
+    /// 인라인으로 보여줄 링크 목록.
+    func links(forInline limit: Int) -> [(index: Int, link: ProjectLinkTarget)] {
+        guard let project else { return [] }
+        return project.links.prefix(max(0, limit)).enumerated().map { (index: $0.offset, link: $0.element) }
+    }
+
+    func showDetails() {
+        guard !isDetailsVisible else { return }
+        isDetailsVisible = true
+        stateLog?.appendEvent("details=open")
+        onLayoutChange?()
+    }
+
+    func hideDetails() {
+        guard isDetailsVisible else { return }
+        isDetailsVisible = false
+        stateLog?.appendEvent("details=close")
+        onLayoutChange?()
+    }
+
+    func toggleDetails() {
+        isDetailsVisible ? hideDetails() : showDetails()
+    }
+
+    /// 마우스 hover 표시를 갱신한다. 벗어나면 그 항목일 때만 지운다.
+    func setHover(_ item: FocusItem?) {
+        if let item {
+            hoveredItem = item
+        } else if hoveredItem != nil {
+            hoveredItem = nil
+        }
     }
 
     func moveFocus(forward: Bool) {
@@ -281,6 +360,8 @@ final class DockModel: ObservableObject {
         case .openFolder: perform(.openFolder, source: .keyboard)
         case .copyPath: perform(.copyPath, source: .keyboard)
         case .lock: toggleLock()
+        case .more: showDetails()
+        case .detailsClose: hideDetails()
         case .hide: hideWindow()
         case .quit: NSApplication.shared.terminate(nil)
         }

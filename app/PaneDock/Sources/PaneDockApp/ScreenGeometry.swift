@@ -29,4 +29,17 @@ enum ScreenGeometry {
             fallback: fallbackFrame
         )
     }
+
+    /// 가로형 Dock 창의 크기. 화면 너비와 항목 수로 정해진다.
+    ///
+    /// 기본 위치는 **화면 하단**이다(`WindowPlacement.defaultOrigin`). macOS Dock과 메뉴 막대는
+    /// `visibleFrame`에서 이미 제외되므로 그 위에 놓인다.
+    static func dockBarSize(linkCount: Int, detailsVisible: Bool) -> CGSize {
+        let available = fallbackFrame.width
+        let visibleLinks = DockBarLayout.linkBudget(total: linkCount, availableWidth: available).visible
+        return CGSize(
+            width: DockBarLayout.barWidth(visibleLinkCount: visibleLinks, availableWidth: available),
+            height: DockBarLayout.windowHeight(detailsVisible: detailsVisible)
+        )
+    }
 }

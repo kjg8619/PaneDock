@@ -19,6 +19,8 @@ struct LaunchOptions {
     var moveTo: CGPoint?
     /// 진단용: 시작 후 이 시간(ms) 뒤에 메뉴의 "프로젝트 설정 다시 읽기"와 **같은 동작**을 한 번 수행한다.
     var reloadAfterMilliseconds: Int?
+    /// 진단용: 상세 보기를 연 상태로 시작한다(스크린샷·확인용).
+    var detailsAtLaunch = false
     /// 추적할 터미널 소스. 기본은 자동(최전면 앱을 따라간다).
     var hostSource: HostSource = .auto
 
@@ -123,6 +125,8 @@ func parseLaunchOptions(_ arguments: [String]) -> LaunchOptions? {
                 exit(2)
             }
             options.hostSource = source
+        case "--details":
+            options.detailsAtLaunch = true
         case "--move-to":
             index += 1
             guard index < arguments.count else {

@@ -598,6 +598,8 @@ public enum SelfTest {
         results.append(contentsOf: cmuxChecks())
         results.append(contentsOf: hostRouterChecks())
         results.append(contentsOf: hostBoundaryChecks())
+        results.append(contentsOf: candidatePathChecks())
+        results.append(contentsOf: dockBarChecks())
         return results
     }
 
@@ -2504,6 +2506,145 @@ public enum SelfTest {
         } catch {
             results.append(check("V13: 선택 중 호스트가 바뀌어도 실행 대상은 선택 시점 값을 유지한다", false, "\(error)"))
         }
+
+        return results
+    }
+
+    // MARK: - 후보 경로 vs 확인된 대상 (V14)
+
+    /// 판정 불가일 때 **경로가 존재한다는 것**과 **그 경로가 현재 작업이라는 것**을 구분한다.
+    ///
+    /// 합성 입력이다. 실제 앱이 최전면 판정을 못 하는 상황은 실행 문맥에 달려 있다(V11.11).
+    private static func candidatePathChecks() -> [CheckResult] {
+        var results: [CheckResult] = []
+
+        // 1) 최초 실행 + 판정 불가: 경로는 존재하지만 **아직 확인한 대상이 아니다.**
+        do {
+            let (adapter, store, resolver, validator) = makeCmuxStore(
+                directories: ["/work/a"],
+                identifies: [cmuxIdentify(cmuxFocus(workspace: "ws-1", surface: "panel-A"))],
+                sidebars: [cmuxSidebar(cwd: "/work/a", focusedCWD: "/work/a", panel: "panel-A")],
+                frontmost: StubFrontmostApp(nil)
+            )
+            store.noteConnection(.connected)
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let state = DockStateBuilder.make(
+                current: store.current,
+                previous: store.previous,
+                connection: store.connection,
+                failure: store.lastFailure,
+                lock: DockLock(),
+                hasConfirmedTarget: store.hasConfirmedCurrentTarget
+            )
+            results.append(
+                check(
+                    "V14: 확인한 적 없는 후보 경로는 확인 중으로 두고 실행을 허용하지 않는다",
+                    store.hasConfirmedCurrentTarget == false
+                        && store.current?.pathStatus == .valid
+                        && state.display == .pending
+                        && state.canOpenFolder == false
+                        && state.canCopyPath == false
+                        && state.fullPath == "/work/a"
+                        && (state.detail?.contains("아직 확인한 대상이 없") ?? false),
+                    "confirmed=\(store.hasConfirmedCurrentTarget) validity=\(store.current?.pathStatus.rawValue ?? "-") display=\(state.display.rawValue) open=\(state.canOpenFolder) detail=\(state.detail ?? "-")"
+                )
+            )
+        } catch {
+            results.append(check("V14: 확인한 적 없는 후보 경로는 확인 중으로 두고 실행을 허용하지 않는다", false, "\(error)"))
+        }
+
+        // 2) 한 번 확인된 대상 + 판정 불가: 유지 중으로 남고 실행은 계속 허용한다.
+        do {
+            let frontmost = StubFrontmostApp(CmuxAdapter.bundleIdentifier)
+            let (adapter, store, resolver, validator) = makeCmuxStore(
+                directories: ["/work/a"],
+                identifies: [
+                    cmuxIdentify(cmuxFocus(workspace: "ws-1", surface: "panel-A")),
+                    cmuxIdentify(cmuxFocus(workspace: "ws-1", surface: "panel-A")),
+                ],
+                sidebars: [
+                    cmuxSidebar(cwd: "/work/a", focusedCWD: "/work/a", panel: "panel-A"),
+                    cmuxSidebar(cwd: "/work/a", focusedCWD: "/work/a", panel: "panel-A"),
+                ],
+                frontmost: frontmost
+            )
+            store.noteConnection(.connected)
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let confirmedAfterFirst = store.hasConfirmedCurrentTarget
+            frontmost.bundleIdentifier = nil
+            store.noteConnection(.connected)
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let state = DockStateBuilder.make(
+                current: store.current,
+                previous: store.previous,
+                connection: store.connection,
+                failure: store.lastFailure,
+                lock: DockLock(),
+                hasConfirmedTarget: store.hasConfirmedCurrentTarget
+            )
+            results.append(
+                check(
+                    "V14: 한 번 확인된 대상은 판정 불가가 되어도 유지 중으로 남고 실행할 수 있다",
+                    confirmedAfterFirst
+                        && store.hasConfirmedCurrentTarget
+                        && state.display == .held
+                        && state.canOpenFolder && state.canCopyPath
+                        && state.fullPath == "/work/a"
+                        && (state.detail?.contains("마지막으로 확인한 대상") ?? false),
+                    "confirmed=\(store.hasConfirmedCurrentTarget) display=\(state.display.rawValue) open=\(state.canOpenFolder)"
+                )
+            )
+        } catch {
+            results.append(check("V14: 한 번 확인된 대상은 판정 불가가 되어도 유지 중으로 남고 실행할 수 있다", false, "\(error)"))
+        }
+
+        return results
+    }
+
+    // MARK: - 가로형 바 배치 (V14)
+
+    /// 항목이 많아도 창이 화면을 넘지 않고, 숨긴 항목을 조용히 버리지 않는지 확인한다.
+    private static func dockBarChecks() -> [CheckResult] {
+        var results: [CheckResult] = []
+
+        let wide = DockBarLayout.maximumWidth(visibleFrameWidth: 1_512)
+        let narrow = DockBarLayout.maximumWidth(visibleFrameWidth: 900)
+
+        // 링크가 많으면 인라인 수를 줄이고 **숨긴 개수를 알린다**(조용히 잘라내지 않는다).
+        let many = DockBarLayout.linkBudget(total: 20, availableWidth: 1_512)
+        let few = DockBarLayout.linkBudget(total: 2, availableWidth: 1_512)
+        let none = DockBarLayout.linkBudget(total: 0, availableWidth: 1_512)
+        results.append(
+            check(
+                "V14: 링크가 많으면 인라인 수를 줄이고 숨긴 개수를 알린다",
+                many.visible + many.hidden == 20 && many.hidden > 0 && few.hidden == 0 && few.visible == 2
+                    && none.visible == 0 && none.hidden == 0,
+                "많음=\(many.visible)+\(many.hidden) 적음=\(few.visible)+\(few.hidden)"
+            )
+        )
+
+        // 좁은 화면에서도 최소 너비를 보장하고, 넓은 화면에서도 최대 너비를 넘지 않는다.
+        let narrowBar = DockBarLayout.barWidth(visibleLinkCount: 10, availableWidth: 900)
+        let wideBar = DockBarLayout.barWidth(visibleLinkCount: 10, availableWidth: 1_512)
+        results.append(
+            check(
+                "V14: 바 너비는 화면 범위 안에 머문다",
+                narrowBar <= narrow && narrowBar >= DockBarLayout.minimumBarWidth
+                    && wideBar <= wide && wideBar >= DockBarLayout.minimumBarWidth,
+                "좁은화면=\(Int(narrowBar))/\(Int(narrow)) 넓은화면=\(Int(wideBar))/\(Int(wide))"
+            )
+        )
+
+        results.append(
+            check(
+                "V14: 항목이 없어도 주요 조작 영역이 뭉개지지 않는다",
+                DockBarLayout.barWidth(visibleLinkCount: 0, availableWidth: 1_512) >= DockBarLayout.minimumBarWidth
+                    && DockBarLayout.windowHeight(detailsVisible: false) == DockBarLayout.barHeight
+                    && DockBarLayout.windowHeight(detailsVisible: true)
+                        == DockBarLayout.barHeight + DockBarLayout.detailsHeight,
+                "바=\(Int(DockBarLayout.barWidth(visibleLinkCount: 0, availableWidth: 1_512))) 높이=\(Int(DockBarLayout.windowHeight(detailsVisible: false)))"
+            )
+        )
 
         return results
     }
