@@ -2746,6 +2746,36 @@ AXStaticText value=대상: egde-nochi     (114,807)        ← 프로젝트 이�
 
 캡처: `V16-hover.png`(아이콘 중심 + 호버 설명).
 
+### V16.8 "작게"가 76pt로 나오던 결함 — 원인과 수정
+
+**증상:** `size=small`(64pt)로 실행해도 창이 **76pt**였다. 크게(92pt)는 정상이었다.
+
+**진단(추측 대신 로그):** 시작 로그에 적용된 외형과 패널 크기를 남겼다.
+
+```
+settings=loaded … appearance=small/nameAndIcon panel=1054x76   ← 외형은 small인데 창은 76
+appearance=large/nameAndIcon        panel=1054x92              ← 큰 값은 반영됨
+```
+
+**원인:** `ScreenGeometry.dockBarSize(linkCount:detailsVisible:barHeight:)` 호출이 **두 곳**인데
+`makePanel`(창을 처음 만들 때)만 `barHeight` 인자를 넘기지 않아 **기본값 `DockBarLayout.barHeight`(76)** 를 썼다.
+`applyPanelSize`(레이아웃 변경 시)만 새 외형을 넘기고 있었고, 시작 시에는 그 경로가 불리지 않으므로
+**창이 76으로 만들어지고 그대로 유지**됐다. 92가 정상이었던 이유는 `minSize`(76)보다 큰 값이라 클램프가 없었기 때문이다.
+
+**수정(한 줄):** `makePanel` 호출에도 `barHeight: model.effectiveAppearance.size.barHeight`를 넘긴다.
+`panel.minSize`도 **가장 작은 외형**(64) 기준으로 바꿨다.
+
+**수정 후 실측:**
+
+| 설정 | 창 높이 |
+| --- | --- |
+| 작게 | **64** ✓ |
+| 기본 | **76** ✓ |
+| 크게 | **92** ✓ |
+
+**교훈:** 같은 계산을 두 곳에서 부르면 **한 곳만 고쳐지기 쉽다.** 시작 로그에 결과값(적용 외형·패널 크기)을 남겨
+눈이 아니라 값으로 확인할 수 있게 했다.
+
 ### V16.6 남은 제한·미확인
 
 - 세 크기의 **실제 사용감**(64pt가 충분히 클릭 가능한지, 92pt가 적절한지)은 **사람의 판단**이 필요하다.

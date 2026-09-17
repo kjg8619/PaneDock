@@ -220,6 +220,8 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let line = "PaneDock startup: mode=\(mode) adapter=\(options.hostSource.rawValue) settings=\(outcome) file=\(file) "
             + "catalog=\(catalog) "
             + "origin=(\(Int(frame.origin.x)),\(Int(frame.origin.y))) size=\(Int(frame.width))x\(Int(frame.height)) "
+            + "appearance=\(model?.effectiveAppearance.size.rawValue ?? "-")/\(model?.effectiveAppearance.labelMode.rawValue ?? "-") "
+            + "panel=\(Int(panel?.frame.width ?? 0))x\(Int(panel?.frame.height ?? 0)) "
             + "hotKey=\(hotKey) hotKeyStatus=\(hotKeyRegistration.message) notice=\(notice)\n"
             + "PaneDock menu: \(menuSummary())\n"
         FileHandle.standardError.write(Data(line.utf8))
@@ -306,7 +308,8 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private func makePanel(model: DockModel) -> NSPanel {
         let size = ScreenGeometry.dockBarSize(
             linkCount: model.resolution.allItems.count,
-            detailsVisible: model.isDetailsVisible
+            detailsVisible: model.isDetailsVisible,
+            barHeight: model.effectiveAppearance.size.barHeight
         )
         let panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: size),
@@ -324,9 +327,10 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
+        // 최소 크기는 **가장 작은 외형**을 기준으로 한다(작게 모드가 클램프되지 않게).
         panel.minSize = NSSize(
             width: DockBarLayout.minimumBarWidth,
-            height: DockBarLayout.barHeight
+            height: DockSizeSetting.small.barHeight
         )
         // 배경 드래그를 끈다. 바의 전용 드래그 영역만 창을 옮긴다(버튼과 충돌하지 않는다).
         panel.isMovableByWindowBackground = false
