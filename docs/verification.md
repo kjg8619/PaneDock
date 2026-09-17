@@ -1532,6 +1532,30 @@ V9의 관측 자체(당시 동작)는 지우지 않고 여기에 변경 사실�
 추측하지 않고 링크를 비워 두었다. 테스트 A(프로젝트별 **다른 링크** 실행)를 하려면
 두 번째 프로젝트와 사용할 URL을 사용자가 알려줘야 한다.
 
+### V10.10 사용자 검증 세션 관측 (2026-09-17 13:17~13:20)
+
+**실행 모드/빌드:** 실제 모드, `--state-log /tmp/pd-v10.log`, 번들 `d3dd3291e447f006`(V10 빌드), 로그 219줄.
+
+| # | 항목 | 관측 | 등급 |
+| --- | --- | --- | --- |
+| A | 프로젝트 전환 | `project=egde-nochi(2)` 40줄 ↔ `project=markdown-viewer(0)` 6줄 | 앱 자체 로그 |
+| A | 프로젝트별 링크 | egde-nochi에서 링크 2개 표시, markdown-viewer에서 0개 | 앱 자체 로그 |
+| **B(마우스)** | 링크 클릭 | `link=repo source=mouse result=allowed`, `link=issues source=mouse result=allowed` | 앱 자체 로그 |
+| **B 독립 확인** | 클릭한 링크가 실제로 열림 | 브라우저(Aside) 창 제목이 **`Issues · kjg8619/egde-nochi`** — 마지막으로 클릭한 `…/issues`와 일치 | **에이전트 관측**(CGWindowList) |
+| B(키보드) | 링크 실행 | 이번 세션에는 없음. **V9.10에서 이미 확인**(`link=repo … source=keyboard result=allowed`) | V9.10 |
+| — | 키보드 폴더 열기 | `activate control=openFolder source=keyboard result=allowed target=…/egde-nochi` | 앱 자체 로그 |
+| — | 키보드 포커스 이동 | `invoke focus=link:0` → `focus=link:1` → `focus=openFolder` | 앱 자체 로그 |
+| — | 경로 복사(마우스) | `action=copyPath target=…/make-games/CodeMose` — 현재 CWD 대상 유지 | 앱 자체 로그 |
+| — | **로그 URL 축약** | 기록된 URL에 쿼리·사용자정보가 없다: `url=https://github.com/kjg8619/egde-nochi`, `…/issues` | 앱 자체 로그 |
+| **C** | 메뉴 "프로젝트 설정 다시 읽기" | **이번 세션에 실행되지 않았다**(`reload catalog` 이벤트 0건). 앱 수준 동작은 V10.5의 진단 훅으로 확인했다 | 미실시(사용자) |
+| **D** | 링크 실행 후 브라우저 표시 | 브라우저 창이 열려 있는 것은 확인했다. **전면 표시·작업 복귀 경험은 앱 로그로 판단하지 않는다** | 사용자 확인 필요 |
+
+**B 판정:** 키보드 링크 실행(V9.10)과 마우스 링크 실행(V10.10)을 **각각 다른 세션에서** 확인했고,
+둘 다 같은 `openLink` 경로를 탄다. 이로써 "마우스 클릭 미관측" 항목은 해소됐다.
+
+**여전히 미실시로 유지:** 실제 자동화 권한 거부·Ghostty 종료, 확인 중 상태의 별도 GUI 키보드 검사,
+Finder 창 이름보다 강한 전체 경로 대조, 그리고 **C(메뉴 재로딩)의 사용자 실행**.
+
 ---
 
 ## 정정 이력
