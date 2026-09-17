@@ -50,6 +50,8 @@ final class DockModel: ObservableObject {
     @Published private(set) var project: ProjectResolution?
     /// 설정 파일 관련 안내(손상·미래 버전 등). 없으면 nil.
     @Published private(set) var settingsNotice: String?
+    /// 프로젝트 설정 상태 안내(다시 읽기 결과·경고). 없으면 nil.
+    @Published private(set) var catalogNotice: String?
 
     /// 창 숨기기 요청. AppDelegate가 처리한다.
     var onHide: (() -> Void)?
@@ -213,12 +215,29 @@ final class DockModel: ObservableObject {
         settingsNotice = notice
     }
 
+    /// 진단용 사건 기록. 창을 보지 않고도 동작을 확인할 수 있게 한다.
+    func appendEvent(_ text: String) {
+        stateLog?.appendEvent(text)
+    }
+
     /// 프로젝트 카탈로그를 반영한다. 실시간 CWD와는 별개인 정적 설정이다.
-    func updateCatalog(_ catalog: ProjectCatalog, diagnostics: [String]) {
+    ///
+    /// 링크 목록이 달라졌으면 **진행 중인 링크 선택을 취소**한다.
+    /// 이전 인덱스를 새 목록에 그대로 적용하지 않는다. 재로딩은 아무것도 실행하지 않는다.
+    func updateCatalog(_ catalog: ProjectCatalog, diagnostics: [String], note: String? = nil) {
+        let previousProject = project
         self.catalog = catalog
         self.catalogDiagnostics = diagnostics
-        stateLog?.appendEvent("catalog projects=\(catalog.projects.count) diagnostics=\(diagnostics.count)")
+        catalogNotice = note
         rebuildState()
+
+        if case .link = focusedItem, !ProjectSelection.selectionSurvives(reloadFrom: previousProject, to: project) {
+            focusedItem = nil
+            stateLog?.appendEvent("selection=cancelled (catalog changed)")
+        }
+        stateLog?.appendEvent(
+            "catalog projects=\(catalog.projects.count) diagnostics=\(diagnostics.count) notice=\(note?.replacingOccurrences(of: "\n", with: " / ") ?? "-")"
+        )
     }
 
     /// 지금 화면에서 이동할 수 있는 항목들. 링크가 먼저, 고정 버튼이 뒤에 온다.
@@ -248,6 +267,12 @@ final class DockModel: ObservableObject {
 
     func activateFocusedItem() {
         stateLog?.appendEvent("activate control=\(focusedItem?.label ?? "-") source=keyboard")
+        guard let focusedItem else {
+            // 재로딩 등으로 선택이 취소된 상태. 아무것도 실행하지 않는다.
+            actionMessage = "선택된 항목이 없습니다. Tab으로 항목을 고르세요."
+            stateLog?.appendEvent("activate control=nil source=keyboard result=ignored")
+            return
+        }
         switch focusedItem {
         case .link(let index): openLink(at: index, source: .keyboard)
         case .openFolder: perform(.openFolder, source: .keyboard)
@@ -255,7 +280,6 @@ final class DockModel: ObservableObject {
         case .lock: toggleLock()
         case .hide: hideWindow()
         case .quit: NSApplication.shared.terminate(nil)
-        case nil: perform(.openFolder, source: .keyboard)
         }
     }
 
@@ -279,8 +303,9 @@ final class DockModel: ObservableObject {
         let target = project.links[index]
         switch ProjectActionPlanner.plan(target: target, in: project, state: state) {
         case .openURL(let url):
+            // 로그에는 쿼리·프래그먼트를 뺀 형태만 남긴다(토큰 노출 방지).
             stateLog?.appendEvent(
-                "link=\(target.linkID) project=\(target.projectID) source=\(source.rawValue) result=allowed url=\(target.url)"
+                "link=\(target.linkID) project=\(target.projectID) source=\(source.rawValue) result=allowed url=\(ProjectLinkPrivacy.redactedForLog(target.url))"
             )
             let opened = NSWorkspace.shared.open(url)
             actionMessage = opened ? "링크를 열었습니다: \(target.name)" : "링크를 열지 못했습니다: \(target.url)"

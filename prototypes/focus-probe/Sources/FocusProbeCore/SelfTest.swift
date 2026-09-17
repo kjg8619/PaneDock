@@ -734,21 +734,18 @@ public enum SelfTest {
             try? FileManager.default.removeItem(at: base)
         }
 
-        // 카탈로그 로드 4종
+        // 카탈로그 로드: 없음 / 손상 / 미래 버전 — **원본 파일을 건드리지 않는다**
         do {
             let url = temporarySettingsURL().deletingLastPathComponent().appendingPathComponent("projects.json")
             try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let fresh = ProjectCatalogStore(url: url)
             let freshOK = fresh.outcome == .fresh
 
-            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let garbage = Data("{ broken ".utf8)
             try? garbage.write(to: url)
             let corrupt = ProjectCatalogStore(url: url)
-            var corruptBackupOK = false
-            if case .corrupt(let path) = corrupt.outcome, let path {
-                corruptBackupOK = (try? Data(contentsOf: URL(fileURLWithPath: path))) == garbage
-            }
+            let corruptUntouched = (try? Data(contentsOf: url)) == garbage
+            let noBackupLeft = (try? FileManager.default.contentsOfDirectory(atPath: url.deletingLastPathComponent().path))?.count == 1
 
             let future = Data(#"{"schemaVersion":9,"projects":[]}"#.utf8)
             try? future.write(to: url)
@@ -757,15 +754,299 @@ public enum SelfTest {
 
             results.append(
                 check(
-                    "프로젝트 카탈로그: 없음/손상/미래버전을 안전하게 처리",
-                    freshOK && corruptBackupOK && unsupported.outcome == .unsupportedVersion(found: 9) && futureUntouched,
-                    "fresh=\(freshOK) 손상백업=\(corruptBackupOK) 미래버전=\(unsupported.outcome.label) 보존=\(futureUntouched)"
+                    "프로젝트 카탈로그: 없음/손상/미래버전을 처리하고 원본을 고치지 않는다",
+                    freshOK
+                        && corrupt.outcome == .corrupt && corruptUntouched && noBackupLeft
+                        && unsupported.outcome == .unsupportedVersion(found: 9) && futureUntouched,
+                    "fresh=\(freshOK) 손상=\(corrupt.outcome.label)/원본보존=\(corruptUntouched)/백업안만듦=\(noBackupLeft) 미래=\(unsupported.outcome.label)/보존=\(futureUntouched)"
                 )
             )
             try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
         }
 
+        results.append(contentsOf: projectReloadChecks())
+        results.append(contentsOf: projectCatalogApplyChecks(shop: shop))
         results.append(contentsOf: projectActionChecks(shop: shop, catalog: catalog))
+        return results
+    }
+
+    /// 다시 읽기 결과를 "하나의 구성"으로 확정하는 판단 (앱이 그대로 쓴다).
+    private static func projectCatalogApplyChecks(shop: Project) -> [CheckResult] {
+        var results: [CheckResult] = []
+        let previous = ProjectCatalog(projects: [shop])
+        let previousDiagnostics = ["이전 경고"]
+
+        // 정상 로딩 → 새 구성 적용
+        let newCatalog = ProjectCatalog(projects: [shop, Project(id: "extra", name: "Extra", root: "/work/extra", links: [])])
+        let applied = ProjectCatalogApplier.apply(
+            load: .loaded, loadedCatalog: newCatalog, loadedDiagnostics: [],
+            previousCatalog: previous, previousDiagnostics: previousDiagnostics, isReload: true
+        )
+        results.append(
+            check(
+                "다시 읽기: 정상 로딩은 새 구성을 적용하고 결과를 안내한다",
+                applied.appliedNewConfiguration
+                    && applied.catalog.projects.count == 2
+                    && applied.note?.contains("프로젝트 2개") == true
+                    && applied.diagnostics.isEmpty,
+                "적용=\(applied.appliedNewConfiguration) 프로젝트=\(applied.catalog.projects.count) 안내=\(applied.note?.replacingOccurrences(of: "\n", with: " / ") ?? "-")"
+            )
+        )
+
+        // 치명적 실패 → 이전 구성 유지 + 명확한 안내
+        for (label, outcome) in [("손상", ProjectCatalogLoadOutcome.corrupt), ("미래버전", .unsupportedVersion(found: 9))] {
+            let failed = ProjectCatalogApplier.apply(
+                load: outcome, loadedCatalog: ProjectCatalog(), loadedDiagnostics: [],
+                previousCatalog: previous, previousDiagnostics: previousDiagnostics, isReload: true
+            )
+            results.append(
+                check(
+                    "다시 읽기: \(label)이면 이전 구성을 유지하고 '이전 설정 사용 중'을 표시",
+                    !failed.appliedNewConfiguration
+                        && failed.catalog.projects.count == 1
+                        && failed.catalog.projects.first?.id == shop.id
+                        && failed.diagnostics == previousDiagnostics
+                        && failed.note?.contains("설정 읽기 실패") == true
+                        && failed.note?.contains("이전 설정 사용 중") == true,
+                    "적용=\(failed.appliedNewConfiguration) 프로젝트=\(failed.catalog.projects.count) 안내=\(failed.note?.prefix(30) ?? "-")"
+                )
+            )
+        }
+
+        // 파일 없음(fresh) → 빈 카탈로그 적용 = 기본 Dock
+        let cleared = ProjectCatalogApplier.apply(
+            load: .fresh, loadedCatalog: ProjectCatalog(), loadedDiagnostics: [],
+            previousCatalog: previous, previousDiagnostics: previousDiagnostics, isReload: true
+        )
+        results.append(
+            check(
+                "다시 읽기: 파일이 없으면 기본 Dock으로 돌아간다",
+                cleared.appliedNewConfiguration
+                    && cleared.catalog.projects.isEmpty
+                    && cleared.diagnostics.isEmpty
+                    && cleared.note?.contains("기본 Dock") == true,
+                "적용=\(cleared.appliedNewConfiguration) 프로젝트=\(cleared.catalog.projects.count) 안내=\(cleared.note ?? "-")"
+            )
+        )
+
+        // 경고는 유지되고 안내에 포함된다
+        let warned = ProjectCatalogApplier.apply(
+            load: .loaded, loadedCatalog: newCatalog, loadedDiagnostics: ["기준 폴더가 중복 등록되었습니다: /dup → a, b"],
+            previousCatalog: previous, previousDiagnostics: [], isReload: true
+        )
+        results.append(
+            check(
+                "다시 읽기: 로더 경고를 조용히 무시하지 않고 안내에 포함",
+                warned.diagnostics.count == 1 && warned.note?.contains("중복 등록") == true,
+                "경고=\(warned.diagnostics.count) 안내=\(warned.note?.replacingOccurrences(of: "\n", with: " / ") ?? "-")"
+            )
+        )
+
+        // 시작 시에는 성공 안내를 띄우지 않는다(잘못이 없으면 조용히)
+        let startup = ProjectCatalogApplier.apply(
+            load: .loaded, loadedCatalog: newCatalog, loadedDiagnostics: [],
+            previousCatalog: ProjectCatalog(), previousDiagnostics: [], isReload: false
+        )
+        results.append(
+            check(
+                "다시 읽기: 시작 시 정상 로딩은 불필요한 안내를 띄우지 않는다",
+                startup.note == nil && startup.appliedNewConfiguration,
+                "안내=\(startup.note ?? "nil")"
+            )
+        )
+
+        return results
+    }
+
+    // MARK: - 설정 다시 읽기 (0.1d)
+
+    private static func projectReloadChecks() -> [CheckResult] {
+        var results: [CheckResult] = []
+
+        func write(_ json: String, to url: URL) {
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data(json.utf8).write(to: url)
+        }
+
+        let shopJSON = #"{"schemaVersion":1,"projects":[{"id":"shop","name":"Shop","root":"/work/shop","links":[{"id":"repo","name":"저장소","url":"https://example.com/a"},{"id":"docs","name":"문서","url":"https://example.com/b"}]}]}"#
+
+        // 1) 정상 변경 반영 + 사용자 파일 불변
+        do {
+            let url = temporarySettingsURL().deletingLastPathComponent().appendingPathComponent("projects.json")
+            write(shopJSON, to: url)
+            let store = ProjectCatalogStore(url: url)
+            let first = ProjectResolver.resolve(cwd: "/work/shop/api", catalog: store.catalog)
+
+            // 링크 URL·순서 변경
+            let changedJSON = #"{"schemaVersion":1,"projects":[{"id":"shop","name":"Shop","root":"/work/shop","links":[{"id":"docs","name":"문서","url":"https://example.com/b2"},{"id":"repo","name":"저장소","url":"https://example.com/a"}]}]}"#
+            write(changedJSON, to: url)
+            // store가 건드리지 않았다면 reload 후에도 이 바이트 그대로여야 한다.
+            let expectedAfterReload = try? Data(contentsOf: url)
+            let outcome = store.reload()
+            let after = try? Data(contentsOf: url)
+            let second = ProjectResolver.resolve(cwd: "/work/shop/api", catalog: store.catalog)
+
+            results.append(
+                check(
+                    "재로딩: 정상 변경을 반영하고 사용자 파일은 건드리지 않는다",
+                    outcome == .loaded
+                        && first?.links.map(\.linkID) == ["repo", "docs"]
+                        && second?.links.map(\.linkID) == ["docs", "repo"]
+                        && second?.links.first?.url == "https://example.com/b2"
+                        && after == expectedAfterReload,
+                    "1차=\(first?.links.map(\.linkID) ?? []) 2차=\(second?.links.map(\.linkID) ?? []) 파일불변=\(after == expectedAfterReload)"
+                )
+            )
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 2) 파일 없음 → 기본 Dock + 3) 손상/미래버전 → 적용 불가(이전 구성 유지 판단은 앱이 한다)
+        do {
+            let url = temporarySettingsURL().deletingLastPathComponent().appendingPathComponent("projects.json")
+            write(shopJSON, to: url)
+            let store = ProjectCatalogStore(url: url)
+            let hadProjects = store.catalog.projects.count == 1
+
+            try? FileManager.default.removeItem(at: url)
+            let removed = store.reload()
+            let backToDefault = store.catalog.projects.isEmpty && ProjectResolver.resolve(cwd: "/work/shop/api", catalog: store.catalog) == nil
+
+            write("{ broken", to: url)
+            let corrupt = store.reload()
+            let corruptFileKept = (try? Data(contentsOf: url)) == Data("{ broken".utf8)
+
+            write(#"{"schemaVersion":9,"projects":[]}"#, to: url)
+            let unsupported = store.reload()
+
+            results.append(
+                check(
+                    "재로딩: 파일 없음 → 기본 Dock, 손상·미래버전 → 적용 불가로 구분",
+                    hadProjects && removed == .fresh && backToDefault
+                        && corrupt == .corrupt && !corrupt.isUsable && corruptFileKept
+                        && unsupported == .unsupportedVersion(found: 9) && !unsupported.isUsable,
+                    "제거=\(removed.label) 기본Dock=\(backToDefault) 손상=\(corrupt.label)/보존=\(corruptFileKept) 미래=\(unsupported.label)"
+                )
+            )
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 4) 실패 후 정상 설정으로 복구
+        do {
+            let url = temporarySettingsURL().deletingLastPathComponent().appendingPathComponent("projects.json")
+            write("{ broken", to: url)
+            let store = ProjectCatalogStore(url: url)
+            let failed = store.reload()
+            write(shopJSON, to: url)
+            let recovered = store.reload()
+            let resolved = ProjectResolver.resolve(cwd: "/work/shop/api", catalog: store.catalog)
+
+            results.append(
+                check(
+                    "재로딩: 실패 후 정상 설정으로 복구된다",
+                    failed == .corrupt && recovered == .loaded && resolved?.projectID == "shop" && resolved?.links.count == 2,
+                    "실패=\(failed.label) 복구=\(recovered.label) 프로젝트=\(resolved?.projectID ?? "-")"
+                )
+            )
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 5) 선택 유지 판정
+        do {
+            let base = ProjectCatalog(projects: [
+                Project(id: "p", name: "P", root: "/work/p", links: [
+                    ProjectLink(id: "one", name: "1", url: "https://example.com/1"),
+                    ProjectLink(id: "two", name: "2", url: "https://example.com/2"),
+                ])
+            ])
+            let same = ProjectResolver.resolve(cwd: "/work/p", catalog: base)
+            let reordered = ProjectResolver.resolve(cwd: "/work/p", catalog: ProjectCatalog(projects: [
+                Project(id: "p", name: "P", root: "/work/p", links: [
+                    ProjectLink(id: "two", name: "2", url: "https://example.com/2"),
+                    ProjectLink(id: "one", name: "1", url: "https://example.com/1"),
+                ])
+            ]))
+            let urlChanged = ProjectResolver.resolve(cwd: "/work/p", catalog: ProjectCatalog(projects: [
+                Project(id: "p", name: "P", root: "/work/p", links: [
+                    ProjectLink(id: "one", name: "1", url: "https://example.com/1-changed"),
+                    ProjectLink(id: "two", name: "2", url: "https://example.com/2"),
+                ])
+            ]))
+            let shrunk = ProjectResolver.resolve(cwd: "/work/p", catalog: ProjectCatalog(projects: [
+                Project(id: "p", name: "P", root: "/work/p", links: [
+                    ProjectLink(id: "one", name: "1", url: "https://example.com/1"),
+                ])
+            ]))
+            let renamedProject = ProjectResolver.resolve(cwd: "/work/p", catalog: ProjectCatalog(projects: [
+                Project(id: "q", name: "Q", root: "/work/p", links: [
+                    ProjectLink(id: "one", name: "1", url: "https://example.com/1"),
+                    ProjectLink(id: "two", name: "2", url: "https://example.com/2"),
+                ])
+            ]))
+
+            let keepsSame = ProjectSelection.selectionSurvives(reloadFrom: same, to: same)
+            let dropsReordered = !ProjectSelection.selectionSurvives(reloadFrom: same, to: reordered)
+            let dropsUrlChanged = !ProjectSelection.selectionSurvives(reloadFrom: same, to: urlChanged)
+            let dropsShrunk = !ProjectSelection.selectionSurvives(reloadFrom: same, to: shrunk)
+            let dropsOtherProject = !ProjectSelection.selectionSurvives(reloadFrom: same, to: renamedProject)
+            let dropsNil = !ProjectSelection.selectionSurvives(reloadFrom: same, to: nil)
+
+            results.append(
+                check(
+                    "재로딩: 링크 목록이 그대로면 선택 유지, 달라지면 선택 취소",
+                    keepsSame && dropsReordered && dropsUrlChanged && dropsShrunk && dropsOtherProject && dropsNil,
+                    "동일유지=\(keepsSame) 순서변경취소=\(dropsReordered) URL변경취소=\(dropsUrlChanged) 삭제취소=\(dropsShrunk) 프로젝트변경취소=\(dropsOtherProject) 없음=\(dropsNil)"
+                )
+            )
+        }
+
+        // 6) 선택 중 재로딩 → 다른 링크가 잘못 실행되지 않는다
+        do {
+            let before = ProjectResolution(
+                projectID: "p", projectName: "P", projectRoot: "/work/p", matchedCWD: "/work/p",
+                links: [
+                    ProjectLinkTarget(projectID: "p", linkID: "one", name: "1", url: "https://example.com/1"),
+                    ProjectLinkTarget(projectID: "p", linkID: "two", name: "2", url: "https://example.com/2"),
+                ],
+                diagnostics: []
+            )
+            // 재로딩 후 'one'이 사라지고 URL도 바뀐 구성
+            let after = ProjectResolution(
+                projectID: "p", projectName: "P", projectRoot: "/work/p", matchedCWD: "/work/p",
+                links: [ProjectLinkTarget(projectID: "p", linkID: "two", name: "2", url: "https://example.com/2-changed")],
+                diagnostics: []
+            )
+            let actionable = DockStateBuilder.make(
+                current: workInfo(cwd: "/work/p", pathStatus: .valid, focusStatus: .tracked),
+                previous: nil, connection: .connected, failure: nil, lock: DockLock()
+            )
+            let staleSelection = ProjectActionPlanner.plan(target: before.links[0], in: after, state: actionable)
+            let alsoStale = ProjectActionPlanner.plan(target: before.links[1], in: after, state: actionable)
+
+            results.append(
+                check(
+                    "재로딩: 선택 중 목록이 바뀌면 이전 선택이 실행되지 않는다",
+                    staleSelection.rejectionReason != nil && alsoStale.rejectionReason != nil,
+                    "삭제된링크=\(staleSelection.rejectionReason ?? "-") URL변경=\(alsoStale.rejectionReason ?? "-")"
+                )
+            )
+
+            // 7) 로그용 URL 축약 — 토큰·쿼리를 남기지 않는다
+            do {
+                let withToken = ProjectLinkPrivacy.redactedForLog("https://user:pw@example.com/docs/page?token=SECRET#frag")
+                let plain = ProjectLinkPrivacy.redactedForLog("https://example.com/a")
+                let bad = ProjectLinkPrivacy.redactedForLog("not a url")
+                results.append(
+                    check(
+                        "로그용 URL은 쿼리·프래그먼트·사용자정보를 제거한다",
+                        withToken == "https://example.com/docs/page"
+                            && plain == "https://example.com/a"
+                            && bad == "<invalid-url>",
+                        "토큰URL=\(withToken) 일반=\(plain) 잘못된값=\(bad)"
+                    )
+                )
+            }
+        }
+
         return results
     }
 

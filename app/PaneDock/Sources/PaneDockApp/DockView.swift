@@ -110,6 +110,14 @@ struct DockView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            if let notice = model.catalogNotice {
+                Text(notice)
+                    .font(.caption2)
+                    .foregroundStyle(notice.contains("실패") ? .red : .orange)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if let notice = model.settingsNotice {
                 Text(notice)
                     .font(.caption2)

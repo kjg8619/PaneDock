@@ -18,6 +18,9 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private var model: DockModel?
     private var settings: SettingsStore?
     private var catalogStore: ProjectCatalogStore?
+    /// 마지막으로 **적용에 성공한** 구성. 실패 시 이 구성을 유지한다.
+    private var appliedCatalog = ProjectCatalog()
+    private var appliedDiagnostics: [String] = []
     private var hotKey: GlobalHotKey?
     private var hotKeyRegistration: GlobalHotKey.Registration = .disabled
     private var keyMonitor: Any?
@@ -41,11 +44,10 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         model.onHide = { [weak self] in self?.hidePanel() }
         let catalogStore = makeCatalogStore()
         self.catalogStore = catalogStore
-        model.updateCatalog(catalogStore.catalog, diagnostics: catalogStore.diagnostics)
+        applyCatalog(to: model, from: catalogStore, isReload: false)
 
         startupNotice = [
             settingsNotice(for: store.outcome),
-            catalogNotice(for: catalogStore),
             duplicateInstanceNotice(),
         ]
         .compactMap { $0 }
@@ -74,6 +76,13 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         // 진단용 창 이동. 사용자가 헤더를 드래그한 것과 같은 저장 경로(windowDidMove)를 탄다.
         if let target = options.moveTo {
             panel.setFrameOrigin(target)
+        }
+
+        // 진단용 다시 읽기. 메뉴의 "프로젝트 설정 다시 읽기"와 같은 동작을 한 번 수행한다.
+        if let delay = options.reloadAfterMilliseconds {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(delay) / 1000.0) { [weak self] in
+                self?.reloadCatalogAction()
+            }
         }
     }
 
@@ -175,20 +184,35 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         return ProjectCatalogStore(url: url)
     }
 
-    private func catalogNotice(for store: ProjectCatalogStore) -> String? {
-        var parts: [String] = []
-        switch store.outcome {
-        case .fresh, .loaded:
-            break
-        case .corrupt(let backupPath):
-            let where_ = backupPath.map { "원본은 \($0)으로 보존했습니다." } ?? ""
-            parts.append("프로젝트 파일을 읽을 수 없어 기본 Dock으로 동작합니다. \(where_)")
-        case .unsupportedVersion(let found):
-            parts.append("프로젝트 스키마 버전 \(found)은 지원하지 않습니다. 파일을 건드리지 않습니다.")
-        }
-        // 설정 자체의 문제는 조용히 무시하지 않고 알린다.
-        parts.append(contentsOf: store.diagnostics.prefix(3))
-        return parts.isEmpty ? nil : parts.joined(separator: "\n")
+    /// 카탈로그를 하나의 일관된 구성으로 반영한다.
+    ///
+    /// - 정상 로딩(fresh·loaded): 새 구성을 적용하고 현재 CWD 기준으로 다시 계산한다.
+    /// - 치명적 실패(corrupt·unsupportedVersion): **이전 정상 구성을 유지**하고 그 사실을 알린다.
+    /// - 어느 경우에도 사용자 파일을 고치지 않는다.
+    private func applyCatalog(to model: DockModel, from store: ProjectCatalogStore, isReload: Bool) {
+        let application = ProjectCatalogApplier.apply(
+            load: store.outcome,
+            loadedCatalog: store.catalog,
+            loadedDiagnostics: store.diagnostics,
+            previousCatalog: appliedCatalog,
+            previousDiagnostics: appliedDiagnostics,
+            isReload: isReload
+        )
+        appliedCatalog = application.catalog
+        appliedDiagnostics = application.diagnostics
+        model.updateCatalog(application.catalog, diagnostics: application.diagnostics, note: application.note)
+    }
+
+    @MainActor @objc private func reloadCatalogAction() {
+        guard let model, let store = catalogStore else { return }
+        store.reload()
+        applyCatalog(to: model, from: store, isReload: true)
+        stateLogLine("reload catalog outcome=\(store.outcome.label) projects=\(store.catalog.projects.count) diagnostics=\(store.diagnostics.count)")
+    }
+
+    /// 다시 읽기 결과를 상태 로그에도 남긴다(창을 보지 않고 확인할 수 있게).
+    private func stateLogLine(_ text: String) {
+        model?.appendEvent(text)
     }
 
     // MARK: - 창
@@ -339,6 +363,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         add(to: menu, title: "Dock 호출/닫기", action: #selector(togglePanelAction), key: "")
         add(to: menu, title: "잠금/해제", action: #selector(toggleLockAction), key: "")
         add(to: menu, title: "창 위치 초기화", action: #selector(resetPositionAction), key: "")
+        add(to: menu, title: "프로젝트 설정 다시 읽기", action: #selector(reloadCatalogAction), key: "")
         menu.addItem(.separator())
 
         let hotKeyItem = NSMenuItem(title: "호출 단축키", action: nil, keyEquivalent: "")

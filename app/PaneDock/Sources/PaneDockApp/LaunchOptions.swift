@@ -17,6 +17,8 @@ struct LaunchOptions {
     var projectsPath: String?
     /// 진단용: 시작 직후 창을 이 좌표로 옮긴다. 사용자가 창을 드래그한 것과 **같은 경로**를 탄다.
     var moveTo: CGPoint?
+    /// 진단용: 시작 후 이 시간(ms) 뒤에 메뉴의 "프로젝트 설정 다시 읽기"와 **같은 동작**을 한 번 수행한다.
+    var reloadAfterMilliseconds: Int?
 
     var isFake: Bool { fake != nil }
 }
@@ -100,6 +102,13 @@ func parseLaunchOptions(_ arguments: [String]) -> LaunchOptions? {
                 exit(2)
             }
             options.moveTo = CGPoint(x: x, y: y)
+        case "--reload-after":
+            index += 1
+            guard index < arguments.count, let value = Int(arguments[index]), value > 0 else {
+                FileHandle.standardError.write(Data("--reload-after requires milliseconds\n".utf8))
+                exit(2)
+            }
+            options.reloadAfterMilliseconds = value
         case "--help", "-h":
             return nil
         default:

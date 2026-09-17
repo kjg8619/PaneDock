@@ -48,23 +48,33 @@ public struct ProjectCatalog: Codable, Equatable, Sendable {
 }
 
 public enum ProjectCatalogLoadOutcome: Equatable, Sendable {
+    /// 파일이 없다. 등록된 프로젝트가 없는 상태로 동작한다.
     case fresh
     case loaded
-    case corrupt(backupPath: String?)
+    /// 읽을 수 없거나 형식·스키마가 맞지 않는다. **원본 파일은 건드리지 않는다.**
+    case corrupt
+    /// 이 앱이 모르는(더 새로운) 스키마 버전이다. **파일을 건드리지 않는다.**
     case unsupportedVersion(found: Int)
 
     public var label: String {
         switch self {
         case .fresh: return "fresh"
         case .loaded: return "loaded"
-        case .corrupt(let path): return "corrupt(backup=\(path ?? "-"))"
+        case .corrupt: return "corrupt"
         case .unsupportedVersion(let found): return "unsupportedVersion(\(found))"
         }
     }
+
+    /// 이 결과를 새 구성으로 적용할 수 있는지. 손상·미래 버전은 적용하지 않는다.
+    public var isUsable: Bool {
+        self == .fresh || self == .loaded
+    }
 }
 
-/// 카탈로그 로더. 저장 규칙은 설정과 같다(손상은 백업, 미래 버전은 보호).
-/// 다만 이번 구현은 **쓰지 않는다**. 앱이 사용자 파일을 덮어쓸 일이 없다.
+/// 저장 규칙은 설정과 같다(손상·미래 버전은 해석하지 않음).
+///
+/// **사용자 파일을 절대 고치지 않는다.** 손상돼도 백업으로 옮기거나 지우지 않고 그대로 두고,
+/// 읽기 실패만 보고한다. 앱이 설정을 자동 복구하는 일은 없다.
 public final class ProjectCatalogStore {
     public private(set) var outcome: ProjectCatalogLoadOutcome = .fresh
     public private(set) var catalog = ProjectCatalog()
@@ -80,6 +90,14 @@ public final class ProjectCatalogStore {
 
     public var fileURL: URL? { url }
     public var isMemoryOnly: Bool { url == nil }
+    public var isUsable: Bool { outcome.isUsable }
+
+    /// 파일을 다시 읽는다. 같은 인스턴스로 여러 번 호출할 수 있다.
+    @discardableResult
+    public func reload() -> ProjectCatalogLoadOutcome {
+        load()
+        return outcome
+    }
 
     public func load() {
         diagnostics = []
@@ -93,41 +111,79 @@ public final class ProjectCatalogStore {
             catalog = ProjectCatalog()
             return
         }
-        let data: Data
-        do {
-            data = try Data(contentsOf: url)
-        } catch {
-            outcome = .corrupt(backupPath: nil)
+        guard let data = try? Data(contentsOf: url) else {
+            outcome = .corrupt
             catalog = ProjectCatalog()
             return
         }
-        do {
-            let decoded = try JSONDecoder().decode(ProjectCatalog.self, from: data)
-            guard decoded.schemaVersion <= ProjectCatalog.currentSchemaVersion else {
-                // 미래 버전은 해석하지 않는다. 파일도 건드리지 않는다.
-                outcome = .unsupportedVersion(found: decoded.schemaVersion)
-                catalog = ProjectCatalog()
-                return
-            }
-            outcome = .loaded
-            catalog = decoded
-            diagnostics = ProjectCatalogValidator.diagnostics(for: decoded)
-        } catch {
-            let backup = backUpCorruptFile(at: url)
-            outcome = .corrupt(backupPath: backup)
+        guard let decoded = try? JSONDecoder().decode(ProjectCatalog.self, from: data) else {
+            // 형식이 깨졌다. 원본은 그대로 둔다.
+            outcome = .corrupt
             catalog = ProjectCatalog()
+            return
         }
+        guard decoded.schemaVersion <= ProjectCatalog.currentSchemaVersion else {
+            // 미래 버전은 해석하지 않는다. 파일도 건드리지 않는다.
+            outcome = .unsupportedVersion(found: decoded.schemaVersion)
+            catalog = ProjectCatalog()
+            return
+        }
+        outcome = .loaded
+        catalog = decoded
+        diagnostics = ProjectCatalogValidator.diagnostics(for: decoded)
     }
+}
 
-    private func backUpCorruptFile(at url: URL) -> String? {
-        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let backup = url.deletingPathExtension().appendingPathExtension("corrupt-\(stamp).json")
-        do {
-            try FileManager.default.moveItem(at: url, to: backup)
-            return backup.path
-        } catch {
-            return nil
+/// 카탈로그 적용 결과. 앱은 이 값만 화면·모델에 반영한다.
+public struct ProjectCatalogApplication: Equatable, Sendable {
+    public var catalog: ProjectCatalog
+    public var diagnostics: [String]
+    /// 사용자에게 보여줄 안내. 없으면 nil.
+    public var note: String?
+    /// 새 구성을 적용했는지(실패하면 false → 이전 구성 유지).
+    public var appliedNewConfiguration: Bool
+}
+
+public enum ProjectCatalogApplier {
+    /// 로딩 결과를 **하나의 일관된 구성**으로 확정한다.
+    ///
+    /// - `fresh`/`loaded`: 새 구성을 적용한다(파일이 없으면 빈 카탈로그 = 기본 Dock).
+    /// - `corrupt`/`unsupportedVersion`: **이전 정상 구성을 유지**하고 그 사실을 알린다.
+    /// - 어느 경우에도 사용자 파일을 고치지 않는다(호출자가 파일을 건드리지 않는다).
+    public static func apply(
+        load outcome: ProjectCatalogLoadOutcome,
+        loadedCatalog: ProjectCatalog,
+        loadedDiagnostics: [String],
+        previousCatalog: ProjectCatalog,
+        previousDiagnostics: [String],
+        isReload: Bool
+    ) -> ProjectCatalogApplication {
+        guard outcome.isUsable else {
+            return ProjectCatalogApplication(
+                catalog: previousCatalog,
+                diagnostics: previousDiagnostics,
+                note: "설정 읽기 실패 — 이전 설정 사용 중 (\(outcome.label))\n프로젝트 파일은 그대로 두었습니다. 내용을 고친 뒤 메뉴에서 다시 읽어 주세요.",
+                appliedNewConfiguration: false
+            )
         }
+
+        var parts: [String] = []
+        if isReload {
+            parts.append(
+                loadedCatalog.projects.isEmpty
+                    ? "프로젝트 설정을 다시 읽었습니다 — 등록된 프로젝트가 없어 기본 Dock으로 동작합니다"
+                    : "프로젝트 설정을 다시 읽었습니다 — 프로젝트 \(loadedCatalog.projects.count)개"
+            )
+        }
+        // 로더의 경고(중복 기준 폴더·잘못된 URL 등)는 조용히 무시하지 않는다.
+        parts.append(contentsOf: loadedDiagnostics.prefix(3))
+
+        return ProjectCatalogApplication(
+            catalog: loadedCatalog,
+            diagnostics: loadedDiagnostics,
+            note: parts.isEmpty ? nil : parts.joined(separator: "\n"),
+            appliedNewConfiguration: true
+        )
     }
 }
 
@@ -298,6 +354,35 @@ public enum ProjectResolver {
     public static func status(cwd: String, catalog: ProjectCatalog, catalogDiagnostics: [String]) -> ProjectMatchResult {
         _ = catalogDiagnostics
         return ProjectMatcher.match(cwd: cwd, in: catalog)
+    }
+}
+
+/// 로그·진단에 남길 수 있는 URL 형태로 줄인다.
+///
+/// 실제 링크에 토큰이나 서명된 쿼리가 붙어 있을 수 있으므로 **쿼리·프래그먼트·사용자정보를 제거**한다.
+/// 화면 표시는 사용자가 등록한 원본을 그대로 쓴다(자기 화면에서 자기 링크를 보는 것은 의도된 동작).
+public enum ProjectLinkPrivacy {
+    public static func redactedForLog(_ url: String) -> String {
+        guard let parsed = URL(string: url), let scheme = parsed.scheme, let host = parsed.host else {
+            return "<invalid-url>"
+        }
+        let path = parsed.path
+        return "\(scheme)://\(host)\(path.isEmpty ? "" : path)"
+    }
+}
+
+public enum ProjectSelection {
+    /// 설정을 다시 읽은 뒤에도 **진행 중인 링크 선택을 유지해도 되는지** 판정한다.
+    ///
+    /// 프로젝트가 바뀌었거나 링크 목록(개수·순서·ID·URL)이 달라졌으면 false다.
+    /// 이때는 이전 인덱스를 새 목록에 그대로 적용하지 않고 선택을 취소한다.
+    public static func selectionSurvives(reloadFrom old: ProjectResolution?, to new: ProjectResolution?) -> Bool {
+        guard let old, let new else { return false }
+        guard old.projectID == new.projectID else { return false }
+        guard old.links.count == new.links.count else { return false }
+        return zip(old.links, new.links).allSatisfy { previous, next in
+            previous.linkID == next.linkID && previous.url == next.url
+        }
     }
 }
 
