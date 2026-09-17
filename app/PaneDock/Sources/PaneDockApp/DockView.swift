@@ -1,3 +1,29 @@
+/// 항목 종류별 기호(앱 아이콘을 못 읽었을 때의 대체).
+private func itemSymbol(for kind: DockItemKind) -> String {
+    switch kind {
+    case .app: return "app"
+    case .folder: return "folder"
+    case .link: return "link"
+    }
+}
+
+/// 앱 항목의 실제 아이콘. 폴더·링크는 기호로 구분한다.
+private func itemIconImage(for item: DockItemTarget) -> NSImage? {
+    guard item.kind == .app else { return nil }
+    let image = NSWorkspace.shared.icon(forFile: item.target)
+    image.size = NSSize(width: 16, height: 16)
+    return image
+}
+
+/// 항목 실행 툴팁. 종류에 따라 무엇이 열리는지 밝힌다.
+private func itemHelp(for item: DockItemTarget) -> String {
+    switch item.kind {
+    case .app: return "앱 열기 — \(item.name) (\(item.target))"
+    case .folder: return "폴더 열기 — \(item.name) (\(item.target))"
+    case .link: return "링크 열기 — \(item.name) (\(item.target))"
+    }
+}
+
 import AppKit
 import FocusProbeCore
 import SwiftUI
@@ -31,11 +57,24 @@ struct DockView: View {
         ScreenGeometry.fallbackFrame.width
     }
 
-    private var visibleLinkCount: Int {
+    private var visibleItemCount: Int {
         DockBarLayout.linkBudget(
-            total: model.project?.links.count ?? 0,
+            total: model.resolution.allItems.count,
             availableWidth: availableWidth
         ).visible
+    }
+
+    /// 공통 항목과 프로젝트 항목의 경계(구분선을 넣을 위치).
+    private var commonItemCount: Int {
+        model.resolution.commonItems.count
+    }
+
+    /// 인라인에서 밀린 항목 수(조용히 자르지 않고 "+N"으로 알린다).
+    private var hiddenItemCount: Int {
+        DockBarLayout.linkBudget(
+            total: model.resolution.allItems.count,
+            availableWidth: availableWidth
+        ).hidden
     }
 
     var body: some View {
@@ -79,9 +118,9 @@ struct DockView: View {
 
             identityBlock
 
-            if !model.links(forInline: visibleLinkCount).isEmpty {
+            if !model.items(forInline: visibleItemCount).isEmpty {
                 separator
-                linkChips
+                itemChips
             }
 
             Spacer(minLength: 6)
@@ -115,6 +154,8 @@ struct DockView: View {
         .background(stateColor.opacity(0.18))
         .foregroundStyle(stateColor)
         .clipShape(Capsule())
+        // 상태 이름은 잘리면 안 된다(색만으로 구분하지 않는다는 규칙의 핵심이다).
+        .fixedSize(horizontal: true, vertical: false)
         .help(shortStatusHelp)
         .accessibilityLabel("상태: \(stateLabel)")
     }
@@ -141,34 +182,33 @@ struct DockView: View {
         .layoutPriority(0)
     }
 
-    private var linkChips: some View {
+    /// 등록한 항목(공통 → 프로젝트). 앱은 실제 앱 아이콘, 폴더·링크는 구분되는 기호를 쓴다.
+    private var itemChips: some View {
         HStack(spacing: 6) {
-            ForEach(model.links(forInline: visibleLinkCount), id: \.link.linkID) { entry in
+            ForEach(model.items(forInline: visibleItemCount)) { entry in
+                if entry.index == commonItemCount, commonItemCount > 0 {
+                    // 공통 항목과 프로젝트 항목의 경계.
+                    Rectangle().fill(Color.primary.opacity(0.12)).frame(width: 1, height: 26)
+                }
                 chip(
-                    icon: "link",
-                    label: entry.link.name,
-                    item: .link(entry.index),
-                    help: "\(entry.link.name) — \(entry.link.url)",
-                    action: { model.openLink(at: entry.index, source: .mouse) }
+                    icon: itemSymbol(for: entry.item.kind),
+                    image: itemIconImage(for: entry.item),
+                    label: entry.item.name,
+                    item: .item(entry.index),
+                    help: itemHelp(for: entry.item),
+                    action: { model.performItem(at: entry.index, source: .mouse) }
                 )
             }
-            if hiddenLinkCount > 0 {
+            if hiddenItemCount > 0 {
                 chip(
                     icon: "ellipsis",
-                    label: "+\(hiddenLinkCount)",
+                    label: "+\\(hiddenItemCount)",
                     item: .more,
-                    help: "표시하지 못한 링크 \(hiddenLinkCount)개. 더보기에서 전부 확인할 수 있습니다.",
+                    help: "표시하지 못한 항목 \\(hiddenItemCount)개. 더보기에서 전부 확인할 수 있습니다.",
                     action: { model.showDetails() }
                 )
             }
         }
-    }
-
-    private var hiddenLinkCount: Int {
-        DockBarLayout.linkBudget(
-            total: model.project?.links.count ?? 0,
-            availableWidth: availableWidth
-        ).hidden
     }
 
     private var actionCluster: some View {
@@ -209,6 +249,7 @@ struct DockView: View {
     /// 바에서 쓰는 공통 칩. 링크와 동작 버튼이 **같은 모양·같은 표시 규칙**을 쓴다.
     private func chip(
         icon: String,
+        image: NSImage? = nil,
         label: String,
         item: DockModel.FocusItem,
         enabled: Bool = true,
@@ -217,7 +258,11 @@ struct DockView: View {
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 4) {
-                Image(systemName: icon).font(.system(size: 11, weight: .medium))
+                if let image {
+                    Image(nsImage: image).frame(width: 14, height: 14)
+                } else {
+                    Image(systemName: icon).font(.system(size: 11, weight: .medium))
+                }
                 Text(label).font(.caption).lineLimit(1)
             }
             .padding(.horizontal, 9)
@@ -258,14 +303,14 @@ struct DockView: View {
 
     /// 프로젝트가 잡히면 프로젝트 이름, 아니면 폴더 이름.
     private var primaryTitle: String {
-        if let project = model.project { return project.projectName }
+        if model.resolution.hasProject { return model.resolution.projectName }
         if model.state.fullPath != nil { return model.state.folderName }
         return "대상 확인 중"
     }
 
     private var primaryTitleHelp: String {
-        if let project = model.project {
-            return "프로젝트: \(project.projectName) (기준 폴더 \(project.projectRoot))"
+        if model.resolution.hasProject {
+            return "프로젝트: \(model.resolution.projectName) (기준 폴더 \(model.resolution.projectRoot))"
         }
         return model.state.fullPath ?? "아직 대상을 확인하지 못했습니다"
     }
@@ -380,7 +425,7 @@ struct DockDetailsView: View {
                 if let notice = model.settingsNotice {
                     labeled("설정 파일", notice, color: .orange)
                 }
-                projectSection
+                itemSection
                 Divider()
                 footer
             }
@@ -445,49 +490,66 @@ struct DockDetailsView: View {
         return frontmost ? "최전면" : "비활성"
     }
 
+    /// 등록한 항목 전체. 바에서 "+N"으로 밀린 항목도 **여기서는 전부** 접근할 수 있다.
     @ViewBuilder
-    private var projectSection: some View {
-        if let project = model.project {
-            Divider()
-            HStack(spacing: 6) {
-                Text("프로젝트").font(.caption2).foregroundStyle(.secondary)
-                Text(project.projectName).font(.caption).bold()
-                Text("링크 \(project.links.count)개").font(.caption2).foregroundStyle(.secondary)
+    private var itemSection: some View {
+        Divider()
+        HStack(spacing: 6) {
+            Text("항목").font(.caption2).foregroundStyle(.secondary)
+            Text("공통 \(model.resolution.commonItems.count)개").font(.caption2)
+            if model.resolution.hasProject {
+                Text("· \(model.resolution.projectName) \(model.resolution.projectItems.count)개")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
-            labeled("기준 폴더", project.projectRoot, selectable: true)
-            // 인라인에서 "+N"으로 밀린 링크도 **여기서는 전부** 접근할 수 있다.
-            ForEach(Array(project.links.enumerated()), id: \.element.linkID) { index, link in
-                Button(action: { model.openLink(at: index, source: .mouse) }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "link").font(.caption2)
-                        Text(link.name).font(.caption).bold().lineLimit(1)
-                        Text(link.url).font(.caption2).foregroundStyle(.secondary)
-                            .lineLimit(1).truncationMode(.middle)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 6).padding(.vertical, 3)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.primary.opacity(model.hoveredItem == .link(index) ? 0.12 : 0.04))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .strokeBorder(
-                                model.focusedItem == .link(index) ? Color.accentColor : .clear,
-                                lineWidth: 2
-                            )
-                    )
-                }
-                .buttonStyle(.plain)
-                .onHover { inside in
-                    model.setHover(inside ? .link(index) : (model.hoveredItem == .link(index) ? nil : model.hoveredItem))
-                }
-                .help("\(link.name) — \(link.url)")
-            }
-            if !project.diagnostics.isEmpty {
-                labeled("프로젝트 경고", project.diagnostics.prefix(2).joined(separator: "\n"), color: .orange)
-            }
+            Spacer()
+            Button("Dock 편집…") { model.onOpenEditor?() }
+                .buttonStyle(.bordered)
+                .help("앱·폴더·링크를 추가하고 순서를 바꿉니다")
         }
+        if model.resolution.hasProject {
+            labeled("프로젝트", model.resolution.projectName, selectable: false)
+            labeled("기준 폴더", model.resolution.projectRoot)
+        }
+        ForEach(Array(model.resolution.allItems.enumerated()), id: \.element.itemID) { index, item in
+            itemRow(item, index: index)
+        }
+        if !model.resolution.diagnostics.isEmpty {
+            labeled("프로젝트 경고", model.resolution.diagnostics.prefix(2).joined(separator: "\n"), color: .orange)
+        }
+    }
+
+    private func itemRow(_ item: DockItemTarget, index: Int) -> some View {
+        Button(action: { model.performItem(at: index, source: .mouse) }) {
+            HStack(spacing: 6) {
+                if item.kind == .app {
+                    Image(nsImage: NSWorkspace.shared.icon(forFile: item.target))
+                        .frame(width: 14, height: 14)
+                } else {
+                    Image(systemName: itemSymbol(for: item.kind)).font(.caption2)
+                }
+                Text(item.name).font(.caption).bold().lineLimit(1)
+                Text(item.isCommon ? "공통" : "프로젝트")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Text(item.target).font(.caption2).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 6).padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.primary.opacity(model.hoveredItem == .item(index) ? 0.12 : 0.04))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(model.focusedItem == .item(index) ? Color.accentColor : .clear, lineWidth: 2)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { inside in
+            model.setHover(inside ? .item(index) : (model.hoveredItem == .item(index) ? nil : model.hoveredItem))
+        }
+        .help(itemHelp(for: item))
     }
 
     private var footer: some View {

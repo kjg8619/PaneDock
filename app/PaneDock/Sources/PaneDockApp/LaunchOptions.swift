@@ -21,6 +21,11 @@ struct LaunchOptions {
     var reloadAfterMilliseconds: Int?
     /// 진단용: 상세 보기를 연 상태로 시작한다(스크린샷·확인용).
     var detailsAtLaunch = false
+    /// 진단용: 편집창을 연 상태로 시작한다(스크린샷·확인용).
+    var editorAtLaunch = false
+    /// 진단용: 시작 후 이 시간(ms) 뒤에 **편집 초안에 항목 하나를 추가하고 저장**한다.
+    /// 임시 카탈로그(`--projects-path`)에서만 쓴다.
+    var editorSelfTestAfterMilliseconds: Int?
     /// 추적할 터미널 소스. 기본은 자동(최전면 앱을 따라간다).
     var hostSource: HostSource = .auto
 
@@ -127,6 +132,15 @@ func parseLaunchOptions(_ arguments: [String]) -> LaunchOptions? {
             options.hostSource = source
         case "--details":
             options.detailsAtLaunch = true
+        case "--editor":
+            options.editorAtLaunch = true
+        case "--editor-selftest":
+            index += 1
+            guard index < arguments.count, let value = Int(arguments[index]), value > 0 else {
+                FileHandle.standardError.write(Data("--editor-selftest requires milliseconds\n".utf8))
+                exit(2)
+            }
+            options.editorSelfTestAfterMilliseconds = value
         case "--move-to":
             index += 1
             guard index < arguments.count else {

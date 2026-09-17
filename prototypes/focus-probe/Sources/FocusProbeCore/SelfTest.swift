@@ -600,6 +600,7 @@ public enum SelfTest {
         results.append(contentsOf: hostBoundaryChecks())
         results.append(contentsOf: candidatePathChecks())
         results.append(contentsOf: dockBarChecks())
+        results.append(contentsOf: itemEditorChecks())
         return results
     }
 
@@ -612,16 +613,16 @@ public enum SelfTest {
             id: "shop",
             name: "Shop",
             root: "/work/shop",
-            links: [
-                ProjectLink(id: "repo", name: "저장소", url: "https://example.com/shop/repo"),
-                ProjectLink(id: "docs", name: "문서", url: "https://example.com/shop/docs"),
+            items: [
+                DockItem(id: "repo", kind: .link, name: "저장소", target: "https://example.com/shop/repo"),
+                DockItem(id: "docs", kind: .link, name: "문서", target: "https://example.com/shop/docs"),
             ]
         )
         let admin = Project(
             id: "admin",
             name: "Shop Admin",
             root: "/work/shop/admin",
-            links: [ProjectLink(id: "repo", name: "저장소", url: "https://example.com/admin")]
+            items: [DockItem(id: "repo", kind: .link, name: "저장소", target: "https://example.com/admin")]
         )
         let catalog = ProjectCatalog(projects: [shop, admin])
 
@@ -630,12 +631,12 @@ public enum SelfTest {
         let adminResolution = ProjectResolver.resolve(cwd: "/work/shop/admin/src", catalog: catalog)
         results.append(
             check(
-                "프로젝트: 경로에 맞는 이름과 링크 구성",
-                shopResolution?.projectName == "Shop"
-                    && shopResolution?.links.map(\.linkID) == ["repo", "docs"]
-                    && adminResolution?.projectName == "Shop Admin"
-                    && adminResolution?.links.map(\.linkID) == ["repo"],
-                "shop=\(shopResolution?.projectName ?? "-")/\(shopResolution?.links.count ?? -1) links admin=\(adminResolution?.projectName ?? "-")/\(adminResolution?.links.count ?? -1)"
+                "프로젝트: 경로에 맞는 이름과 항목 구성",
+                shopResolution.projectName == "Shop" && shopResolution.hasProject
+                    && shopResolution.projectItems.map(\.itemID) == ["repo", "docs"]
+                    && adminResolution.projectName == "Shop Admin"
+                    && adminResolution.projectItems.map(\.itemID) == ["repo"],
+                "shop=\(shopResolution.projectName)/\(shopResolution.projectItems.count)개 admin=\(adminResolution.projectName)/\(adminResolution.projectItems.count)개"
             )
         )
 
@@ -643,8 +644,8 @@ public enum SelfTest {
         results.append(
             check(
                 "프로젝트: 여러 기준 폴더가 맞으면 가장 구체적인 것",
-                adminResolution?.projectRoot == "/work/shop/admin",
-                "root=\(adminResolution?.projectRoot ?? "-")"
+                adminResolution.projectRoot == "/work/shop/admin",
+                "root=\(adminResolution.projectRoot)"
             )
         )
 
@@ -652,7 +653,7 @@ public enum SelfTest {
         results.append(
             check(
                 "프로젝트: 기준 폴더 자신도 매칭",
-                ProjectResolver.resolve(cwd: "/work/shop", catalog: catalog)?.projectID == "shop"
+                ProjectResolver.resolve(cwd: "/work/shop", catalog: catalog).projectID == "shop"
             )
         )
 
@@ -662,8 +663,8 @@ public enum SelfTest {
         results.append(
             check(
                 "프로젝트: 폴더 경계 — shop-old/shopping은 shop이 아니다",
-                shopOld == nil && shopOldish == nil,
-                "shop-old=\(shopOld?.projectID ?? "nil") shopping=\(shopOldish?.projectID ?? "nil")"
+                shopOld.hasProject == false && shopOldish.hasProject == false,
+                "shop-old=\(shopOld.hasProject ? shopOld.projectID : "없음") shopping=\(shopOldish.hasProject ? shopOldish.projectID : "없음")"
             )
         )
 
@@ -671,14 +672,14 @@ public enum SelfTest {
         results.append(
             check(
                 "프로젝트: 미등록 경로는 기본 Dock(판정 없음)",
-                ProjectResolver.resolve(cwd: "/other/place", catalog: catalog) == nil
-                    && ProjectResolver.resolve(cwd: "/other", catalog: ProjectCatalog()) == nil
+                ProjectResolver.resolve(cwd: "/other/place", catalog: catalog).hasProject == false
+                    && ProjectResolver.resolve(cwd: "/other", catalog: ProjectCatalog()).hasProject == false
             )
         )
 
         // 중복 기준 폴더 → 모호, 선택하지 않음
-        let duplicateA = Project(id: "a", name: "A", root: "/dup/root", links: [])
-        let duplicateB = Project(id: "b", name: "B", root: "/dup/root", links: [])
+        let duplicateA = Project(id: "a", name: "A", root: "/dup/root", items: [])
+        let duplicateB = Project(id: "b", name: "B", root: "/dup/root", items: [])
         let duplicateMatch = ProjectMatcher.match(cwd: "/dup/root/x", in: ProjectCatalog(projects: [duplicateA, duplicateB]))
         let duplicateResolution = ProjectResolver.resolve(cwd: "/dup/root/x", catalog: ProjectCatalog(projects: [duplicateA, duplicateB]))
         var ambiguousIDs: [String] = []
@@ -686,8 +687,8 @@ public enum SelfTest {
         results.append(
             check(
                 "프로젝트: 중복 기준 폴더는 모호로 안내하고 고르지 않음",
-                ambiguousIDs == ["a", "b"] && duplicateResolution == nil,
-                "ids=\(ambiguousIDs) resolution=\(duplicateResolution == nil ? "nil" : "있음")"
+                ambiguousIDs == ["a", "b"] && duplicateResolution.hasProject == false,
+                "ids=\(ambiguousIDs) resolution=\(duplicateResolution.hasProject == false ? "nil" : "있음")"
             )
         )
 
@@ -696,10 +697,10 @@ public enum SelfTest {
             id: "mixed",
             name: "Mixed",
             root: "/work/mixed",
-            links: [
-                ProjectLink(id: "ok", name: "정상", url: "https://example.com/ok"),
-                ProjectLink(id: "ftp", name: "FTP", url: "ftp://example.com/nope"),
-                ProjectLink(id: "js", name: "스크립트", url: "javascript:alert(1)"),
+            items: [
+                DockItem(id: "ok", kind: .link, name: "정상", target: "https://example.com/ok"),
+                DockItem(id: "ftp", kind: .link, name: "FTP", target: "ftp://example.com/nope"),
+                DockItem(id: "js", kind: .link, name: "스크립트", target: "javascript:alert(1)"),
             ]
         )
         let mixedCatalog = ProjectCatalog(projects: [mixed])
@@ -707,38 +708,38 @@ public enum SelfTest {
         let mixedResolution = ProjectResolver.resolve(cwd: "/work/mixed", catalog: mixedCatalog, catalogDiagnostics: mixedDiagnostics)
         results.append(
             check(
-                "프로젝트: http/https 외 링크는 제외하고 진단에 남김",
-                mixedResolution?.links.map(\.linkID) == ["ok"]
+                "프로젝트: http/https 외 링크 항목은 제외하고 진단에 남김",
+                mixedResolution.projectItems.map(\.itemID) == ["ok"]
                     && mixedDiagnostics.contains { $0.contains("ftp://") }
                     && mixedDiagnostics.contains { $0.contains("javascript:") },
-                "links=\(mixedResolution?.links.map(\.linkID) ?? []) 진단=\(mixedDiagnostics.count)건"
+                "항목=\(mixedResolution.projectItems.map(\.itemID)) 진단=\(mixedDiagnostics.count)건"
             )
         )
 
         // 중복 id 진단
-        let duplicateLinks = Project(
+        let duplicateItems = Project(
             id: "duplink",
             name: "Dup",
             root: "/work/dup",
-            links: [
-                ProjectLink(id: "same", name: "1", url: "https://example.com/1"),
-                ProjectLink(id: "same", name: "2", url: "https://example.com/2"),
+            items: [
+                DockItem(id: "same", kind: .link, name: "1", target: "https://example.com/1"),
+                DockItem(id: "same", kind: .link, name: "2", target: "https://example.com/2"),
             ]
         )
-        let duplicateProjectIDs = ProjectCatalog(projects: [shop, Project(id: "shop", name: "다른 Shop", root: "/work/other", links: [])])
-        let dupLinkDiagnostics = ProjectCatalogValidator.diagnostics(for: ProjectCatalog(projects: [duplicateLinks]))
+        let duplicateProjectIDs = ProjectCatalog(projects: [shop, Project(id: "shop", name: "다른 Shop", root: "/work/other", items: [])])
+        let dupLinkDiagnostics = ProjectCatalogValidator.diagnostics(for: ProjectCatalog(projects: [duplicateItems]))
         let dupProjectDiagnostics = ProjectCatalogValidator.diagnostics(for: duplicateProjectIDs)
         results.append(
             check(
-                "프로젝트: 중복 id(프로젝트·링크)를 진단",
-                dupLinkDiagnostics.contains { $0.contains("링크 id가 중복") }
+                "프로젝트: 중복 id(프로젝트·항목)를 진단",
+                dupLinkDiagnostics.contains { $0.contains("항목 id가 중복") }
                     && dupProjectDiagnostics.contains { $0.contains("프로젝트 id가 중복") },
                 "링크=\(dupLinkDiagnostics.count)건 프로젝트=\(dupProjectDiagnostics.count)건"
             )
         )
 
         // 대소문자는 그대로 비교한다
-        let caseCatalog = ProjectCatalog(projects: [Project(id: "case", name: "Case", root: "/Work/Shop", links: [])])
+        let caseCatalog = ProjectCatalog(projects: [Project(id: "case", name: "Case", root: "/Work/Shop", items: [])])
         results.append(
             check(
                 "프로젝트: 대소문자를 임의로 소문자화하지 않는다",
@@ -757,7 +758,7 @@ public enum SelfTest {
             let alias = base.appendingPathComponent("alias")
             try? FileManager.default.createSymbolicLink(atPath: alias.path, withDestinationPath: real.path)
             let linkCatalog = ProjectCatalog(projects: [
-                Project(id: "linked", name: "Linked", root: alias.path, links: [])
+                Project(id: "linked", name: "Linked", root: alias.path, items: [])
             ])
             let viaReal = ProjectMatcher.match(cwd: real.appendingPathComponent("sub").path, in: linkCatalog)
             let viaAlias = ProjectMatcher.match(cwd: alias.appendingPathComponent("sub").path, in: linkCatalog)
@@ -814,7 +815,7 @@ public enum SelfTest {
         let previousDiagnostics = ["이전 경고"]
 
         // 정상 로딩 → 새 구성 적용
-        let newCatalog = ProjectCatalog(projects: [shop, Project(id: "extra", name: "Extra", root: "/work/extra", links: [])])
+        let newCatalog = ProjectCatalog(projects: [shop, Project(id: "extra", name: "Extra", root: "/work/extra", items: [])])
         let applied = ProjectCatalogApplier.apply(
             load: .loaded, loadedCatalog: newCatalog, loadedDiagnostics: [],
             previousCatalog: previous, previousDiagnostics: previousDiagnostics, isReload: true
@@ -927,11 +928,11 @@ public enum SelfTest {
                 check(
                     "재로딩: 정상 변경을 반영하고 사용자 파일은 건드리지 않는다",
                     outcome == .loaded
-                        && first?.links.map(\.linkID) == ["repo", "docs"]
-                        && second?.links.map(\.linkID) == ["docs", "repo"]
-                        && second?.links.first?.url == "https://example.com/b2"
+                        && first.projectItems.map(\.itemID) == ["repo", "docs"]
+                        && second.projectItems.map(\.itemID) == ["docs", "repo"]
+                        && second.projectItems.first?.target == "https://example.com/b2"
                         && after == expectedAfterReload,
-                    "1차=\(first?.links.map(\.linkID) ?? []) 2차=\(second?.links.map(\.linkID) ?? []) 파일불변=\(after == expectedAfterReload)"
+                    "1차=\(first.projectItems.map(\.itemID) ?? []) 2차=\(second.projectItems.map(\.itemID) ?? []) 파일불변=\(after == expectedAfterReload)"
                 )
             )
             try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
@@ -946,7 +947,7 @@ public enum SelfTest {
 
             try? FileManager.default.removeItem(at: url)
             let removed = store.reload()
-            let backToDefault = store.catalog.projects.isEmpty && ProjectResolver.resolve(cwd: "/work/shop/api", catalog: store.catalog) == nil
+            let backToDefault = store.catalog.projects.isEmpty && ProjectResolver.resolve(cwd: "/work/shop/api", catalog: store.catalog).hasProject == false
 
             write("{ broken", to: url)
             let corrupt = store.reload()
@@ -980,8 +981,8 @@ public enum SelfTest {
             results.append(
                 check(
                     "재로딩: 실패 후 정상 설정으로 복구된다",
-                    failed == .corrupt && recovered == .loaded && resolved?.projectID == "shop" && resolved?.links.count == 2,
-                    "실패=\(failed.label) 복구=\(recovered.label) 프로젝트=\(resolved?.projectID ?? "-")"
+                    failed == .corrupt && recovered == .loaded && resolved.projectID == "shop" && resolved.projectItems.count == 2,
+                    "실패=\(failed.label) 복구=\(recovered.label) 프로젝트=\(resolved.projectID)"
                 )
             )
             try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
@@ -990,33 +991,33 @@ public enum SelfTest {
         // 5) 선택 유지 판정
         do {
             let base = ProjectCatalog(projects: [
-                Project(id: "p", name: "P", root: "/work/p", links: [
-                    ProjectLink(id: "one", name: "1", url: "https://example.com/1"),
-                    ProjectLink(id: "two", name: "2", url: "https://example.com/2"),
+                Project(id: "p", name: "P", root: "/work/p", items: [
+                    DockItem(id: "one", kind: .link, name: "1", target: "https://example.com/1"),
+                    DockItem(id: "two", kind: .link, name: "2", target: "https://example.com/2"),
                 ])
             ])
             let same = ProjectResolver.resolve(cwd: "/work/p", catalog: base)
             let reordered = ProjectResolver.resolve(cwd: "/work/p", catalog: ProjectCatalog(projects: [
-                Project(id: "p", name: "P", root: "/work/p", links: [
-                    ProjectLink(id: "two", name: "2", url: "https://example.com/2"),
-                    ProjectLink(id: "one", name: "1", url: "https://example.com/1"),
+                Project(id: "p", name: "P", root: "/work/p", items: [
+                    DockItem(id: "two", kind: .link, name: "2", target: "https://example.com/2"),
+                    DockItem(id: "one", kind: .link, name: "1", target: "https://example.com/1"),
                 ])
             ]))
             let urlChanged = ProjectResolver.resolve(cwd: "/work/p", catalog: ProjectCatalog(projects: [
-                Project(id: "p", name: "P", root: "/work/p", links: [
-                    ProjectLink(id: "one", name: "1", url: "https://example.com/1-changed"),
-                    ProjectLink(id: "two", name: "2", url: "https://example.com/2"),
+                Project(id: "p", name: "P", root: "/work/p", items: [
+                    DockItem(id: "one", kind: .link, name: "1", target: "https://example.com/1-changed"),
+                    DockItem(id: "two", kind: .link, name: "2", target: "https://example.com/2"),
                 ])
             ]))
             let shrunk = ProjectResolver.resolve(cwd: "/work/p", catalog: ProjectCatalog(projects: [
-                Project(id: "p", name: "P", root: "/work/p", links: [
-                    ProjectLink(id: "one", name: "1", url: "https://example.com/1"),
+                Project(id: "p", name: "P", root: "/work/p", items: [
+                    DockItem(id: "one", kind: .link, name: "1", target: "https://example.com/1"),
                 ])
             ]))
             let renamedProject = ProjectResolver.resolve(cwd: "/work/p", catalog: ProjectCatalog(projects: [
-                Project(id: "q", name: "Q", root: "/work/p", links: [
-                    ProjectLink(id: "one", name: "1", url: "https://example.com/1"),
-                    ProjectLink(id: "two", name: "2", url: "https://example.com/2"),
+                Project(id: "q", name: "Q", root: "/work/p", items: [
+                    DockItem(id: "one", kind: .link, name: "1", target: "https://example.com/1"),
+                    DockItem(id: "two", kind: .link, name: "2", target: "https://example.com/2"),
                 ])
             ]))
 
@@ -1040,24 +1041,26 @@ public enum SelfTest {
         do {
             let before = ProjectResolution(
                 projectID: "p", projectName: "P", projectRoot: "/work/p", matchedCWD: "/work/p",
-                links: [
-                    ProjectLinkTarget(projectID: "p", linkID: "one", name: "1", url: "https://example.com/1"),
-                    ProjectLinkTarget(projectID: "p", linkID: "two", name: "2", url: "https://example.com/2"),
+                commonItems: [],
+                projectItems: [
+                    DockItemTarget(scopeID: "p", isCommon: false, itemID: "one", kind: .link, name: "1", target: "https://example.com/1"),
+                    DockItemTarget(scopeID: "p", isCommon: false, itemID: "two", kind: .link, name: "2", target: "https://example.com/2"),
                 ],
                 diagnostics: []
             )
             // 재로딩 후 'one'이 사라지고 URL도 바뀐 구성
             let after = ProjectResolution(
                 projectID: "p", projectName: "P", projectRoot: "/work/p", matchedCWD: "/work/p",
-                links: [ProjectLinkTarget(projectID: "p", linkID: "two", name: "2", url: "https://example.com/2-changed")],
+                commonItems: [],
+                projectItems: [DockItemTarget(scopeID: "p", isCommon: false, itemID: "two", kind: .link, name: "2", target: "https://example.com/2-changed")],
                 diagnostics: []
             )
             let actionable = DockStateBuilder.make(
                 current: workInfo(cwd: "/work/p", pathStatus: .valid, focusStatus: .tracked),
                 previous: nil, connection: .connected, failure: nil, lock: DockLock()
             )
-            let staleSelection = ProjectActionPlanner.plan(target: before.links[0], in: after, state: actionable)
-            let alsoStale = ProjectActionPlanner.plan(target: before.links[1], in: after, state: actionable)
+            let staleSelection = DockItemActionPlanner.plan(target: before.allItems[0], in: after, state: actionable, validator: StubValidator(directories: []))
+            let alsoStale = DockItemActionPlanner.plan(target: before.allItems[1], in: after, state: actionable, validator: StubValidator(directories: []))
 
             results.append(
                 check(
@@ -1091,7 +1094,7 @@ public enum SelfTest {
         var results: [CheckResult] = []
 
         let resolution = ProjectResolver.resolve(cwd: "/work/shop/api", catalog: catalog)
-        let target = resolution?.links.first { $0.linkID == "repo" }
+        let target = resolution.projectItems.first { $0.itemID == "repo" }
         let actionable = DockStateBuilder.make(
             current: workInfo(cwd: "/work/shop/api", pathStatus: .valid, focusStatus: .tracked),
             previous: nil, connection: .connected, failure: nil, lock: DockLock()
@@ -1106,7 +1109,7 @@ public enum SelfTest {
 
         let allowed: Bool = {
             guard let target else { return false }
-            if case .openURL(let url) = ProjectActionPlanner.plan(target: target, in: resolution, state: actionable) {
+            if case .openURL(let url) = DockItemActionPlanner.plan(target: target, in: resolution, state: actionable, validator: StubValidator(directories: [])) {
                 return url.absoluteString == "https://example.com/shop/repo"
             }
             return false
@@ -1117,7 +1120,7 @@ public enum SelfTest {
         var reasons: [String] = []
         if let target {
             for state in [errorState, pendingState] {
-                let plan = ProjectActionPlanner.plan(target: target, in: resolution, state: state)
+                let plan = DockItemActionPlanner.plan(target: target, in: resolution, state: state, validator: StubValidator(directories: []))
                 if plan.rejectionReason != nil { blockedCount += 1 }
                 reasons.append(state.display.rawValue)
             }
@@ -1134,13 +1137,13 @@ public enum SelfTest {
         let otherResolution = ProjectResolver.resolve(cwd: "/work/shop/admin/src", catalog: catalog)
         var mismatchedRejected = false
         if let target {
-            mismatchedRejected = ProjectActionPlanner.plan(target: target, in: otherResolution, state: actionable).rejectionReason != nil
+            mismatchedRejected = DockItemActionPlanner.plan(target: target, in: otherResolution, state: actionable, validator: StubValidator(directories: [])).rejectionReason != nil
         }
-        // 링크가 사라진 경우
+        // 항목이 사라진 경우
         var missingLinkRejected = false
-        if let resolution {
-            let stale = ProjectLinkTarget(projectID: shop.id, linkID: "gone", name: "사라진 링크", url: "https://example.com/gone")
-            missingLinkRejected = ProjectActionPlanner.plan(target: stale, in: resolution, state: actionable).rejectionReason != nil
+        do {
+            let stale = DockItemTarget(scopeID: shop.id, isCommon: false, itemID: "gone", kind: .link, name: "사라진 링크", target: "https://example.com/gone")
+            missingLinkRejected = DockItemActionPlanner.plan(target: stale, in: resolution, state: actionable, validator: StubValidator(directories: [])).rejectionReason != nil
         }
         results.append(
             check(
@@ -2645,6 +2648,344 @@ public enum SelfTest {
                 "바=\(Int(DockBarLayout.barWidth(visibleLinkCount: 0, availableWidth: 1_512))) 높이=\(Int(DockBarLayout.windowHeight(detailsVisible: false)))"
             )
         )
+
+        return results
+    }
+
+    // MARK: - 항목 편집 (V15)
+
+    private static func itemEditorChecks() -> [CheckResult] {
+        var results: [CheckResult] = []
+
+        func temporaryDirectory() -> URL {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("pane-dock-items-\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            return url
+        }
+        func write(_ text: String, to url: URL) {
+            try? text.data(using: .utf8)?.write(to: url)
+        }
+
+        let shop = Project(
+            id: "shop",
+            name: "Shop",
+            root: "/work/shop",
+            items: [DockItem(id: "repo", kind: .link, name: "저장소", target: "https://example.com/shop")]
+        )
+        let base = ProjectCatalog(
+            common: [DockItem(id: "term", kind: .app, name: "터미널", target: "/Applications/Utilities/Terminal.app")],
+            projects: [shop]
+        )
+
+        // 1) 편집 초안: 추가·수정·삭제·정렬 (공통/프로젝트 각각)
+        do {
+            var draft = ProjectCatalogDraft(catalog: base, scope: .common)
+            let added = DockItem(kind: .folder, name: "작업 폴더", target: "/work")
+            draft.add(added)
+            let addedToCommon = draft.items.count == 2 && draft.items.last?.id == added.id
+
+            draft.update(DockItem(id: added.id, kind: .folder, name: "작업 폴더 2", target: "/work/sub"))
+            let updated = draft.items.first { $0.id == added.id }?.name == "작업 폴더 2"
+
+            let movedByKeyboard = draft.move(itemID: added.id, by: -1)
+            let movedToTop = draft.items.first?.id == added.id
+            let movedByDrag = { () -> Bool in
+                draft.move(itemID: added.id, toIndex: 1)
+                return draft.items.last?.id == added.id
+            }()
+
+            draft.remove(itemID: added.id)
+            let removed = draft.items.count == 1 && draft.items.first?.id == "term"
+
+            // 프로젝트 항목은 공통에 영향을 주지 않는다.
+            var projectDraft = ProjectCatalogDraft(catalog: base, scope: .project(id: "shop"))
+            projectDraft.add(DockItem(id: "docs", kind: .link, name: "문서", target: "https://example.com/docs"))
+            let projectItems = projectDraft.items(in: .project(id: "shop")).map(\.id) == ["repo", "docs"]
+            let commonUntouched = projectDraft.items(in: .common).map(\.id) == ["term"]
+
+            results.append(
+                check(
+                    "V15: 항목 추가·수정·삭제·정렬이 초안에서 동작한다",
+                    addedToCommon && updated && movedByKeyboard && movedToTop && movedByDrag && removed
+                        && projectItems && commonUntouched,
+                    "추가=\(addedToCommon) 수정=\(updated) 키보드이동=\(movedByKeyboard) 드래그이동=\(movedByDrag) 삭제=\(removed) 프로젝트분리=\(projectItems && commonUntouched)"
+                )
+            )
+        }
+
+        // 2) 저장 → 다시 읽어 복원. 취소하면 원본이 그대로다.
+        do {
+            let directory = temporaryDirectory()
+            let url = directory.appendingPathComponent("projects.json")
+            write(#"{"schemaVersion":2,"common":[],"projects":[{"id":"shop","name":"Shop","root":"/work/shop","items":[{"id":"repo","kind":"link","name":"저장소","target":"https://example.com/shop"}]}]}"#, to: url)
+            let store = ProjectCatalogStore(url: url)
+            var draft = ProjectCatalogDraft(catalog: store.catalog, scope: .common)
+            draft.add(DockItem(id: "finder", kind: .app, name: "Finder", target: "/System/Library/CoreServices/Finder.app"))
+            draft.add(DockItem(id: "docs", kind: .folder, name: "문서", target: "/Users/me/Documents"))
+            let beforeSave = try? Data(contentsOf: url)
+
+            // 저장 전에는 파일이 바뀌지 않는다.
+            let untouchedBeforeSave = (try? Data(contentsOf: url)) == beforeSave
+
+            let outcome = store.save(draft.catalog)
+            let saved = outcome.isSaved && store.catalog.common.map(\.id) == ["finder", "docs"]
+
+            // "재시작": 새 스토어가 같은 구성을 읽는다.
+            let reopened = ProjectCatalogStore(url: url)
+            let restored = reopened.catalog.common.map(\.id) == ["finder", "docs"]
+                && reopened.catalog.projects.first?.items.map(\.id) == ["repo"]
+                && reopened.catalog.common.first?.kind == .app
+
+            // 취소: 편집만 하고 저장하지 않으면 파일도 메모리도 그대로다.
+            let urlForCancel = directory.appendingPathComponent("cancel.json")
+            write(#"{"schemaVersion":2,"common":[],"projects":[]}"#, to: urlForCancel)
+            let cancelStore = ProjectCatalogStore(url: urlForCancel)
+            var cancelDraft = ProjectCatalogDraft(catalog: cancelStore.catalog, scope: .common)
+            cancelDraft.add(DockItem(id: "x", kind: .folder, name: "임시", target: "/tmp"))
+            let cancelKeepsFile = (try? Data(contentsOf: urlForCancel)) == Data(#"{"schemaVersion":2,"common":[],"projects":[]}"#.utf8)
+            let cancelKeepsCatalog = cancelStore.catalog.common.isEmpty && cancelDraft.isDirty
+
+            results.append(
+                check(
+                    "V15: 저장하면 재시작 후에도 복원되고, 저장 전·취소에는 원본이 그대로다",
+                    untouchedBeforeSave && saved && restored && cancelKeepsFile && cancelKeepsCatalog,
+                    "저장전불변=\(untouchedBeforeSave) 저장=\(saved) 복원=\(restored) 취소보존=\(cancelKeepsFile && cancelKeepsCatalog)"
+                )
+            )
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        // 3) v1 형식 호환 + 첫 저장 시 마이그레이션·백업
+        do {
+            let directory = temporaryDirectory()
+            let url = directory.appendingPathComponent("projects.json")
+            let legacy = #"{"schemaVersion":1,"projects":[{"id":"shop","name":"Shop","root":"/work/shop","links":[{"id":"repo","name":"저장소","url":"https://example.com/shop"},{"id":"docs","name":"문서","url":"https://example.com/docs"}]}]}"#
+            write(legacy, to: url)
+            let store = ProjectCatalogStore(url: url)
+            let readItems = store.catalog.projects.first?.items ?? []
+            let migrated = readItems.map(\.id) == ["repo", "docs"]
+                && readItems.allSatisfy { $0.kind == .link }
+                && readItems.first?.target == "https://example.com/shop"
+                && store.catalog.common.isEmpty
+
+            var draft = ProjectCatalogDraft(catalog: store.catalog, scope: .common)
+            let needsMigration = draft.requiresFormatMigration
+            draft.add(DockItem(id: "term", kind: .app, name: "터미널", target: "/Applications/Utilities/Terminal.app"))
+            let outcome = store.save(draft.catalog)
+
+            var backupPath: String?
+            if case .saved(let path) = outcome { backupPath = path }
+            let backupKeepsOriginal = backupPath.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) } == Data(legacy.utf8)
+            let rewritten = ProjectCatalogStore(url: url)
+            let v2 = rewritten.catalog.schemaVersion == 2
+                && rewritten.catalog.common.map(\.id) == ["term"]
+                && rewritten.catalog.projects.first?.items.map(\.id) == ["repo", "docs"]
+
+            results.append(
+                check(
+                    "V15: v1 파일을 읽고, 첫 저장에서 v2로 바꾸며 원본을 백업한다",
+                    migrated && needsMigration && v2 && backupKeepsOriginal,
+                    "v1읽기=\(migrated) 전환필요=\(needsMigration) v2저장=\(v2) 백업보존=\(backupKeepsOriginal)"
+                )
+            )
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        // 4) 저장 거부·충돌: 덮어쓰지 않는다
+        do {
+            let directory = temporaryDirectory()
+            let url = directory.appendingPathComponent("projects.json")
+            write(#"{"schemaVersion":2,"common":[],"projects":[]}"#, to: url)
+            let store = ProjectCatalogStore(url: url)
+
+            // 손상 파일 위에 쓰지 않는다
+            let corruptURL = directory.appendingPathComponent("corrupt.json")
+            let broken = Data("{ broken".utf8)
+            try? broken.write(to: corruptURL)
+            let corruptStore = ProjectCatalogStore(url: corruptURL)
+            let corruptSave = corruptStore.save(ProjectCatalog())
+            let corruptKept = (try? Data(contentsOf: corruptURL)) == broken
+
+            // 외부에서 바뀌면 충돌로 알리고 덮어쓰지 않는다
+            let external = Data(#"{"schemaVersion":2,"common":[{"id":"outside","kind":"folder","name":"밖","target":"/tmp"}],"projects":[]}"#.utf8)
+            try? external.write(to: url)
+            var conflictSave: ProjectCatalogSaveOutcome?
+            conflictSave = store.save(ProjectCatalog(common: [DockItem(id: "mine", kind: .folder, name: "내것", target: "/tmp")]))
+            let conflictDetected: Bool = {
+                if case .conflict = conflictSave { return true }
+                return false
+            }()
+            let externalKept = (try? Data(contentsOf: url)) == external
+
+            // 검증 실패(중복 id)도 쓰지 않는다
+            let duplicateIDs = ProjectCatalog(common: [
+                DockItem(id: "same", kind: .folder, name: "A", target: "/tmp"),
+                DockItem(id: "same", kind: .folder, name: "B", target: "/tmp"),
+            ])
+            let freshURL = directory.appendingPathComponent("fresh.json")
+            let freshStore = ProjectCatalogStore(url: freshURL)
+            let refused = freshStore.save(duplicateIDs)
+            let noFileWritten = FileManager.default.fileExists(atPath: freshURL.path) == false
+            let memoryOnly = ProjectCatalogStore(url: nil).save(ProjectCatalog())
+
+            results.append(
+                check(
+                    "V15: 손상·외부 변경·검증 실패에는 저장하지 않는다",
+                    corruptSave.rejectionReason != nil && corruptKept
+                        && conflictDetected && externalKept
+                        && refused.rejectionReason != nil && noFileWritten
+                        && memoryOnly.rejectionReason != nil,
+                    "손상거부=\(corruptSave.rejectionReason != nil) 충돌=\(conflictDetected) 외부보존=\(externalKept) 검증거부=\(refused.rejectionReason != nil) 메모리=\(memoryOnly.rejectionReason != nil)"
+                )
+            )
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        // 5) 편집 중 pane 전환에도 편집 대상이 바뀌지 않는다
+        do {
+            let catalog = ProjectCatalog(projects: [
+                shop,
+                Project(id: "admin", name: "Admin", root: "/work/admin", items: []),
+            ])
+            var draft = ProjectCatalogDraft(catalog: catalog, scope: .project(id: "shop"))
+            // 추적 대상이 다른 프로젝트로 바뀌는 상황(포커스 이동)을 흉내 낸다.
+            let otherResolution = ProjectResolver.resolve(cwd: "/work/admin/x", catalog: catalog)
+            let scopeFixed = draft.scope == .project(id: "shop")
+                && draft.items.map(\.id) == ["repo"]
+                && otherResolution.projectID == "admin"
+            // 사용자가 직접 바꾸면 바뀐다.
+            draft.selectScope(.project(id: "admin"))
+            let userChanged = draft.scope == .project(id: "admin")
+
+            results.append(
+                check(
+                    "V15: 편집 중 포커스가 바뀌어도 편집 대상은 고정되고, 사용자가 고를 때만 바뀐다",
+                    scopeFixed && userChanged,
+                    "고정=\(scopeFixed) 사용자변경=\(userChanged)"
+                )
+            )
+        }
+
+        // 6) 공통 항목은 추적 상태와 독립적으로 실행되고, 프로젝트 항목은 기존 규칙을 따른다
+        do {
+            let catalog = ProjectCatalog(
+                common: [DockItem(id: "finder", kind: .app, name: "Finder", target: "/System/Library/CoreServices/Finder.app")],
+                projects: [shop]
+            )
+            let resolution = ProjectResolver.resolve(cwd: "/work/shop/api", catalog: catalog)
+            let validator = StubValidator(directories: ["/System/Library/CoreServices/Finder.app"])
+            let errorState = DockStateBuilder.make(
+                current: workInfo(cwd: "/work/shop/api", pathStatus: .missing, focusStatus: .unknown),
+                previous: nil, connection: .connected, failure: nil, lock: DockLock()
+            )
+
+            let commonTarget = resolution.commonItems[0]
+            let projectTarget = resolution.projectItems[0]
+            let commonPlan = DockItemActionPlanner.plan(target: commonTarget, in: resolution, state: errorState, validator: validator)
+            let projectPlan = DockItemActionPlanner.plan(target: projectTarget, in: resolution, state: errorState, validator: validator)
+
+            // 없는 앱은 실행하지 않는다
+            let missingApp = DockItemTarget(scopeID: "common", isCommon: true, itemID: "gone", kind: .app, name: "없음", target: "/Applications/None.app")
+            let listedWithMissing = ProjectResolution(
+                projectID: "", projectName: "", projectRoot: "", matchedCWD: "/work/shop/api",
+                commonItems: resolution.commonItems + [missingApp], projectItems: [], diagnostics: []
+            )
+            let missingPlan = DockItemActionPlanner.plan(target: missingApp, in: listedWithMissing, state: errorState, validator: validator)
+
+            results.append(
+                check(
+                    "V15: 공통 항목은 추적 상태와 독립적으로 실행되고, 프로젝트 항목은 기존 규칙을 따른다",
+                    commonPlan == .openApplication(URL(fileURLWithPath: "/System/Library/CoreServices/Finder.app"))
+                        && projectPlan.rejectionReason != nil
+                        && missingPlan.rejectionReason != nil,
+                    "공통=\(String(describing: commonPlan)) 프로젝트=\(projectPlan.rejectionReason ?? "-") 없는앱=\(missingPlan.rejectionReason ?? "-")"
+                )
+            )
+        }
+
+        // 7) 순서·대상이 바뀐 뒤 이전 선택은 실행되지 않는다 (공통 항목 포함)
+        do {
+            let before = ProjectCatalog(
+                common: [
+                    DockItem(id: "a", kind: .folder, name: "A", target: "/work/a"),
+                    DockItem(id: "b", kind: .folder, name: "B", target: "/work/b"),
+                ]
+            )
+            let after = ProjectCatalog(
+                common: [
+                    DockItem(id: "b", kind: .folder, name: "B", target: "/work/b"),
+                    DockItem(id: "a", kind: .folder, name: "A", target: "/work/a-changed"),
+                ]
+            )
+            let validator = StubValidator(directories: ["/work/a", "/work/b", "/work/a-changed"])
+            let oldResolution = ProjectResolver.resolve(cwd: "/other", catalog: before)
+            let newResolution = ProjectResolver.resolve(cwd: "/other", catalog: after)
+            let state = DockStateBuilder.make(current: nil, previous: nil, connection: .unavailable, failure: nil, lock: DockLock())
+
+            let staleA = DockItemActionPlanner.plan(target: oldResolution.commonItems[0], in: newResolution, state: state, validator: validator)
+            // 순서만 바뀐 항목은 **같은 항목**이므로 그대로 실행된다(엉뚱한 항목이 실행되지 않는다).
+            let movedB = DockItemActionPlanner.plan(target: oldResolution.commonItems[1], in: newResolution, state: state, validator: validator)
+            let movedBIsItself = movedB == .openFolder(URL(fileURLWithPath: "/work/b"))
+            // 새 목록의 첫 자리(순번)로 선택해도 id로 찾으므로 b가 실행된다.
+            let byID = DockItemActionPlanner.plan(target: newResolution.commonItems[0], in: newResolution, state: state, validator: validator)
+                == .openFolder(URL(fileURLWithPath: "/work/b"))
+            let survives = ProjectSelection.selectionSurvives(reloadFrom: oldResolution, to: newResolution)
+
+            results.append(
+                check(
+                    "V15: 대상이 바뀐 항목은 거부하고, 순서만 바뀐 항목은 같은 항목으로 실행된다",
+                    staleA.rejectionReason != nil && movedBIsItself && byID && !survives,
+                    "대상변경거부=\(staleA.rejectionReason != nil) 순서변경=\(movedBIsItself) 순번무관=\(byID) 선택유지=\(survives)"
+                )
+            )
+        }
+
+        // 8) 항목 형식 검증 (종류별 대상)
+        do {
+            let app = DockItemValidator.isWellFormed(DockItem(kind: .app, name: "A", target: "/Applications/A.app"))
+            let badApp = DockItemValidator.isWellFormed(DockItem(kind: .app, name: "A", target: "/Applications/A"))
+            let folder = DockItemValidator.isWellFormed(DockItem(kind: .folder, name: "F", target: "/tmp"))
+            let relative = DockItemValidator.isWellFormed(DockItem(kind: .folder, name: "F", target: "tmp"))
+            let link = DockItemValidator.isWellFormed(DockItem(kind: .link, name: "L", target: "https://example.com"))
+            let badLink = DockItemValidator.isWellFormed(DockItem(kind: .link, name: "L", target: "ftp://example.com"))
+            let emptyName = DockItemValidator.isWellFormed(DockItem(kind: .folder, name: " ", target: "/tmp"))
+
+            results.append(
+                check(
+                    "V15: 항목 형식 검증(종류별 대상·빈 이름)",
+                    app && !badApp && folder && !relative && link && !badLink && !emptyName,
+                    "app=\(app)/\(badApp) folder=\(folder)/\(relative) link=\(link)/\(badLink) 빈이름=\(emptyName)"
+                )
+            )
+        }
+
+        // 9) 항목 id는 **범위 안에서만** 고유하면 된다(v1과 같은 규칙 — 기존 파일을 거부하지 않는다)
+        do {
+            let crossProject = ProjectCatalog(projects: [
+                Project(id: "a", name: "A", root: "/work/a", items: [
+                    DockItem(id: "repo", kind: .link, name: "저장소", target: "https://example.com/a")
+                ]),
+                Project(id: "b", name: "B", root: "/work/b", items: [
+                    DockItem(id: "repo", kind: .link, name: "저장소", target: "https://example.com/b")
+                ]),
+            ])
+            let sameProject = ProjectCatalog(projects: [
+                Project(id: "a", name: "A", root: "/work/a", items: [
+                    DockItem(id: "repo", kind: .link, name: "1", target: "https://example.com/1"),
+                    DockItem(id: "repo", kind: .link, name: "2", target: "https://example.com/2"),
+                ])
+            ])
+            let crossAllowed = ProjectCatalogValidator.fatalProblems(in: crossProject).isEmpty
+            let sameBlocked = ProjectCatalogValidator.fatalProblems(in: sameProject).isEmpty == false
+            results.append(
+                check(
+                    "V15: 항목 id는 범위 안에서만 고유하면 된다(프로젝트가 다르면 같은 id 허용)",
+                    crossAllowed && sameBlocked,
+                    "다른프로젝트허용=\(crossAllowed) 같은프로젝트차단=\(sameBlocked)"
+                )
+            )
+        }
 
         return results
     }

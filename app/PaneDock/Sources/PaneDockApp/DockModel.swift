@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import FocusProbeCore
 import Foundation
+import UniformTypeIdentifiers
 
 /// 화면 상태를 소유한다. 추적은 백그라운드 큐에서 돌리고, 결과만 메인으로 가져온다.
 ///
@@ -14,7 +15,7 @@ import Foundation
 final class DockModel: ObservableObject {
     /// 키보드로 이동할 수 있는 항목. 화면에 보이는 순서와 같다.
     enum FocusItem: Equatable {
-        case link(Int)
+        case item(Int)
         case openFolder
         case copyPath
         case lock
@@ -27,7 +28,7 @@ final class DockModel: ObservableObject {
 
         var label: String {
             switch self {
-            case .link(let index): return "link:\(index)"
+            case .item(let index): return "item:\(index)"
             case .openFolder: return "openFolder"
             case .copyPath: return "copyPath"
             case .lock: return "lock"
@@ -58,7 +59,11 @@ final class DockModel: ObservableObject {
     /// `focusedItem`과 같은 방식으로 모델이 들고 있는다.
     @Published private(set) var hoveredItem: FocusItem?
     /// 현재 표시 대상에 해당하는 프로젝트. 없으면 기본 Dock으로 동작한다.
-    @Published private(set) var project: ProjectResolution?
+    /// 현재 표시 묶음(공통 항목 + 프로젝트 항목). 프로젝트가 없어도 만들어진다.
+    @Published private(set) var resolution = ProjectResolution(
+        projectID: "", projectName: "", projectRoot: "", matchedCWD: "",
+        commonItems: [], projectItems: [], diagnostics: []
+    )
     /// 설정 파일 관련 안내(손상·미래 버전 등). 없으면 nil.
     @Published private(set) var settingsNotice: String?
     /// 프로젝트 설정 상태 안내(다시 읽기 결과·경고). 없으면 nil.
@@ -66,6 +71,33 @@ final class DockModel: ObservableObject {
 
     /// 창 숨기기 요청. AppDelegate가 처리한다.
     var onHide: (() -> Void)?
+
+    /// 편집창 열기 요청. AppDelegate가 창을 만든다.
+    var onOpenEditor: (() -> Void)?
+    /// 초안 저장 요청. AppDelegate가 실제 파일에 쓰고 (안내문, 성공 여부)를 돌려준다.
+    var onSaveDraft: ((ProjectCatalog) -> (message: String, succeeded: Bool))?
+
+    /// 편집 중인 초안. nil이면 편집 중이 아니다.
+    ///
+    /// **저장/취소 전에는 실제 구성에 반영되지 않는다.** 편집 범위는 열 때 정해지고,
+    /// 터미널 포커스가 바뀌어도 자동으로 바뀌지 않는다.
+    @Published private(set) var draft: ProjectCatalogDraft?
+    /// 편집창 안내(저장 결과·충돌·검증 실패). 없으면 nil.
+    @Published private(set) var editorNotice: String?
+
+    /// 편집창에서 고른 항목.
+    @Published private(set) var editorSelection: String?
+    /// 편집창의 입력 폼. `editingID`가 있으면 그 항목을 고치는 중이다.
+    struct ItemForm: Equatable {
+        var kind: DockItemKind = .link
+        var name: String = ""
+        var target: String = ""
+        var editingID: String?
+        var isPresented = false
+    }
+    @Published private(set) var editorForm = ItemForm()
+    /// 드래그로 옮기는 중인 항목 id. 드래그 중에는 실행하지 않는다.
+    @Published private(set) var editorDragging: String?
 
     /// 상세 보기 표시 여부. 창 크기는 AppDelegate가 이 값에 맞춘다.
     @Published private(set) var isDetailsVisible = false
@@ -163,11 +195,14 @@ final class DockModel: ObservableObject {
         actionInfo = lock.info ?? effectiveCurrent
         // 프로젝트 판정도 **화면에 반영한 CWD**로만 만든다.
         // 표시된 링크와 실행 대상이 어긋나지 않게 하기 위해서다.
-        project = actionInfo?.reportedCWD.flatMap {
-            ProjectResolver.resolve(cwd: $0, catalog: catalog, catalogDiagnostics: catalogDiagnostics)
-        }
+        // 프로젝트가 없어도 **공통 항목은 담긴다**.
+        resolution = ProjectResolver.resolve(
+            cwd: actionInfo?.reportedCWD ?? "",
+            catalog: catalog,
+            catalogDiagnostics: catalogDiagnostics
+        )
         // 프로젝트가 바뀌어 링크 수가 달라지면 바 너비도 달라진다.
-        let linkCount = project?.links.count ?? 0
+        let linkCount = resolution.allItems.count
         if linkCount != lastLayoutLinkCount {
             lastLayoutLinkCount = linkCount
             onLayoutChange?()
@@ -182,7 +217,7 @@ final class DockModel: ObservableObject {
             fullPath: state.fullPath ?? "-",
             paneID: state.paneID ?? "-",
             locked: state.isLocked,
-            project: project.map { "\($0.projectID)(\($0.links.count))" } ?? "-"
+            project: resolution.hasProject ? "\(resolution.projectID)(\(resolution.allItems.count))" : "-"
         )
     }
 
@@ -258,13 +293,13 @@ final class DockModel: ObservableObject {
     /// 링크 목록이 달라졌으면 **진행 중인 링크 선택을 취소**한다.
     /// 이전 인덱스를 새 목록에 그대로 적용하지 않는다. 재로딩은 아무것도 실행하지 않는다.
     func updateCatalog(_ catalog: ProjectCatalog, diagnostics: [String], note: String? = nil) {
-        let previousProject = project
+        let previousResolution = resolution
         self.catalog = catalog
         self.catalogDiagnostics = diagnostics
         catalogNotice = note
         rebuildState()
 
-        if case .link = focusedItem, !ProjectSelection.selectionSurvives(reloadFrom: previousProject, to: project) {
+        if case .item = focusedItem, !ProjectSelection.selectionSurvives(reloadFrom: previousResolution, to: resolution) {
             focusedItem = nil
             stateLog?.appendEvent("selection=cancelled (catalog changed)")
         }
@@ -279,11 +314,10 @@ final class DockModel: ObservableObject {
     /// 숨기기·종료는 상세 보기 안에 있으므로 열렸을 때만 순회한다.
     var focusItems: [FocusItem] {
         var items: [FocusItem] = []
-        if let project {
-            let count = isDetailsVisible ? project.links.count : visibleLinkCount
-            for index in 0..<min(count, project.links.count) {
-                items.append(.link(index))
-            }
+        let all = resolution.allItems
+        let count = isDetailsVisible ? all.count : visibleItemCount
+        for index in 0..<min(count, all.count) {
+            items.append(.item(index))
         }
         items.append(contentsOf: [.openFolder, .copyPath, .lock])
         items.append(isDetailsVisible ? .detailsClose : .more)
@@ -293,18 +327,26 @@ final class DockModel: ObservableObject {
         return items
     }
 
-    /// 바에 인라인으로 그릴 링크 수. 화면 너비와 항목 수로 정해진다.
-    var visibleLinkCount: Int {
+    /// 바에 인라인으로 그릴 항목 수. 화면 너비와 항목 수로 정해진다.
+    var visibleItemCount: Int {
         DockBarLayout.linkBudget(
-            total: project?.links.count ?? 0,
+            total: resolution.allItems.count,
             availableWidth: ScreenGeometry.fallbackFrame.width
         ).visible
     }
 
-    /// 인라인으로 보여줄 링크 목록.
-    func links(forInline limit: Int) -> [(index: Int, link: ProjectLinkTarget)] {
-        guard let project else { return [] }
-        return project.links.prefix(max(0, limit)).enumerated().map { (index: $0.offset, link: $0.element) }
+    /// 바에 인라인으로 그릴 항목. `id`를 명시해 목록 갱신이 안정적이게 한다.
+    struct InlineItem: Identifiable, Equatable {
+        var id: String
+        var index: Int
+        var item: DockItemTarget
+    }
+
+    /// 인라인으로 보여줄 항목 목록(공통 → 프로젝트 순서).
+    func items(forInline limit: Int) -> [InlineItem] {
+        resolution.allItems.prefix(max(0, limit)).enumerated().map {
+            InlineItem(id: $0.element.itemID, index: $0.offset, item: $0.element)
+        }
     }
 
     func showDetails() {
@@ -323,6 +365,232 @@ final class DockModel: ObservableObject {
 
     func toggleDetails() {
         isDetailsVisible ? hideDetails() : showDetails()
+    }
+
+    // MARK: - Dock 편집 (초안 → 저장/취소)
+
+    /// 편집을 시작한다. 범위를 지정하지 않으면 **지금 표시 중인 대상**을 고른다.
+    /// 이후 포커스가 바뀌어도 이 범위는 바뀌지 않는다.
+    func beginEditing(scope: ItemScope? = nil) {
+        let chosen = scope ?? (resolution.hasProject ? ItemScope.project(id: resolution.projectID) : .common)
+        // 없는 프로젝트를 가리키면 공통으로 떨어진다.
+        let safe = ProjectCatalogDraft(catalog: catalog, scope: chosen).isScopeAvailable(chosen) ? chosen : .common
+        draft = ProjectCatalogDraft(catalog: catalog, scope: safe)
+        editorNotice = nil
+        stateLog?.appendEvent("editor=open scope=\(safe.scopeID)")
+    }
+
+    /// 편집을 취소한다. **아무것도 저장하지 않는다.**
+    func cancelEditing() {
+        draft = nil
+        editorNotice = nil
+        stateLog?.appendEvent("editor=close result=cancelled")
+    }
+
+    /// 편집 범위를 사용자가 직접 바꾼다(자동 변경 경로는 없다).
+    func selectEditingScope(_ scope: ItemScope) {
+        draft?.selectScope(scope)
+        editorSelection = nil
+        editorForm = ItemForm()
+    }
+
+    // MARK: - 편집창의 목록·폼 (매크로 `@State`를 쓸 수 없어 모델이 들고 있는다)
+
+    func editorSelect(_ itemID: String?) {
+        editorSelection = itemID
+    }
+
+    func editorBeginAdd(kind: DockItemKind = .link) {
+        editorForm = ItemForm(kind: kind, name: "", target: "", editingID: nil, isPresented: true)
+    }
+
+    func editorBeginEdit(_ itemID: String) {
+        guard let item = draft?.items.first(where: { $0.id == itemID }) else { return }
+        editorForm = ItemForm(kind: item.kind, name: item.name, target: item.target, editingID: item.id, isPresented: true)
+    }
+
+    func editorCancelForm() {
+        editorForm = ItemForm()
+    }
+
+    func editorUpdateForm(kind: DockItemKind? = nil, name: String? = nil, target: String? = nil) {
+        if let kind { editorForm.kind = kind }
+        if let name { editorForm.name = name }
+        if let target { editorForm.target = target }
+    }
+
+    /// 폼 내용을 초안에 반영한다(추가 또는 수정). 문제가 있으면 안내만 하고 반영하지 않는다.
+    func editorCommitForm() {
+        guard var draft, editorForm.isPresented else { return }
+        let candidate = DockItem(
+            id: editorForm.editingID ?? ProjectCatalogDraft.makeItemID(existing: Set(allItemIDs())),
+            kind: editorForm.kind,
+            name: editorForm.name.trimmingCharacters(in: .whitespacesAndNewlines),
+            target: editorForm.target.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        if let problem = DockItemValidator.problem(with: candidate) {
+            editorNotice = "항목을 저장할 수 없습니다: \(problem)"
+            return
+        }
+        if editorForm.editingID != nil {
+            draft.update(candidate)
+        } else {
+            draft.add(candidate)
+        }
+        self.draft = draft
+        editorSelection = candidate.id
+        editorForm = ItemForm()
+        editorNotice = nil
+    }
+
+    /// 항목을 초안에서 뺀다. **앱·폴더·원본 파일은 지우지 않는다.**
+    func editorRemove(_ itemID: String) {
+        guard var draft else { return }
+        draft.remove(itemID: itemID)
+        self.draft = draft
+        if editorSelection == itemID { editorSelection = nil }
+        if editorForm.editingID == itemID { editorForm = ItemForm() }
+    }
+
+    /// 키보드로 한 칸 이동(드래그를 쓰지 않는 사용자용).
+    func editorMove(_ itemID: String, by offset: Int) {
+        guard var draft else { return }
+        draft.move(itemID: itemID, by: offset)
+        self.draft = draft
+    }
+
+    func editorBeginDrag(_ itemID: String) {
+        editorDragging = itemID
+    }
+
+    func editorDrop(_ itemID: String, toIndex index: Int) {
+        defer { editorDragging = nil }
+        guard var draft, editorDragging != nil || editorSelection != nil else { return }
+        draft.move(itemID: itemID, toIndex: index)
+        self.draft = draft
+    }
+
+    func editorEndDrag() {
+        editorDragging = nil
+    }
+
+    /// 새 프로젝트 등록(이름 + 기준 폴더).
+    func editorAddProject(name: String, root: String) {
+        guard var draft else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, root.hasPrefix("/") else {
+            editorNotice = "프로젝트를 추가하려면 이름과 절대 경로 기준 폴더가 필요합니다."
+            return
+        }
+        let id = draft.addProject(name: trimmed, root: root)
+        self.draft = draft
+        draft.selectScope(.project(id: id))
+        self.draft = draft
+        editorNotice = nil
+    }
+
+    /// 초안 안의 모든 항목 id(중복 없는 새 id를 만들기 위해).
+    func allItemIDs() -> [String] {
+        guard let draft else { return [] }
+        return draft.catalog.common.map(\.id) + draft.catalog.projects.flatMap { $0.items.map(\.id) }
+    }
+
+    // MARK: - 새 프로젝트 입력
+
+    @Published private(set) var newProjectName = ""
+    @Published private(set) var newProjectRoot = ""
+
+    func editorUpdateNewProject(name: String? = nil, root: String? = nil) {
+        if let name { newProjectName = name }
+        if let root { newProjectRoot = root }
+    }
+
+    /// 기준 폴더를 **사용자가 직접** 고른다(파일 선택 대화상자).
+    func pickNewProjectRoot() {
+        guard let picked = runOpenPanel(
+            message: "프로젝트 기준 폴더를 고르세요",
+            directories: true,
+            files: false
+        ) else { return }
+        newProjectRoot = picked.path
+    }
+
+    /// 폼의 대상(앱·폴더)을 사용자가 고른다.
+    func pickTargetForForm() {
+        switch editorForm.kind {
+        case .app:
+            guard let picked = runOpenPanel(
+                message: "앱(.app)을 고르세요",
+                directories: true,
+                files: true,
+                directoryType: .applicationBundle
+            ) else { return }
+            editorUpdateForm(target: picked.path)
+            if editorForm.name.trimmingCharacters(in: .whitespaces).isEmpty {
+                editorUpdateForm(name: picked.deletingPathExtension().lastPathComponent)
+            }
+        case .folder:
+            guard let picked = runOpenPanel(
+                message: "고정 폴더를 고르세요",
+                directories: true,
+                files: false
+            ) else { return }
+            editorUpdateForm(target: picked.path)
+            if editorForm.name.trimmingCharacters(in: .whitespaces).isEmpty {
+                editorUpdateForm(name: picked.lastPathComponent)
+            }
+        case .link:
+            return
+        }
+    }
+
+    private func runOpenPanel(
+        message: String,
+        directories: Bool,
+        files: Bool,
+        directoryType: UTType? = nil
+    ) -> URL? {
+        let panel = NSOpenPanel()
+        panel.message = message
+        panel.canChooseDirectories = directories
+        panel.canChooseFiles = files
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.prompt = "선택"
+        if let directoryType {
+            panel.allowedContentTypes = [directoryType]
+        }
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
+    }
+
+    /// 새 프로젝트를 초안에 추가하고 그 범위로 이동한다.
+    func commitNewProject() {
+        editorAddProject(name: newProjectName, root: newProjectRoot)
+        if editorNotice == nil {
+            newProjectName = ""
+            newProjectRoot = ""
+        }
+    }
+
+    /// 초안을 저장한다. 파일 쓰기는 AppDelegate가 하고, 여기서는 결과만 받는다.
+    ///
+    /// 성공하면 AppDelegate가 **기존 재로딩 경로**로 즉시 반영한다(선택 취소 포함).
+    func saveDraft() {
+        guard let draft else { return }
+        let problems = draft.fatalProblems()
+        guard problems.isEmpty else {
+            editorNotice = "저장할 수 없습니다:\n" + problems.prefix(3).joined(separator: "\n")
+            stateLog?.appendEvent("editor=save result=refused problems=\(problems.count)")
+            return
+        }
+        let result = onSaveDraft?(draft.catalog) ?? (message: "저장할 수 없습니다: 설정 파일을 사용할 수 없습니다", succeeded: false)
+        editorNotice = result.message
+        stateLog?.appendEvent("editor=save result=\(result.succeeded ? "ok" : "failed")")
+        // 저장에 성공하면 편집을 끝낸다(구성은 재로딩으로 이미 반영됐다).
+        if result.succeeded {
+            self.draft = nil
+        }
     }
 
     /// 마우스 hover 표시를 갱신한다. 벗어나면 그 항목일 때만 지운다.
@@ -356,7 +624,7 @@ final class DockModel: ObservableObject {
             return
         }
         switch focusedItem {
-        case .link(let index): openLink(at: index, source: .keyboard)
+        case .item(let index): performItem(at: index, source: .keyboard)
         case .openFolder: perform(.openFolder, source: .keyboard)
         case .copyPath: perform(.copyPath, source: .keyboard)
         case .lock: toggleLock()
@@ -368,37 +636,50 @@ final class DockModel: ObservableObject {
     }
 
     private func firstAvailableItem() -> FocusItem {
-        if let project, !project.links.isEmpty { return .link(0) }
+        if !resolution.allItems.isEmpty { return .item(0) }
         if state.canOpenFolder { return .openFolder }
         if state.canCopyPath { return .copyPath }
         return .lock
     }
 
-    // MARK: - 프로젝트 링크 실행
+    // MARK: - 항목 실행 (앱·폴더·링크)
 
-    /// 링크를 연다. 마우스와 키보드가 **같은 검증 경로**(`ProjectActionPlanner`)를 쓴다.
-    func openLink(at index: Int, source: ActionSource = .mouse) {
-        guard let project, project.links.indices.contains(index) else {
-            actionMessage = "선택한 링크를 현재 표시에서 찾을 수 없습니다"
-            stateLog?.appendEvent("link=\(index) source=\(source.rawValue) result=missing")
+    /// 항목을 실행한다. 마우스와 키보드가 **같은 검증 경로**(`DockItemActionPlanner`)를 쓴다.
+    ///
+    /// **드래그·편집 중에는 호출되지 않는다** — 실행은 클릭/Enter로만 들어온다.
+    func performItem(at index: Int, source: ActionSource = .mouse) {
+        let all = resolution.allItems
+        guard all.indices.contains(index) else {
+            actionMessage = "선택한 항목을 현재 표시에서 찾을 수 없습니다"
+            stateLog?.appendEvent("item=\(index) source=\(source.rawValue) result=missing")
             return
         }
-        // 표시된 묶음에서 항목을 확정한다. 선택 중 프로젝트가 바뀌면 planner가 거부한다.
-        let target = project.links[index]
-        switch ProjectActionPlanner.plan(target: target, in: project, state: state) {
+        let target = all[index]
+        switch DockItemActionPlanner.plan(target: target, in: resolution, state: state, validator: validator) {
+        case .openApplication(let url):
+            logItem(target, source: source, result: "allowed", detail: "app")
+            let opened = NSWorkspace.shared.open(url)
+            actionMessage = opened ? "앱을 열었습니다: \(target.name)" : "앱을 열지 못했습니다: \(target.target)"
+        case .openFolder(let url):
+            logItem(target, source: source, result: "allowed", detail: "folder")
+            let opened = NSWorkspace.shared.open(url)
+            actionMessage = opened ? "폴더를 열었습니다: \(target.name)" : "폴더를 열지 못했습니다: \(target.target)"
         case .openURL(let url):
             // 로그에는 쿼리·프래그먼트를 뺀 형태만 남긴다(토큰 노출 방지).
-            stateLog?.appendEvent(
-                "link=\(target.linkID) project=\(target.projectID) source=\(source.rawValue) result=allowed url=\(ProjectLinkPrivacy.redactedForLog(target.url))"
-            )
+            logItem(target, source: source, result: "allowed", detail: ProjectLinkPrivacy.redactedForLog(target.target))
             let opened = NSWorkspace.shared.open(url)
-            actionMessage = opened ? "링크를 열었습니다: \(target.name)" : "링크를 열지 못했습니다: \(target.url)"
+            actionMessage = opened ? "링크를 열었습니다: \(target.name)" : "링크를 열지 못했습니다: \(target.target)"
         case .reject(let reason):
-            stateLog?.appendEvent(
-                "link=\(target.linkID) project=\(target.projectID) source=\(source.rawValue) result=rejected reason=\(reason)"
-            )
+            logItem(target, source: source, result: "rejected", detail: "reason=\(reason)")
             actionMessage = reason
         }
+    }
+
+    private func logItem(_ target: DockItemTarget, source: ActionSource, result: String, detail: String) {
+        let scope = target.isCommon ? "common" : target.scopeID
+        stateLog?.appendEvent(
+            "item=\(target.itemID) kind=\(target.kind.rawValue) scope=\(scope) source=\(source.rawValue) result=\(result) \(detail)"
+        )
     }
 
     // MARK: - 실행 (마우스와 키보드가 같은 경로를 쓴다)

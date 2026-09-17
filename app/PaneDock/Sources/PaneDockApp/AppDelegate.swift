@@ -14,6 +14,8 @@ import SwiftUI
 final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let options: LaunchOptions
     private var panel: NSPanel?
+    /// Dock 편집창. 작은 Dock과 달리 **일반 창**이다(폼이 들어간다).
+    private var editorWindow: NSWindow?
     /// 지금 창 크기를 맞추는 중인지. 이때 생기는 이동은 사용자의 위치가 아니므로 저장하지 않는다.
     private var isApplyingLayout = false
     /// 프로그램이 마지막으로 크기를 맞춘 시각. 알림이 늦게 도착하는 경우까지 막는다.
@@ -48,6 +50,12 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         model.onHide = { [weak self] in self?.hidePanel() }
         // 상세 보기 토글·프로젝트 변경으로 크기가 달라지면 창을 다시 맞춘다.
         model.onLayoutChange = { [weak self] in self?.applyPanelSize() }
+        // Dock 편집: 별도 창을 띄우고, 저장은 **사용자가 저장을 눌렀을 때만** 파일에 쓴다.
+        model.onOpenEditor = { [weak self] in self?.openEditor() }
+        model.onSaveDraft = { [weak self] catalog in
+            guard let self else { return (message: "저장할 수 없습니다", succeeded: false) }
+            return self.saveDraft(catalog, model: model)
+        }
         let catalogStore = makeCatalogStore()
         self.catalogStore = catalogStore
         applyCatalog(to: model, from: catalogStore, isReload: false)
@@ -68,6 +76,21 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         // 진단용: 상세 보기를 연 상태로 시작한다(창 크기도 함께 맞춘다).
         if options.detailsAtLaunch {
             model.showDetails()
+        }
+        if options.editorAtLaunch {
+            openEditor()
+        }
+        // 진단용: 편집 초안에 항목을 추가하고 **저장까지** 해 본다(임시 카탈로그 전용).
+        if let delay = options.editorSelfTestAfterMilliseconds {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(delay) / 1000.0) { [weak self] in
+                guard let self, let model = self.model else { return }
+                model.beginEditing(scope: .common)
+                model.editorBeginAdd(kind: .folder)
+                model.editorUpdateForm(name: "스크래치", target: "/tmp")
+                model.editorCommitForm()
+                model.saveDraft()
+                model.appendEvent("editor-selftest done")
+            }
         }
 
         installStatusItem(model: model)
@@ -227,6 +250,10 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         model.updateCatalog(application.catalog, diagnostics: application.diagnostics, note: application.note)
     }
 
+    @MainActor @objc private func openEditorAction() {
+        openEditor()
+    }
+
     @MainActor @objc private func reloadCatalogAction() {
         guard let model, let store = catalogStore else { return }
         store.reload()
@@ -243,7 +270,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     private func makePanel(model: DockModel) -> NSPanel {
         let size = ScreenGeometry.dockBarSize(
-            linkCount: model.project?.links.count ?? 0,
+            linkCount: model.resolution.allItems.count,
             detailsVisible: model.isDetailsVisible
         )
         let panel = NSPanel(
@@ -287,7 +314,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private func applyPanelSize() {
         guard let panel, let model else { return }
         let size = ScreenGeometry.dockBarSize(
-            linkCount: model.project?.links.count ?? 0,
+            linkCount: model.resolution.allItems.count,
             detailsVisible: model.isDetailsVisible
         )
         // 테두리 없는 패널이라 프레임 크기 == 내용 크기다. 그래도 읽는 값은 프레임 하나로 통일한다.
@@ -314,6 +341,55 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 + "origin=(\(Int(panel.frame.origin.x)),\(Int(panel.frame.origin.y)))"
         )
         isApplyingLayout = false
+    }
+
+    // MARK: - Dock 편집창
+
+    /// 편집창을 띄운다. **추적 대상·잠금 상태를 건드리지 않는다.**
+    @MainActor
+    private func openEditor() {
+        guard let model else { return }
+        if editorWindow == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                styleMask: [.titled, .closable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = options.isFake ? "[FAKE] Dock 편집" : "Dock 편집"
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: ItemEditorView(model: model))
+            window.center()
+            editorWindow = window
+        }
+        model.beginEditing()
+        editorWindow?.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    /// 초안을 저장한다. **사용자가 저장을 눌렀을 때만** 파일에 쓴다.
+    ///
+    /// - 성공하면 기존 재로딩 경로(`applyCatalog`)로 즉시 반영한다(선택 취소 포함).
+    /// - 충돌·거부·실패에는 파일을 건드리지 않고 안내문만 돌려준다.
+    @MainActor
+    private func saveDraft(_ catalog: ProjectCatalog, model: DockModel) -> (message: String, succeeded: Bool) {
+        guard let store = catalogStore else {
+            return (message: "저장할 수 없습니다: 프로젝트 설정을 사용할 수 없습니다", succeeded: false)
+        }
+        let outcome = store.save(catalog)
+        switch outcome {
+        case .saved(let backupPath):
+            applyCatalog(to: model, from: store, isReload: true)
+            if let backupPath {
+                let name = (backupPath as NSString).lastPathComponent
+                return (message: "저장했습니다. 원본을 백업했습니다: \(name)", succeeded: true)
+            }
+            return (message: "저장했습니다.", succeeded: true)
+        case .conflict(let detail):
+            return (message: "\(detail)\n메뉴에서 '프로젝트 설정 다시 읽기'를 한 뒤 다시 시도해 주세요.", succeeded: false)
+        case .refused(let reason), .failed(let reason):
+            return (message: "저장하지 못했습니다: \(reason)", succeeded: false)
+        }
     }
 
     /// 위치 저장. 드래그 중에는 매번 쓰지 않고 잠깐 멈췄을 때 한 번만 쓴다.
@@ -446,6 +522,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         add(to: menu, title: "잠금/해제", action: #selector(toggleLockAction), key: "")
         add(to: menu, title: "창 위치 초기화", action: #selector(resetPositionAction), key: "")
         add(to: menu, title: "프로젝트 설정 다시 읽기", action: #selector(reloadCatalogAction), key: "")
+        add(to: menu, title: "Dock 편집…", action: #selector(openEditorAction), key: "")
         menu.addItem(.separator())
 
         let hotKeyItem = NSMenuItem(title: "호출 단축키", action: nil, keyEquivalent: "")

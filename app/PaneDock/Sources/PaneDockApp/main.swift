@@ -40,18 +40,22 @@ if options.selfCheck {
     print("frontmost   \(state.hostFrontmost.map(String.init) ?? "-")")
     print("detail      \(state.detail ?? "-")")
 
-    // 프로젝트 판정 (카탈로그가 있을 때만)
+    // 항목 판정 (카탈로그가 있을 때만)
     let catalogStore = ProjectCatalogStore(url: projectCatalogURL(for: options))
-    let resolution = snapshot.current.reportedCWD.flatMap {
-        ProjectResolver.resolve(cwd: $0, catalog: catalogStore.catalog, catalogDiagnostics: catalogStore.diagnostics)
-    }
-    if let resolution {
-        print("project     \(resolution.projectName) (\(resolution.projectID)) links=\(resolution.links.count)")
-        for link in resolution.links {
-            print("  link      \(link.name) → \(ProjectLinkPrivacy.redactedForLog(link.url))")
-        }
-    } else {
-        print("project     - (기본 Dock) catalog=\(catalogStore.outcome.label) projects=\(catalogStore.catalog.projects.count)")
+    let resolution = ProjectResolver.resolve(
+        cwd: snapshot.current.reportedCWD ?? "",
+        catalog: catalogStore.catalog,
+        catalogDiagnostics: catalogStore.diagnostics
+    )
+    let projectLabel = resolution.hasProject
+        ? "\(resolution.projectName) (\(resolution.projectID))"
+        : "- (기본 Dock)"
+    print("project     \(projectLabel) catalog=\(catalogStore.outcome.label) projects=\(catalogStore.catalog.projects.count)")
+    print("items       공통 \(resolution.commonItems.count)개 · 프로젝트 \(resolution.projectItems.count)개")
+    for item in resolution.allItems {
+        let scope = item.isCommon ? "공통" : "프로젝트"
+        let logTarget = item.kind == .link ? ProjectLinkPrivacy.redactedForLog(item.target) : item.target
+        print("  item      [\(scope)] \(item.kind.rawValue) \(item.name) → \(logTarget)")
     }
     for diagnostic in catalogStore.diagnostics.prefix(3) {
         print("warning     \(diagnostic)")

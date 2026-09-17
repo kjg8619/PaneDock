@@ -1,12 +1,15 @@
+import CryptoKit
 import Foundation
 
-// 프로젝트별 웹 링크 (0.1c 최소 구현).
+// 프로젝트 카탈로그 — 공통 항목과 프로젝트별 항목.
 //
 // 이 파일이 다루는 것은 **사용자가 명시적으로 등록한 정적 설정**이다.
 // 실시간 pane ID·CWD·잠금 상태와는 성격이 다르며, 영구 저장하더라도 그 값들을 저장하지 않는다.
 //
-// 이번 구현은 카탈로그를 **읽기만** 한다. 사용자 파일을 앱이 덮어쓰지 않는다.
+// **읽기는 자동으로 하고, 쓰기는 사용자가 편집창에서 "저장"을 눌렀을 때만 한다.**
+// 손상·미래 버전 파일은 해석하지 않고, 그 위에 덮어쓰지도 않는다.
 
+/// v1 형식의 링크. **읽기 호환용으로만 남긴다**(새로 쓰지 않는다 → `DockItem`이 대신한다).
 public struct ProjectLink: Codable, Equatable, Sendable {
     public var id: String
     public var name: String
@@ -25,28 +28,86 @@ public struct Project: Codable, Equatable, Sendable {
     public var name: String
     /// 기준 폴더(절대 경로). 사용자가 명시한 값이며 실시간 CWD와 구분해 표시한다.
     public var root: String
-    public var links: [ProjectLink]
+    /// 이 프로젝트에서 추가로 표시하는 항목(등록 순서).
+    public var items: [DockItem]
 
-    public init(id: String, name: String, root: String, links: [ProjectLink]) {
+    public init(id: String, name: String, root: String, items: [DockItem] = []) {
         self.id = id
         self.name = name
         self.root = root
-        self.links = links
+        self.items = items
     }
 }
 
 public struct ProjectCatalog: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
+    /// v2에서 `common`(공통 항목)과 `items`(프로젝트 항목)가 들어왔다. v1의 `links`도 계속 읽는다.
+    public static let currentSchemaVersion = 2
 
     public var schemaVersion: Int
+    /// 프로젝트와 관계없이 항상 표시하는 항목.
+    public var common: [DockItem]
     public var projects: [Project]
 
-    public init(schemaVersion: Int = ProjectCatalog.currentSchemaVersion, projects: [Project] = []) {
+    public init(
+        schemaVersion: Int = ProjectCatalog.currentSchemaVersion,
+        common: [DockItem] = [],
+        projects: [Project] = []
+    ) {
         self.schemaVersion = schemaVersion
+        self.common = common
         self.projects = projects
     }
 }
 
+/// v1·v2 파일을 모두 읽고, 항상 v2로 쓴다.
+///
+/// v1의 `projects[].links`는 **링크 항목으로 옮겨 읽는다**(id·이름·URL·순서 보존).
+/// 저장할 때는 v2 형식으로만 쓰므로, v1 파일을 처음 저장할 때 형식이 바뀐다 —
+/// 그때 원본을 백업하고 사용자에게 알린다(호출자 책임).
+public extension ProjectCatalog {
+    /// 파일에서 읽는다. v1·v2 모두 허용한다.
+    static func decode(from data: Data) throws -> ProjectCatalog {
+        let raw = try JSONDecoder().decode(RawCatalog.self, from: data)
+        let projects = (raw.projects ?? []).map { project in
+            var items = project.items ?? []
+            // v1의 링크를 항목으로 옮긴다. 뒤에 붙여 **원래 순서를 보존**한다.
+            items.append(
+                contentsOf: (project.links ?? []).map {
+                    DockItem(id: $0.id, kind: .link, name: $0.name, target: $0.url)
+                }
+            )
+            return Project(id: project.id, name: project.name, root: project.root, items: items)
+        }
+        return ProjectCatalog(
+            schemaVersion: raw.schemaVersion ?? 1,
+            common: raw.common ?? [],
+            projects: projects
+        )
+    }
+
+    /// 저장용 데이터. 항상 현재 스키마 버전으로 쓴다.
+    func encoded() throws -> Data {
+        var copy = self
+        copy.schemaVersion = Self.currentSchemaVersion
+        return try JSONEncoder().encode(copy)
+    }
+
+    /// 읽기 전용 원본. 모르는 키가 있어도 무시하고, v1의 `links`를 받아들인다.
+    private struct RawCatalog: Decodable {
+        var schemaVersion: Int?
+        var common: [DockItem]?
+        var projects: [RawProject]?
+    }
+
+    private struct RawProject: Decodable {
+        var id: String
+        var name: String
+        var root: String
+        var items: [DockItem]?
+        /// v1 형식. 새로 쓰지 않는다.
+        var links: [ProjectLink]?
+    }
+}
 public enum ProjectCatalogLoadOutcome: Equatable, Sendable {
     /// 파일이 없다. 등록된 프로젝트가 없는 상태로 동작한다.
     case fresh
@@ -71,10 +132,41 @@ public enum ProjectCatalogLoadOutcome: Equatable, Sendable {
     }
 }
 
+/// 저장 결과. **초안은 호출자가 들고 있고, 실패하면 파일은 그대로다.**
+public enum ProjectCatalogSaveOutcome: Equatable, Sendable {
+    /// 저장했다. 형식 전환 등으로 원본을 백업했으면 그 경로를 함께 돌려준다.
+    case saved(backupPath: String?)
+    /// 이 파일에는 쓸 수 없다(메모리 전용·손상·미래 버전·검증 실패).
+    case refused(reason: String)
+    /// 편집 중 외부에서 파일이 바뀌었다. **덮어쓰지 않았다.**
+    case conflict(detail: String)
+    case failed(reason: String)
+
+    public var isSaved: Bool {
+        if case .saved = self { return true }
+        return false
+    }
+
+    /// 저장하지 못한 사유. 성공이면 nil. 화면에 그대로 보여줄 수 있다.
+    public var rejectionReason: String? {
+        switch self {
+        case .saved: return nil
+        case .refused(let reason): return reason
+        case .conflict(let detail): return detail
+        case .failed(let reason): return reason
+        }
+    }
+
+    /// 다시 시도하기 전에 사용자가 **다시 읽어야 하는지**(외부 변경 충돌).
+    public var requiresReload: Bool {
+        if case .conflict = self { return true }
+        return false
+    }
+}
+
 /// 저장 규칙은 설정과 같다(손상·미래 버전은 해석하지 않음).
 ///
-/// **사용자 파일을 절대 고치지 않는다.** 손상돼도 백업으로 옮기거나 지우지 않고 그대로 두고,
-/// 읽기 실패만 보고한다. 앱이 설정을 자동 복구하는 일은 없다.
+/// **읽기는 자동, 쓰기는 사용자가 저장을 눌렀을 때만.** 자동 복구·자동 덮어쓰기는 하지 않는다.
 public final class ProjectCatalogStore {
     public private(set) var outcome: ProjectCatalogLoadOutcome = .fresh
     public private(set) var catalog = ProjectCatalog()
@@ -82,6 +174,8 @@ public final class ProjectCatalogStore {
     public private(set) var diagnostics: [String] = []
 
     private let url: URL?
+    /// 마지막으로 읽은 파일 내용의 지문. 저장 직전에 외부 변경을 판단하는 데만 쓴다.
+    private var loadedSignature: String?
 
     public init(url: URL?) {
         self.url = url
@@ -116,21 +210,93 @@ public final class ProjectCatalogStore {
             catalog = ProjectCatalog()
             return
         }
-        guard let decoded = try? JSONDecoder().decode(ProjectCatalog.self, from: data) else {
+        guard let decoded = try? ProjectCatalog.decode(from: data) else {
             // 형식이 깨졌다. 원본은 그대로 둔다.
             outcome = .corrupt
             catalog = ProjectCatalog()
+            loadedSignature = nil
             return
         }
         guard decoded.schemaVersion <= ProjectCatalog.currentSchemaVersion else {
             // 미래 버전은 해석하지 않는다. 파일도 건드리지 않는다.
             outcome = .unsupportedVersion(found: decoded.schemaVersion)
             catalog = ProjectCatalog()
+            loadedSignature = nil
             return
         }
         outcome = .loaded
         catalog = decoded
+        loadedSignature = Self.signature(of: data)
         diagnostics = ProjectCatalogValidator.diagnostics(for: decoded)
+    }
+
+    /// 파일 내용의 지문. 저장 직전에 **외부에서 바뀌었는지** 판단하는 데만 쓴다.
+    static func signature(of data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// 편집한 구성을 저장한다. **사용자가 저장을 눌렀을 때만 호출한다.**
+    ///
+    /// - 검증에 실패하면 아무것도 쓰지 않는다(초안은 호출자가 그대로 들고 있다).
+    /// - 기존 파일이 있으면 **먼저 백업**하고, 임시 파일에 쓴 뒤 **원자적으로 교체**한다.
+    /// - 저장 직전에 지문을 다시 확인해 **외부 변경을 덮어쓰지 않는다.**
+    /// - 손상·미래 버전 파일 위에는 쓰지 않는다.
+    /// - 성공하면 디스크에서 다시 읽어 메모리 상태와 지문을 맞춘다.
+    @discardableResult
+    public func save(_ draft: ProjectCatalog) -> ProjectCatalogSaveOutcome {
+        guard let url else {
+            return .refused(reason: "메모리 전용 설정에는 저장할 수 없습니다")
+        }
+        guard outcome.isUsable else {
+            return .refused(reason: "읽지 못한 파일 위에 저장하지 않습니다 (\(outcome.label))")
+        }
+        let problems = ProjectCatalogValidator.fatalProblems(in: draft)
+        guard problems.isEmpty else {
+            return .refused(reason: problems.joined(separator: "\n"))
+        }
+
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        if exists {
+            guard let current = try? Data(contentsOf: url) else {
+                return .failed(reason: "현재 파일을 읽을 수 없어 저장하지 않았습니다")
+            }
+            if let loadedSignature, Self.signature(of: current) != loadedSignature {
+                return .conflict(detail: "편집 중에 프로젝트 파일이 밖에서 바뀌었습니다. 덮어쓰지 않았습니다.")
+            }
+        }
+
+        var backupPath: String?
+        if exists {
+            let stamp = ISO8601DateFormatter().string(from: Date())
+                .replacingOccurrences(of: ":", with: "-")
+            let backup = url.deletingLastPathComponent()
+                .appendingPathComponent("\(url.lastPathComponent).bak-\(stamp)")
+            do {
+                try FileManager.default.copyItem(at: url, to: backup)
+                backupPath = backup.path
+            } catch {
+                return .failed(reason: "원본 백업에 실패해 저장하지 않았습니다: \(error.localizedDescription)")
+            }
+        }
+
+        let directory = url.deletingLastPathComponent()
+        let temporary = directory.appendingPathComponent(".\(url.lastPathComponent).tmp-\(getpid())")
+        do {
+            let data = try draft.encoded()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try data.write(to: temporary, options: .atomic)
+            if exists {
+                _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary)
+            } else {
+                try FileManager.default.moveItem(at: temporary, to: url)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: temporary)
+            return .failed(reason: "저장에 실패했습니다: \(error.localizedDescription)")
+        }
+
+        load()
+        return .saved(backupPath: backupPath)
     }
 }
 
@@ -224,6 +390,16 @@ public enum ProjectCatalogValidator {
         var seenProjectIDs = Set<String>()
         var rootsSeen: [String: [String]] = [:]
 
+        for item in catalog.common {
+            if let problem = DockItemValidator.problem(with: item) {
+                messages.append("공통 항목: \(problem) (\(item.name))")
+            }
+        }
+        var seenCommonIDs = Set<String>()
+        for item in catalog.common where !seenCommonIDs.insert(item.id).inserted {
+            messages.append("공통 항목 id가 중복됩니다: \(item.id)")
+        }
+
         for project in catalog.projects {
             if project.id.isEmpty {
                 messages.append("프로젝트에 id가 없습니다: \(project.name.isEmpty ? "(이름 없음)" : project.name)")
@@ -235,13 +411,13 @@ public enum ProjectCatalogValidator {
             }
             rootsSeen[ProjectPath.comparisonPath(project.root), default: []].append(project.id)
 
-            var seenLinkIDs = Set<String>()
-            for link in project.links {
-                if !seenLinkIDs.insert(link.id).inserted {
-                    messages.append("링크 id가 중복됩니다: \(link.id) (\(project.name))")
+            var seenItemIDs = Set<String>()
+            for item in project.items {
+                if let problem = DockItemValidator.problem(with: item) {
+                    messages.append("\(project.name): \(problem)")
                 }
-                if !isAllowedScheme(link.url) {
-                    messages.append("허용되지 않는 링크입니다(http/https만): \(link.url) (\(project.name))")
+                if !seenItemIDs.insert(item.id).inserted {
+                    messages.append("항목 id가 중복됩니다: \(item.id) (\(project.name))")
                 }
             }
         }
@@ -251,6 +427,49 @@ public enum ProjectCatalogValidator {
         }
 
         return messages.sorted()
+    }
+
+    /// **저장을 막아야 하는** 문제만 고른다.
+    ///
+    /// 중복 ID와 형식 오류는 파일을 모호하거나 쓸 수 없게 만든다. 반면 기준 폴더가 절대 경로가 아닌 것
+    /// 같은 문제는 경고로 두고 저장은 허용한다(사용자가 나중에 고칠 수 있다).
+    ///
+    /// **항목 id는 범위 안에서만 고유하면 된다.** 프로젝트가 다르면 같은 id를 써도 된다 —
+    /// v1의 `links`도 프로젝트별로만 고유했고, 표시·실행은 (범위, id)로 찾는다.
+    /// 여기서 전체 고유를 요구하면 **기존에 잘 쓰던 파일이 저장 거부된다**(V15에서 실제로 발생).
+    public static func fatalProblems(in catalog: ProjectCatalog) -> [String] {
+        var problems: [String] = []
+
+        var seenCommonIDs = Set<String>()
+        for item in catalog.common {
+            if item.id.isEmpty { problems.append("공통 항목에 id가 없습니다") }
+            else if !seenCommonIDs.insert(item.id).inserted {
+                problems.append("공통 항목 id가 중복됩니다: \(item.id)")
+            }
+            if let problem = DockItemValidator.problem(with: item) {
+                problems.append("공통 항목: \(problem)")
+            }
+        }
+
+        var seenProjectIDs = Set<String>()
+        for project in catalog.projects {
+            if project.id.isEmpty { problems.append("프로젝트에 id가 없습니다") }
+            else if !seenProjectIDs.insert(project.id).inserted {
+                problems.append("프로젝트 id가 중복됩니다: \(project.id)")
+            }
+            var seenItemIDs = Set<String>()
+            for item in project.items {
+                if item.id.isEmpty { problems.append("항목에 id가 없습니다 (\(project.name))") }
+                else if !seenItemIDs.insert(item.id).inserted {
+                    problems.append("항목 id가 중복됩니다: \(item.id) (\(project.name))")
+                }
+                if let problem = DockItemValidator.problem(with: item) {
+                    problems.append("\(project.name): \(problem)")
+                }
+            }
+        }
+
+        return problems
     }
 
     public static func isAllowedScheme(_ url: String) -> Bool {
@@ -289,22 +508,9 @@ public enum ProjectMatcher {
 
 // MARK: - 표시·실행 묶음
 
-/// 표시에 쓰는 링크 하나. 프로젝트 ID·항목 ID·URL을 한 묶음으로 들고 다닌다.
-public struct ProjectLinkTarget: Equatable, Sendable {
-    public var projectID: String
-    public var linkID: String
-    public var name: String
-    public var url: String
-
-    public init(projectID: String, linkID: String, name: String, url: String) {
-        self.projectID = projectID
-        self.linkID = linkID
-        self.name = name
-        self.url = url
-    }
-}
-
-/// 한 시점의 프로젝트 판정 결과. 링크 목록과 그 근거가 된 CWD를 함께 묶는다.
+/// 한 시점의 표시 묶음. **공통 항목과 프로젝트 항목을 함께** 들고 있다.
+///
+/// 프로젝트가 없어도 만들어진다(`hasProject == false`). 공통 항목은 그때도 표시된다.
 public struct ProjectResolution: Equatable, Sendable {
     public var projectID: String
     public var projectName: String
@@ -312,8 +518,10 @@ public struct ProjectResolution: Equatable, Sendable {
     public var projectRoot: String
     /// 이 판정을 만든 CWD(원본 문자열). 기준 폴더와 구분해 표시한다.
     public var matchedCWD: String
-    /// 유효한 링크만, 등록 순서 그대로.
-    public var links: [ProjectLinkTarget]
+    /// 프로젝트와 관계없이 항상 표시하는 항목(등록 순서).
+    public var commonItems: [DockItemTarget]
+    /// 현재 프로젝트의 항목(등록 순서).
+    public var projectItems: [DockItemTarget]
     public var diagnostics: [String]
 
     public init(
@@ -321,33 +529,72 @@ public struct ProjectResolution: Equatable, Sendable {
         projectName: String,
         projectRoot: String,
         matchedCWD: String,
-        links: [ProjectLinkTarget],
+        commonItems: [DockItemTarget],
+        projectItems: [DockItemTarget],
         diagnostics: [String]
     ) {
         self.projectID = projectID
         self.projectName = projectName
         self.projectRoot = projectRoot
         self.matchedCWD = matchedCWD
-        self.links = links
+        self.commonItems = commonItems
+        self.projectItems = projectItems
         self.diagnostics = diagnostics
     }
+
+    /// 등록된 프로젝트가 현재 경로에 맞았는지.
+    public var hasProject: Bool { !projectID.isEmpty }
+
+    /// 화면·키보드가 쓰는 순서: **공통 → 프로젝트 항목**.
+    public var allItems: [DockItemTarget] { commonItems + projectItems }
 }
 
 public enum ProjectResolver {
-    /// CWD와 카탈로그로 표시 묶음을 만든다. 유효한 링크만 담는다.
-    public static func resolve(cwd: String, catalog: ProjectCatalog, catalogDiagnostics: [String] = []) -> ProjectResolution? {
-        guard case .matched(let project) = ProjectMatcher.match(cwd: cwd, in: catalog) else { return nil }
-        let links = project.links
-            .filter { ProjectCatalogValidator.isAllowedScheme($0.url) }
-            .map { ProjectLinkTarget(projectID: project.id, linkID: $0.id, name: $0.name, url: $0.url) }
+    /// CWD와 카탈로그로 표시 묶음을 만든다. **프로젝트가 없어도 공통 항목은 담는다.**
+    ///
+    /// 형식이 잘못된 항목(빈 이름·잘못된 URL 등)은 목록에서 제외한다 — 진단에 남는다.
+    public static func resolve(
+        cwd: String,
+        catalog: ProjectCatalog,
+        catalogDiagnostics: [String] = []
+    ) -> ProjectResolution {
+        let common = targets(for: catalog.common, scope: .common)
+        guard case .matched(let project) = ProjectMatcher.match(cwd: cwd, in: catalog) else {
+            return ProjectResolution(
+                projectID: "",
+                projectName: "",
+                projectRoot: "",
+                matchedCWD: cwd,
+                commonItems: common,
+                projectItems: [],
+                diagnostics: catalogDiagnostics
+            )
+        }
         return ProjectResolution(
             projectID: project.id,
             projectName: project.name,
             projectRoot: project.root,
             matchedCWD: cwd,
-            links: links,
+            commonItems: common,
+            projectItems: targets(for: project.items, scope: .project(id: project.id)),
             diagnostics: catalogDiagnostics
         )
+    }
+
+    /// 항목을 표시·실행용 묶음으로 옮긴다. 형식이 잘못된 항목은 제외한다.
+    public static func targets(for items: [DockItem], scope: ItemScope) -> [DockItemTarget] {
+        items
+            .filter(DockItemValidator.isWellFormed)
+            .map {
+                DockItemTarget(
+                    scopeID: scope.scopeID,
+                    isCommon: scope == .common,
+                    itemID: $0.id,
+                    kind: $0.kind,
+                    name: $0.name,
+                    target: $0.target
+                )
+            }
     }
 
     /// 모호한 경우를 포함해 상태를 돌려준다(UI 안내용).
@@ -372,23 +619,27 @@ public enum ProjectLinkPrivacy {
 }
 
 public enum ProjectSelection {
-    /// 설정을 다시 읽은 뒤에도 **진행 중인 링크 선택을 유지해도 되는지** 판정한다.
+    /// 설정을 다시 읽은 뒤에도 **진행 중인 항목 선택을 유지해도 되는지** 판정한다.
     ///
-    /// 프로젝트가 바뀌었거나 링크 목록(개수·순서·ID·URL)이 달라졌으면 false다.
-    /// 이때는 이전 인덱스를 새 목록에 그대로 적용하지 않고 선택을 취소한다.
+    /// 프로젝트가 바뀌었거나 표시 목록(개수·순서·ID·대상)이 달라졌으면 false다.
+    /// 이때는 이전 인덱스를 새 목록에 그대로 적용하지 않고 **선택을 취소한다**.
     public static func selectionSurvives(reloadFrom old: ProjectResolution?, to new: ProjectResolution?) -> Bool {
         guard let old, let new else { return false }
         guard old.projectID == new.projectID else { return false }
-        guard old.links.count == new.links.count else { return false }
-        return zip(old.links, new.links).allSatisfy { previous, next in
-            previous.linkID == next.linkID && previous.url == next.url
+        let previous = old.allItems
+        let next = new.allItems
+        guard previous.count == next.count else { return false }
+        return zip(previous, next).allSatisfy { before, after in
+            before.itemID == after.itemID && before.target == after.target && before.kind == after.kind
         }
     }
 }
 
 // MARK: - 실행
 
-public enum ProjectActionPlan: Equatable, Sendable {
+public enum DockItemActionPlan: Equatable, Sendable {
+    case openApplication(URL)
+    case openFolder(URL)
     case openURL(URL)
     case reject(reason: String)
 
@@ -398,32 +649,58 @@ public enum ProjectActionPlan: Equatable, Sendable {
     }
 }
 
-public enum ProjectActionPlanner {
-    /// 링크 열기 계획.
+public enum DockItemActionPlanner {
+    /// 항목 실행 계획. 마우스와 키보드가 **같은 경로**로 들어온다.
     ///
-    /// 실행 자체는 `NSWorkspace`가 하고, 여기서는 **표시된 묶음과 선택한 항목이 일치하는지**만 검증한다.
-    /// - 오류·확인 중이면 `state.isActionable`이 false라 실행을 막는다.
-    /// - 프로젝트가 바뀌었거나 링크가 사라졌으면 거부한다(선택 중 갱신으로 다른 링크가 실행되는 것을 막는다).
+    /// - **공통 항목**은 터미널 추적 상태와 **독립적으로** 실행할 수 있다. 대상 자체가 유효하면 된다.
+    ///   그래도 **표시 중인 목록에 있는 항목이어야** 한다 — 이전 순번으로 다른 항목을 실행하지 않는다.
+    /// - **프로젝트 항목**은 기존 규칙을 그대로 따른다(오류·확인 중에는 막고, 프로젝트가 바뀌면 거부).
+    /// - 파일 대상(앱·폴더)은 **존재까지** 확인한다. 없으면 실행하지 않는다.
     public static func plan(
-        target: ProjectLinkTarget,
+        target: DockItemTarget,
         in resolution: ProjectResolution?,
-        state: DockState
-    ) -> ProjectActionPlan {
-        guard state.isActionable else {
-            return .reject(reason: "지금은 실행할 수 없습니다: \(state.detail ?? "실행할 대상을 확인하는 중입니다")")
-        }
+        state: DockState,
+        validator: PathValidating
+    ) -> DockItemActionPlan {
         guard let resolution else {
-            return .reject(reason: "현재 경로에 해당하는 프로젝트가 없습니다")
+            return .reject(reason: "표시 중인 항목이 없습니다")
         }
-        guard resolution.projectID == target.projectID else {
-            return .reject(reason: "프로젝트가 바뀌었습니다. 다시 선택해 주세요")
+        let stillShown = resolution.allItems.contains {
+            $0.itemID == target.itemID && $0.scopeID == target.scopeID && $0.target == target.target
         }
-        guard resolution.links.contains(where: { $0.linkID == target.linkID && $0.url == target.url }) else {
-            return .reject(reason: "선택한 링크를 현재 표시에서 찾을 수 없습니다")
+        guard stillShown else {
+            return .reject(reason: "선택한 항목을 현재 표시에서 찾을 수 없습니다. 다시 선택해 주세요")
         }
-        guard ProjectCatalogValidator.isAllowedScheme(target.url), let url = URL(string: target.url) else {
-            return .reject(reason: "허용되지 않는 링크입니다(http/https만): \(target.url)")
+
+        if !target.isCommon {
+            guard state.isActionable else {
+                return .reject(reason: "지금은 실행할 수 없습니다: \(state.detail ?? "실행할 대상을 확인하는 중입니다")")
+            }
+            guard resolution.projectID == target.scopeID else {
+                return .reject(reason: "프로젝트가 바뀌었습니다. 다시 선택해 주세요")
+            }
         }
-        return .openURL(url)
+        return planForTarget(target, validator: validator)
+    }
+
+    /// 대상 종류별 검증·계획.
+    static func planForTarget(_ target: DockItemTarget, validator: PathValidating) -> DockItemActionPlan {
+        switch target.kind {
+        case .app:
+            guard target.target.hasPrefix("/"), validator.isDirectory(target.target) else {
+                return .reject(reason: "앱을 찾을 수 없습니다: \(target.target)")
+            }
+            return .openApplication(URL(fileURLWithPath: target.target))
+        case .folder:
+            guard target.target.hasPrefix("/"), validator.isDirectory(target.target) else {
+                return .reject(reason: "폴더를 찾을 수 없습니다: \(target.target)")
+            }
+            return .openFolder(URL(fileURLWithPath: target.target))
+        case .link:
+            guard ProjectCatalogValidator.isAllowedScheme(target.target), let url = URL(string: target.target) else {
+                return .reject(reason: "허용되지 않는 링크입니다(http/https만): \(target.target)")
+            }
+            return .openURL(url)
+        }
     }
 }

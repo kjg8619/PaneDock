@@ -16,8 +16,11 @@ public enum DockBarLayout {
     public static let maximumBarWidth: CGFloat = 1_100
     /// 화면 가장자리에서 남길 여백(양쪽 합계).
     public static let screenMargin: CGFloat = 48
-    /// 상태 배지·아이콘 버튼·여백이 차지하는 **고정 영역**의 대략 너비.
-    public static let fixedWidth: CGFloat = 372
+    /// 상태 배지·가짜 표시·아이콘 버튼·구분선·여백이 차지하는 **고정 영역**의 대략 너비.
+    ///
+    /// V15에서 항목 칩이 늘고 가짜 모드 표시가 바에 들어오면서 이 값이 커졌다.
+    /// 실제보다 작게 잡으면 이름·배지가 압축돼 글자가 사라진다(V14·V15에서 스크린샷으로 확인).
+    public static let fixedWidth: CGFloat = 448
     /// 링크 칩 하나의 대략 너비(아이콘 + 짧은 이름).
     ///
     /// **보수적으로 잡는다.** 이보다 좁게 잡으면 이름이 긴 칩이 압축돼 라벨이 사라진다
