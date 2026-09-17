@@ -562,6 +562,316 @@ public enum SelfTest {
         results.append(contentsOf: ghosttyParseChecks())
         results.append(contentsOf: dockChecks())
         results.append(contentsOf: settingsChecks())
+        results.append(contentsOf: projectChecks())
+        return results
+    }
+
+    // MARK: - 프로젝트 매칭·링크 (0.1c)
+
+    private static func projectChecks() -> [CheckResult] {
+        var results: [CheckResult] = []
+
+        let shop = Project(
+            id: "shop",
+            name: "Shop",
+            root: "/work/shop",
+            links: [
+                ProjectLink(id: "repo", name: "저장소", url: "https://example.com/shop/repo"),
+                ProjectLink(id: "docs", name: "문서", url: "https://example.com/shop/docs"),
+            ]
+        )
+        let admin = Project(
+            id: "admin",
+            name: "Shop Admin",
+            root: "/work/shop/admin",
+            links: [ProjectLink(id: "repo", name: "저장소", url: "https://example.com/admin")]
+        )
+        let catalog = ProjectCatalog(projects: [shop, admin])
+
+        // A/B 경로에 맞는 이름과 링크
+        let shopResolution = ProjectResolver.resolve(cwd: "/work/shop/api", catalog: catalog)
+        let adminResolution = ProjectResolver.resolve(cwd: "/work/shop/admin/src", catalog: catalog)
+        results.append(
+            check(
+                "프로젝트: 경로에 맞는 이름과 링크 구성",
+                shopResolution?.projectName == "Shop"
+                    && shopResolution?.links.map(\.linkID) == ["repo", "docs"]
+                    && adminResolution?.projectName == "Shop Admin"
+                    && adminResolution?.links.map(\.linkID) == ["repo"],
+                "shop=\(shopResolution?.projectName ?? "-")/\(shopResolution?.links.count ?? -1) links admin=\(adminResolution?.projectName ?? "-")/\(adminResolution?.links.count ?? -1)"
+            )
+        )
+
+        // 중첩 기준 폴더: 더 구체적인 것이 이긴다
+        results.append(
+            check(
+                "프로젝트: 여러 기준 폴더가 맞으면 가장 구체적인 것",
+                adminResolution?.projectRoot == "/work/shop/admin",
+                "root=\(adminResolution?.projectRoot ?? "-")"
+            )
+        )
+
+        // 기준 폴더 자체도 매칭된다
+        results.append(
+            check(
+                "프로젝트: 기준 폴더 자신도 매칭",
+                ProjectResolver.resolve(cwd: "/work/shop", catalog: catalog)?.projectID == "shop"
+            )
+        )
+
+        // 비슷한 이름의 다른 폴더 오매칭 방지
+        let shopOld = ProjectResolver.resolve(cwd: "/work/shop-old/api", catalog: catalog)
+        let shopOldish = ProjectResolver.resolve(cwd: "/work/shopping", catalog: catalog)
+        results.append(
+            check(
+                "프로젝트: 폴더 경계 — shop-old/shopping은 shop이 아니다",
+                shopOld == nil && shopOldish == nil,
+                "shop-old=\(shopOld?.projectID ?? "nil") shopping=\(shopOldish?.projectID ?? "nil")"
+            )
+        )
+
+        // 미등록 경로 → 기본 Dock
+        results.append(
+            check(
+                "프로젝트: 미등록 경로는 기본 Dock(판정 없음)",
+                ProjectResolver.resolve(cwd: "/other/place", catalog: catalog) == nil
+                    && ProjectResolver.resolve(cwd: "/other", catalog: ProjectCatalog()) == nil
+            )
+        )
+
+        // 중복 기준 폴더 → 모호, 선택하지 않음
+        let duplicateA = Project(id: "a", name: "A", root: "/dup/root", links: [])
+        let duplicateB = Project(id: "b", name: "B", root: "/dup/root", links: [])
+        let duplicateMatch = ProjectMatcher.match(cwd: "/dup/root/x", in: ProjectCatalog(projects: [duplicateA, duplicateB]))
+        let duplicateResolution = ProjectResolver.resolve(cwd: "/dup/root/x", catalog: ProjectCatalog(projects: [duplicateA, duplicateB]))
+        var ambiguousIDs: [String] = []
+        if case .ambiguous(_, let ids) = duplicateMatch { ambiguousIDs = ids }
+        results.append(
+            check(
+                "프로젝트: 중복 기준 폴더는 모호로 안내하고 고르지 않음",
+                ambiguousIDs == ["a", "b"] && duplicateResolution == nil,
+                "ids=\(ambiguousIDs) resolution=\(duplicateResolution == nil ? "nil" : "있음")"
+            )
+        )
+
+        // 잘못된 URL → 목록에서 제외 + 진단
+        let mixed = Project(
+            id: "mixed",
+            name: "Mixed",
+            root: "/work/mixed",
+            links: [
+                ProjectLink(id: "ok", name: "정상", url: "https://example.com/ok"),
+                ProjectLink(id: "ftp", name: "FTP", url: "ftp://example.com/nope"),
+                ProjectLink(id: "js", name: "스크립트", url: "javascript:alert(1)"),
+            ]
+        )
+        let mixedCatalog = ProjectCatalog(projects: [mixed])
+        let mixedDiagnostics = ProjectCatalogValidator.diagnostics(for: mixedCatalog)
+        let mixedResolution = ProjectResolver.resolve(cwd: "/work/mixed", catalog: mixedCatalog, catalogDiagnostics: mixedDiagnostics)
+        results.append(
+            check(
+                "프로젝트: http/https 외 링크는 제외하고 진단에 남김",
+                mixedResolution?.links.map(\.linkID) == ["ok"]
+                    && mixedDiagnostics.contains { $0.contains("ftp://") }
+                    && mixedDiagnostics.contains { $0.contains("javascript:") },
+                "links=\(mixedResolution?.links.map(\.linkID) ?? []) 진단=\(mixedDiagnostics.count)건"
+            )
+        )
+
+        // 중복 id 진단
+        let duplicateLinks = Project(
+            id: "duplink",
+            name: "Dup",
+            root: "/work/dup",
+            links: [
+                ProjectLink(id: "same", name: "1", url: "https://example.com/1"),
+                ProjectLink(id: "same", name: "2", url: "https://example.com/2"),
+            ]
+        )
+        let duplicateProjectIDs = ProjectCatalog(projects: [shop, Project(id: "shop", name: "다른 Shop", root: "/work/other", links: [])])
+        let dupLinkDiagnostics = ProjectCatalogValidator.diagnostics(for: ProjectCatalog(projects: [duplicateLinks]))
+        let dupProjectDiagnostics = ProjectCatalogValidator.diagnostics(for: duplicateProjectIDs)
+        results.append(
+            check(
+                "프로젝트: 중복 id(프로젝트·링크)를 진단",
+                dupLinkDiagnostics.contains { $0.contains("링크 id가 중복") }
+                    && dupProjectDiagnostics.contains { $0.contains("프로젝트 id가 중복") },
+                "링크=\(dupLinkDiagnostics.count)건 프로젝트=\(dupProjectDiagnostics.count)건"
+            )
+        )
+
+        // 대소문자는 그대로 비교한다
+        let caseCatalog = ProjectCatalog(projects: [Project(id: "case", name: "Case", root: "/Work/Shop", links: [])])
+        results.append(
+            check(
+                "프로젝트: 대소문자를 임의로 소문자화하지 않는다",
+                ProjectMatcher.match(cwd: "/work/shop/api", in: caseCatalog) == .none
+                    && ProjectMatcher.match(cwd: "/Work/Shop/api", in: caseCatalog) != .none,
+                "소문자경로=\(ProjectMatcher.match(cwd: "/work/shop/api", in: caseCatalog))"
+            )
+        )
+
+        // 심볼릭 링크: 링크를 해석해 같은 폴더로 본다
+        do {
+            let base = FileManager.default.temporaryDirectory
+                .appendingPathComponent("pane-dock-proj-\(UUID().uuidString)")
+            let real = base.appendingPathComponent("real")
+            try? FileManager.default.createDirectory(at: real.appendingPathComponent("sub"), withIntermediateDirectories: true)
+            let alias = base.appendingPathComponent("alias")
+            try? FileManager.default.createSymbolicLink(atPath: alias.path, withDestinationPath: real.path)
+            let linkCatalog = ProjectCatalog(projects: [
+                Project(id: "linked", name: "Linked", root: alias.path, links: [])
+            ])
+            let viaReal = ProjectMatcher.match(cwd: real.appendingPathComponent("sub").path, in: linkCatalog)
+            let viaAlias = ProjectMatcher.match(cwd: alias.appendingPathComponent("sub").path, in: linkCatalog)
+            results.append(
+                check(
+                    "프로젝트: 심볼릭 링크는 해석해 같은 폴더로 판정",
+                    viaReal != .none && viaAlias != .none,
+                    "real경유=\(viaReal != .none) alias경유=\(viaAlias != .none)"
+                )
+            )
+            try? FileManager.default.removeItem(at: base)
+        }
+
+        // 카탈로그 로드 4종
+        do {
+            let url = temporarySettingsURL().deletingLastPathComponent().appendingPathComponent("projects.json")
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let fresh = ProjectCatalogStore(url: url)
+            let freshOK = fresh.outcome == .fresh
+
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let garbage = Data("{ broken ".utf8)
+            try? garbage.write(to: url)
+            let corrupt = ProjectCatalogStore(url: url)
+            var corruptBackupOK = false
+            if case .corrupt(let path) = corrupt.outcome, let path {
+                corruptBackupOK = (try? Data(contentsOf: URL(fileURLWithPath: path))) == garbage
+            }
+
+            let future = Data(#"{"schemaVersion":9,"projects":[]}"#.utf8)
+            try? future.write(to: url)
+            let unsupported = ProjectCatalogStore(url: url)
+            let futureUntouched = (try? Data(contentsOf: url)) == future
+
+            results.append(
+                check(
+                    "프로젝트 카탈로그: 없음/손상/미래버전을 안전하게 처리",
+                    freshOK && corruptBackupOK && unsupported.outcome == .unsupportedVersion(found: 9) && futureUntouched,
+                    "fresh=\(freshOK) 손상백업=\(corruptBackupOK) 미래버전=\(unsupported.outcome.label) 보존=\(futureUntouched)"
+                )
+            )
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        results.append(contentsOf: projectActionChecks(shop: shop, catalog: catalog))
+        return results
+    }
+
+    private static func projectActionChecks(shop: Project, catalog: ProjectCatalog) -> [CheckResult] {
+        var results: [CheckResult] = []
+
+        let resolution = ProjectResolver.resolve(cwd: "/work/shop/api", catalog: catalog)
+        let target = resolution?.links.first { $0.linkID == "repo" }
+        let actionable = DockStateBuilder.make(
+            current: workInfo(cwd: "/work/shop/api", pathStatus: .valid, focusStatus: .tracked),
+            previous: nil, connection: .connected, failure: nil, lock: DockLock()
+        )
+        let errorState = DockStateBuilder.make(
+            current: workInfo(cwd: "/work/shop/api", pathStatus: .missing, focusStatus: .unknown),
+            previous: nil, connection: .connected, failure: nil, lock: DockLock()
+        )
+        let pendingState = DockStateBuilder.make(
+            current: nil, previous: nil, connection: .unavailable, failure: "Ghostty is not running", lock: DockLock()
+        )
+
+        let allowed: Bool = {
+            guard let target else { return false }
+            if case .openURL(let url) = ProjectActionPlanner.plan(target: target, in: resolution, state: actionable) {
+                return url.absoluteString == "https://example.com/shop/repo"
+            }
+            return false
+        }()
+        results.append(check("프로젝트 링크: 유효하면 URL로 연다(셸 문자열 없음)", allowed))
+
+        var blockedCount = 0
+        var reasons: [String] = []
+        if let target {
+            for state in [errorState, pendingState] {
+                let plan = ProjectActionPlanner.plan(target: target, in: resolution, state: state)
+                if plan.rejectionReason != nil { blockedCount += 1 }
+                reasons.append(state.display.rawValue)
+            }
+        }
+        results.append(
+            check(
+                "프로젝트 링크: 오류·확인 중에는 실행을 막는다",
+                blockedCount == 2,
+                "막힘=\(blockedCount)/2 상태=\(reasons)"
+            )
+        )
+
+        // 선택 중 프로젝트가 바뀐 경우
+        let otherResolution = ProjectResolver.resolve(cwd: "/work/shop/admin/src", catalog: catalog)
+        var mismatchedRejected = false
+        if let target {
+            mismatchedRejected = ProjectActionPlanner.plan(target: target, in: otherResolution, state: actionable).rejectionReason != nil
+        }
+        // 링크가 사라진 경우
+        var missingLinkRejected = false
+        if let resolution {
+            let stale = ProjectLinkTarget(projectID: shop.id, linkID: "gone", name: "사라진 링크", url: "https://example.com/gone")
+            missingLinkRejected = ProjectActionPlanner.plan(target: stale, in: resolution, state: actionable).rejectionReason != nil
+        }
+        results.append(
+            check(
+                "프로젝트 링크: 프로젝트가 바뀌거나 링크가 사라지면 거부",
+                mismatchedRejected && missingLinkRejected,
+                "프로젝트변경=\(mismatchedRejected) 링크소멸=\(missingLinkRejected)"
+            )
+        )
+
+        // 호출 중 동결이 오류를 숨기지 않는다
+        let frozenError = DockStateBuilder.make(
+            current: workInfo(cwd: "/work/shop/api", pathStatus: .valid, focusStatus: .tracked),
+            previous: nil,
+            connection: .unavailable,
+            failure: "Ghostty is not running",
+            lock: DockLock(),
+            hostFrontmostOverride: true
+        )
+        let frozenInvalidPath = DockStateBuilder.make(
+            current: workInfo(cwd: "/work/shop/gone", pathStatus: .missing, focusStatus: .unknown),
+            previous: nil,
+            connection: .connected,
+            failure: nil,
+            lock: DockLock(),
+            hostFrontmostOverride: true
+        )
+        results.append(
+            check(
+                "호출 중 동결은 최전면 판정만 덮고 오류·경로 무효화는 그대로 드러낸다",
+                frozenError.display == .error && frozenInvalidPath.display == .error,
+                "연결오류=\(frozenError.display.rawValue) 경로무효=\(frozenInvalidPath.display.rawValue)"
+            )
+        )
+
+        results.append(
+            check(
+                "동결로 유지 중이 된 경우에는 실행 가능하다(유지 중 = 유효한 대상)",
+                {
+                    let held = DockStateBuilder.make(
+                        current: workInfo(cwd: "/work/shop/api", pathStatus: .valid, focusStatus: .held, frontmost: false),
+                        previous: nil, connection: .connected, failure: nil, lock: DockLock(),
+                        hostFrontmostOverride: true
+                    )
+                    return held.display == .tracked && held.isActionable
+                }(),
+                "동결 시 tracked로 복원"
+            )
+        )
+
         return results
     }
 

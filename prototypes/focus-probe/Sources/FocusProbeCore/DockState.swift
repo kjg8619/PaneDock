@@ -68,6 +68,12 @@ public struct DockState: Equatable, Sendable {
     public var isLocked: Bool
     public var canOpenFolder: Bool
     public var canCopyPath: Bool
+
+    /// 실행할 수 있는 상태인지. 추적·유지·잠금만 해당한다.
+    /// 오류·확인 중에는 마우스든 키보드든 실행을 막는다.
+    public var isActionable: Bool {
+        display == .tracked || display == .held || display == .locked
+    }
 }
 
 public enum DockStateBuilder {
@@ -83,9 +89,21 @@ public enum DockStateBuilder {
         previous: CurrentWorkInfo?,
         connection: ConnectionStatus,
         failure: String?,
-        lock: DockLock
+        lock: DockLock,
+        hostFrontmostOverride: Bool? = nil
     ) -> DockState {
-        let active = lock.info ?? current
+        var active = lock.info ?? current
+        // 호출 중에는 "바깥 앱 최전면" 판정만 덮어쓴다.
+        // **연결 상태·경로 유효성은 덮지 않는다** — 오류를 동결로 숨기면 안 된다.
+        if let hostFrontmostOverride, var info = active {
+            info.hostFrontmost = hostFrontmostOverride
+            // 경로가 유효할 때만 추적/유지 판정을 다시 계산한다.
+            // 경로가 무효하거나 확인 중이면 그대로 두어 오류·확인 중이 드러나게 한다.
+            if info.pathStatus == .valid {
+                info.focusStatus = hostFrontmostOverride ? .tracked : .held
+            }
+            active = info
+        }
         let isLocked = lock.isLocked
 
         let display: DockDisplayState

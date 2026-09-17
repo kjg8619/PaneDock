@@ -17,6 +17,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private var statusItem: NSStatusItem?
     private var model: DockModel?
     private var settings: SettingsStore?
+    private var catalogStore: ProjectCatalogStore?
     private var hotKey: GlobalHotKey?
     private var hotKeyRegistration: GlobalHotKey.Registration = .disabled
     private var keyMonitor: Any?
@@ -38,9 +39,17 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             stateLogPath: options.stateLogPath
         )
         model.onHide = { [weak self] in self?.hidePanel() }
-        startupNotice = [settingsNotice(for: store.outcome), duplicateInstanceNotice()]
-            .compactMap { $0 }
-            .joined(separator: "\n")
+        let catalogStore = makeCatalogStore()
+        self.catalogStore = catalogStore
+        model.updateCatalog(catalogStore.catalog, diagnostics: catalogStore.diagnostics)
+
+        startupNotice = [
+            settingsNotice(for: store.outcome),
+            catalogNotice(for: catalogStore),
+            duplicateInstanceNotice(),
+        ]
+        .compactMap { $0 }
+        .joined(separator: "\n")
         model.setSettingsNotice(startupNotice.isEmpty ? nil : startupNotice)
         self.model = model
 
@@ -106,7 +115,9 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             : "사용 안 함"
         let frame = panel?.frame ?? .zero
         let notice = startupNotice.isEmpty ? "-" : startupNotice.replacingOccurrences(of: "\n", with: " / ")
+        let catalog = catalogStore.map { "\($0.outcome.label) projects=\($0.catalog.projects.count) diagnostics=\($0.diagnostics.count)" } ?? "-"
         let line = "PaneDock startup: mode=\(mode) settings=\(outcome) file=\(file) "
+            + "catalog=\(catalog) "
             + "origin=(\(Int(frame.origin.x)),\(Int(frame.origin.y))) size=\(Int(frame.width))x\(Int(frame.height)) "
             + "hotKey=\(hotKey) hotKeyStatus=\(hotKeyRegistration.message) notice=\(notice)\n"
         FileHandle.standardError.write(Data(line.utf8))
@@ -146,6 +157,38 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         case .unsupportedVersion(let found):
             return "설정 스키마 버전 \(found)은 이 버전이 지원하지 않습니다. 파일을 건드리지 않고 기본값으로 실행합니다."
         }
+    }
+
+    /// 프로젝트 카탈로그는 **읽기만** 한다. 앱이 사용자 파일을 덮어쓰지 않는다.
+    private func makeCatalogStore() -> ProjectCatalogStore {
+        if let override = options.projectsPath {
+            return ProjectCatalogStore(url: URL(fileURLWithPath: override))
+        }
+        if options.isFake {
+            return ProjectCatalogStore(url: nil)
+        }
+        let url = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("PaneDock", isDirectory: true)
+            .appendingPathComponent("projects.json")
+        return ProjectCatalogStore(url: url)
+    }
+
+    private func catalogNotice(for store: ProjectCatalogStore) -> String? {
+        var parts: [String] = []
+        switch store.outcome {
+        case .fresh, .loaded:
+            break
+        case .corrupt(let backupPath):
+            let where_ = backupPath.map { "원본은 \($0)으로 보존했습니다." } ?? ""
+            parts.append("프로젝트 파일을 읽을 수 없어 기본 Dock으로 동작합니다. \(where_)")
+        case .unsupportedVersion(let found):
+            parts.append("프로젝트 스키마 버전 \(found)은 지원하지 않습니다. 파일을 건드리지 않습니다.")
+        }
+        // 설정 자체의 문제는 조용히 무시하지 않고 알린다.
+        parts.append(contentsOf: store.diagnostics.prefix(3))
+        return parts.isEmpty ? nil : parts.joined(separator: "\n")
     }
 
     // MARK: - 창
@@ -219,7 +262,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     private func togglePanel() {
         guard let panel else { return }
-        if panel.isVisible && model?.focusedControl != nil {
+        if panel.isVisible && model?.focusedItem != nil {
             hidePanel()
         } else {
             showPanel()
@@ -255,7 +298,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             model?.moveFocus(forward: !event.modifierFlags.contains(.shift))
             return true
         case 36, 76, 49: // return / enter / space
-            model?.activateFocusedControl()
+            model?.activateFocusedItem()
             return true
         default:
             return false

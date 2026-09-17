@@ -1195,6 +1195,211 @@ V7의 마우스 관측으로만 확인), 실제 권한 거부, Ghostty 종료.
 
 ---
 
+## V9. 2026-09-17 — 0.1b 기준선 커밋 + 프로젝트별 웹 링크(0.1c 최소)
+
+### V9.1 기준선 정리
+
+**로컬 커밋 `64704c9`** — `feat: 포커스 추적 진단 도구와 Ghostty 전용 최소 Dock (0.1a~0.1b)`
+(36 파일, 6,906줄 추가. 푸시·태그·이력 변경 없음.)
+
+| 항목 | 내용 |
+| --- | --- |
+| 커밋 범위 | `docs/` 3건 + `app/PaneDock/` + `prototypes/focus-probe/` |
+| 제외 | `.omp/`(OMP 하네스 개인 설정) — 미추적 상태 유지, `.gitignore`도 건드리지 않음 |
+| 빌드 산출물 | 각 디렉터리의 `.gitignore`(`.build/`, `dist/`)로 이미 제외되어 후보에 0건 |
+| 인증·비밀 파일 | 해당 파일 없음(이름만 확인, 내용은 열지 않음) |
+| `git add .` | 사용하지 않음. 경로를 명시해 추가 |
+
+**빌드 식별 정보 갱신** (V8.1의 코어 해시는 그 뒤 `SettingsLoadOutcome.label` 추가로 바뀌었다)
+
+| 항목 | V8.1 기록 | 기준선 커밋 시점 | 0.1c 후 |
+| --- | --- | --- | --- |
+| 코어 CLI | `8572a25415a7da9e` | `aadd4fce0f61ed52` | **`4f3f40b61ad56d6a`** |
+| 앱 번들 | `c7d915c942fa49f1` | `ddcdb3eb10b96c01` (V8.8과 동일) | **`ff868aeb4bcb45dd`** |
+
+기존 58건 회귀: **58/58 통과** (커밋 전후 동일).
+
+### V9.2 남은 실행 검증 (사용자, 미실시)
+
+V7·V8에서 미실시로 남은 두 항목을 묶음으로 안내했다. **에이전트가 대신 수행하지 않았다.**
+
+| ID | 항목 | 상태 |
+| --- | --- | --- |
+| A | 서로 다른 폴더 A/B에서 표시 경로 ↔ 실제 열린 폴더 대조 (Finder 자동화 권한 추가 없이) | 미실시 |
+| B | 오류·확인 중에서 키보드로 실행을 우회할 수 없는지 | 미실시 (합성 상태 GUI 검증. **실제 권한 거부와는 구분**) |
+
+### V9.3 새 기능: 프로젝트별 웹 링크
+
+지원 환경은 그대로 **Ghostty 직접 pane + 로컬 셸**이다. 추가한 것은 "현재 작업 경로에 해당하는
+프로젝트 이름과 웹 링크를 표시하고, 사용자가 선택하면 그 링크를 여는" 기능뿐이다.
+
+| 파일 | 내용 |
+| --- | --- |
+| `FocusProbeCore/Projects.swift` **(신규)** | 카탈로그 스키마 v1, 로더(안전 규칙 동일·**읽기 전용**), 경로 비교, 매칭, 링크 실행 계획 |
+| `FocusProbeCore/DockState.swift` | `isActionable` 추가, `hostFrontmostOverride`(동결) 추가 |
+| `FocusProbeCore/SelfTest.swift` | 프로젝트 검사 16건 추가 |
+| `app/…/DockModel.swift` | 프로젝트 판정, 포커스 항목(`FocusItem`), `openLink(at:source:)` |
+| `app/…/DockView.swift` | 프로젝트 이름·기준 폴더·링크 행 |
+| `app/…/AppDelegate.swift` | 카탈로그 로드·안내, 시작 로그에 카탈로그 상태 |
+| `app/…/LaunchOptions.swift` | `--projects-path` |
+| `app/PaneDock/projects.sample.json` **(신규)** | 예시 + `_how_to_use`(복사·수정 방법) |
+
+**설정 파일** — `~/Library/Application Support/PaneDock/projects.json` (스키마 v1)
+
+```json
+{ "schemaVersion": 1,
+  "projects": [ { "id": "shop", "name": "Shop", "root": "/Users/me/work/shop",
+                  "links": [ { "id": "repo", "name": "저장소", "url": "https://…" } ] } ] }
+```
+
+- 기존 `settings.json`(위치·단축키)은 **그대로** 두고 별도 파일로 분리했다.
+- 프로젝트 기준 폴더는 **사용자가 명시한 정적 설정**이며, 실시간 pane ID·CWD·잠금과 구분된다.
+- **앱은 이 파일을 읽기만 한다.** 덮어쓰지 않는다. 샘플도 자동 복사하지 않는다.
+
+**매칭 규칙(구현·검사 완료)**
+
+| 규칙 | 구현 |
+| --- | --- |
+| 폴더 경계 비교 | 경로 구성요소 접두 비교. `/work/shop-old`는 `/work/shop`의 하위가 아니다 |
+| 가장 구체적인 경로 우선 | 구성요소가 가장 많은 기준 폴더 선택 |
+| 중복 기준 폴더 | `.ambiguous`로 **고르지 않고** 안내 |
+| 대소문자 | 그대로 비교한다(임의 소문자화 없음) |
+| **심볼릭 링크** | **비교할 때는 해석한다**(`/tmp`↔`/private/tmp` 같은 경우를 같은 폴더로 본다). **표시에는 원본 문자열을 그대로** 쓴다 |
+| 미등록 경로·파일 없음 | 프로젝트 판정 없음 → 기존 기본 Dock으로 동작 |
+| 설정 오류 | 조용히 무시하지 않고 진단·안내. 원본 파일은 건드리지 않음 |
+| URL | `http`/`https`만. 그 외는 목록에서 제외하고 안내 |
+
+### V9.4 자동 검사 결과 (74/74)
+
+기존 58건 회귀: **전부 통과.** 추가 16건:
+
+| 항목 | 결과 |
+| --- | --- |
+| 경로에 맞는 이름·링크 구성 (A/B) | PASS |
+| 여러 기준 폴더가 맞으면 가장 구체적인 것 | PASS |
+| 기준 폴더 자신도 매칭 | PASS |
+| **폴더 경계** — `shop-old`/`shopping`은 `shop`이 아님 | PASS |
+| 미등록 경로 → 기본 Dock | PASS |
+| **중복 기준 폴더는 모호로 안내하고 고르지 않음** | PASS |
+| http/https 외 링크는 제외 + 진단 | PASS |
+| 중복 id(프로젝트·링크) 진단 | PASS |
+| 대소문자를 임의로 소문자화하지 않음 | PASS |
+| **심볼릭 링크를 해석해 같은 폴더로 판정**(실제 심볼릭 링크로 검증) | PASS |
+| 카탈로그 없음/손상/미래버전 안전 처리 | PASS |
+| 유효 링크는 URL로 연다(셸 문자열 없음) | PASS |
+| **오류·확인 중에는 링크 실행을 막는다** | PASS |
+| **프로젝트가 바뀌거나 링크가 사라지면 거부** | PASS |
+| **호출 중 동결은 최전면 판정만 덮고 오류·경로 무효화는 드러낸다** | PASS |
+| 동결로 유지 중이 된 경우에는 실행 가능 | PASS |
+
+### V9.5 실제 GUI에서 에이전트가 확인한 것 (E3, 가짜 모드 + 임시 설정)
+
+| 시나리오 | 관측 |
+| --- | --- |
+| 카탈로그 없음 | `catalog=fresh projects=0 diagnostics=0`, 안내 없음 → 기본 Dock |
+| 정상 카탈로그 2개 | `catalog=loaded projects=2 diagnostics=0` |
+| **프로젝트 전환** | `folder=tmp → project=tmparea(2)` → `folder=kangjingoo → project=home(1)` → 되돌아오면 `tmparea(2)` |
+| 잘못된 카탈로그 | `diagnostics=2`, 안내: `기준 폴더가 중복 등록되었습니다: /tmp → x, y` / `허용되지 않는 링크입니다(http/https만): ftp://…` |
+
+### V9.6 발견해 고친 결함 — 동결이 의도대로 동작하지 않았다
+
+**재현 조건:** 호출 중 바깥 앱이 최전면에서 밀려난 상태(또는 그렇게 관측된 상태).
+**증상:** `hostFrontmostOverride`가 `hostFrontmost` 필드만 덮어서 `focusStatus`는 `.held`로 남았다.
+즉 **호출 중에는 창이 "유지 중"으로 표시됐어야 했는데, 동결이 그 판정을 되돌리지 못했다.**
+
+**수정:** 덮어쓸 때 경로가 유효하면 `focusStatus`도 다시 계산한다(`tracked`/`held`).
+경로가 무효하거나 확인 중이면 손대지 않아 **오류·확인 중이 동결로 가려지지 않는다.**
+
+**검증:** 새 검사 2건(`동결은 최전면 판정만 덮고 오류·경로 무효화는 그대로 드러낸다`,
+`동결로 유지 중이 된 경우에는 실행 가능하다`)이 이 동작을 고정한다.
+
+**V8.8과의 관계:** V8.8 로그에서 호출 구간이 `tracked`로 유지된 것은 **Ghostty가 최전면을 잃지 않았기
+때문**이며, 동결 로직이 개입해서가 아니었다. 그 로그만으로는 이 결함이 드러나지 않았다.
+
+### V9.7 사용자 확인 필요 항목
+
+| # | 항목 | 상태 |
+| --- | --- | --- |
+| A | 폴더 A/B 대조(표시 경로 ↔ 실제 열린 폴더) | 미실시 |
+| B | 오류·확인 중 키보드 실행 차단 | 미실시(합성 상태 GUI) |
+| C | 프로젝트 2개로 pane 전환 → 해당 링크가 열리는 흐름 | 미실시 |
+| — | 실제 자동화 권한 거부, Ghostty 종료 | 미실시(유지) |
+
+**미확인을 완료로 옮기지 않았다.** V8.6의 미실시 항목 중 3·4·5만 V8.8에서 승격됐고, 나머지는 그대로다.
+
+### V9.8 남은 한계
+
+- 프로젝트 편집 UI 없음(파일 직접 편집). 링크 자동 실행 없음 — 항상 사용자가 선택한다.
+- 프로젝트 카탈로그는 시작 시 1회 읽는다. 실행 중 파일을 바꾸면 재시작이 필요하다.
+- 심볼릭 링크는 해석해 비교하므로, 같은 폴더를 가리키는 서로 다른 경로가 **중복 등록으로 진단**될 수 있다.
+- Ghostty 미지원 환경, 중첩 TUI, 다중 창, 원격 경로는 V6~V8과 동일하게 범위 밖이다.
+
+### V9.9 사용자 실행 세션 관측 (2026-09-17 11:43~11:47)
+
+**실행 모드/빌드:** 실제 모드, `--state-log /tmp/pd-v9.log`, 번들 `ff868aeb4bcb45dd`(0.1c 빌드), 로그 271줄.
+
+| 관측 | 내용 | 등급 |
+| --- | --- | --- |
+| **A — 폴더 열기** | `action=openFolder source=mouse result=allowed` 3회. 대상은 `…/prototypes/focus-probe`(pane `ABEDF5F1`) → `…/prototypes/focus-probe`(pane `5D31DDD8`) → `/Users/kangjingoo`(pane `AB6006DD`) | 앱 자체 로그 |
+| **A — 독립 확인** | 같은 시각 화면에 열려 있는 Finder 창 이름이 `focus-probe`, `kangjingoo` — 로그의 표시 경로 마지막 구성요소와 **일치** | 에이전트 관측(CGWindowList) |
+| **B — 오류 상태 키보드 차단** | **이 로그에서 확인되지 않음.** `display=error`는 시작 직후 1회뿐이고, `--fake missing` 실행 흔적이 없다 | 미실시(사용자 확인 필요) |
+| **C — 프로젝트 링크** | `~/Library/Application Support/PaneDock/projects.json` **없음**, 로그 전체 `catalog projects=0` → **프로젝트 기능이 실제 데이터로 실행되지 않았다** | 미실시 |
+| 키보드 조작 | `invoke → focus=copyPath → activate → action=copyPath source=keyboard result=allowed` 2회. Tab 순회(`focus=lock→hide→quit→hide`)와 `activate control=hide → close`도 기록됨 | 앱 자체 로그 |
+| **동결 + 유지 중 실행** | 11:43:40 호출에서 `frozenFrontmost=false`. 호출 구간 내내 `display=held`였고, **그 상태에서 키보드 실행이 허용**됐다(유지 중 = 유효한 대상이므로 정상) | 앱 자체 로그 |
+| 상태 분포 | `tracked` 125 · `held` 123 · `error` 1(시작 직후) · `locked` 0 | 앱 자체 로그 |
+
+**A의 한계:** Finder 창 **이름**은 마지막 구성요소만 준다. 서로 다른 경로가 같은 폴더 이름을 가질 수 있으므로,
+이름 일치만으로 "표시된 전체 경로가 그대로 열렸다"가 증명되지는 않는다. 로그의 전체 경로 + 사용자 보고와
+합쳐서 판단한 것이다. Finder 자동화 권한은 추가로 요구하지 않았다.
+
+**C 미실시 이유:** 샘플 파일은 제공했지만 사용자가 자기 URL로 등록하지 않았다. 추측한 URL을 넣지 않았다.
+
+### V9.10 B·C 사용자 검증 결과 (2026-09-17 11:54~11:56)
+
+**실행 모드/빌드:** 앱 번들 `ff868aeb4bcb45dd`(0.1c 빌드).
+`/tmp/pd-v9c.log`(111줄, 실제 모드 + 실제 카탈로그 2개), `/tmp/pd-v9b.log`(102줄, `--fake missing`).
+
+#### C — 프로젝트 링크 (실제 카탈로그)
+
+| # | 조작 | 관측 (앱 자체 로그) | 등급 |
+| --- | --- | --- | --- |
+| C0 | 시작 | `catalog projects=2 diagnostics=0` | 앱 자체 로그 |
+| C1 | pane A를 `…/mac-tool-pack/egde-nochi`로 | `project=egde-nochi(2)` 58줄 | 앱 자체 로그 |
+| C2 | pane B를 `…/markdown-viewer`로 | `project=markdown-viewer(0)` 3줄 — **링크 0개** | 앱 자체 로그 |
+| C3 | A로 복귀 | `project=egde-nochi(2)` 재개 | 앱 자체 로그 |
+| C4 | `⌃⌥⌘D` → Tab으로 링크 이동 → Enter | `EVENT link=repo project=egde-nochi source=keyboard result=allowed url=https://github.com/kjg8619/egde-nochi` | 앱 자체 로그 |
+| **C4 독립 확인** | — | **브라우저(Aside) 창 제목이 `kjg8619/egde-nochi: EdgeNotch —…`** — 열린 URL의 경로와 일치 | **에이전트 관측(CGWindowList)** |
+| C5 | 경로 복사(키보드) | `action=copyPath source=keyboard result=allowed target=…/mac-tool-pack/egde-nochi` — **폴더/복사는 현재 CWD 대상 유지** | 앱 자체 로그 |
+| — | 닫기 | `EVENT close target=…/egde-nochi`, 이후에도 `project=egde-nochi(2)` 유지 | 앱 자체 로그 |
+
+링크 포커스 이동도 기록됨: `focus=link:0 → link:1 → link:0 → link:1 → link:0`.
+
+#### B — 오류 상태 키보드 차단 (합성 상태)
+
+| 항목 | 관측 | 등급 |
+| --- | --- | --- |
+| 상태 | `display=error` 22줄 (`--fake missing`) | 앱 자체 로그 |
+| 초기 포커스 | `invoke focus=lock target=-` (유효 대상 없음 → 잠금으로 시작) | 앱 자체 로그 |
+| **차단** | `result=blocked` **28회**, `result=allowed` **0회** | 앱 자체 로그 |
+| 사유 | `폴더 열기를 할 수 없습니다: 연동이 작업 경로를 제공하지 않았습니다` / `경로 복사를 할 수 없습니다: …` | 앱 자체 로그 |
+
+→ **오류 상태에서 키보드로 실행을 우회할 수 없었다.** Tab으로 모든 항목을 순회하며 Enter를 눌렀지만
+실행은 0건이었다.
+
+**B의 범위:** 이것은 **합성 오류 상태**(`--fake missing`)의 GUI 검증이다.
+**실제 자동화 권한 거부나 Ghostty 종료로 인한 오류는 여전히 미실시**다. 두 가지를 같은 것으로 기록하지 않는다.
+
+#### V9.10에서 확보하지 못한 것
+
+- **링크 마우스 클릭**(C4는 키보드로 수행). 두 경로가 같은 `openLink`를 쓰지만 마우스 클릭 자체는 미관측.
+- C 로그에 `display=held`가 없다. 링크 열기가 호출 중(동결 구간)에 일어났고, 닫은 뒤에도 Ghostty가 최전면을
+  유지했기 때문이다(브라우저가 뒤로 열린 것으로 보인다). **동결이 링크 열기의 최전면 변화를 가린 것인지,
+  실제로 변화가 없었는지는 구분하지 않는다.**
+
+**이로써 V9에서 계획한 검증이 모두 끝났다.** 남은 미실시 항목은 V9.7·V8.6에 그대로 둔다.
+
+---
+
 ## 정정 이력
 
 - **2026-09-16 (V2.3)**: V1.6의 U5 절차 기대값이 틀렸다. herdr 클라이언트 분리(`ctrl+b q`)는

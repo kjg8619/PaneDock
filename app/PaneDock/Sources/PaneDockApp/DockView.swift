@@ -67,16 +67,37 @@ struct DockView: View {
                     .lineLimit(1).truncationMode(.middle)
             }
 
+            if let project = model.project {
+                Divider()
+                HStack(spacing: 4) {
+                    Text("프로젝트").font(.caption2).foregroundStyle(.secondary)
+                    Text(project.projectName).font(.caption).bold().lineLimit(1)
+                    Spacer()
+                }
+                // 기준 폴더(사용자 등록값)와 현재 CWD를 구분해 보여준다.
+                Text("기준 폴더: \(project.projectRoot)")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+                ForEach(Array(project.links.enumerated()), id: \.element.linkID) { index, link in
+                    linkRow(link, index: index)
+                }
+                if !project.diagnostics.isEmpty {
+                    Text(project.diagnostics.prefix(2).joined(separator: "\n"))
+                        .font(.caption2).foregroundStyle(.orange)
+                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             Divider()
 
             HStack(spacing: 6) {
-                actionButton("폴더 열기", control: .openFolder, enabled: model.state.canOpenFolder) {
+                actionButton("폴더 열기", item: .openFolder, enabled: model.state.canOpenFolder) {
                     model.perform(.openFolder, source: .mouse)
                 }
-                actionButton("경로 복사", control: .copyPath, enabled: model.state.canCopyPath) {
+                actionButton("경로 복사", item: .copyPath, enabled: model.state.canCopyPath) {
                     model.perform(.copyPath, source: .mouse)
                 }
-                actionButton(model.state.isLocked ? "잠금 해제" : "잠금", control: .lock, enabled: true) {
+                actionButton(model.state.isLocked ? "잠금 해제" : "잠금", item: .lock, enabled: true) {
                     model.toggleLock()
                 }
             }
@@ -101,8 +122,8 @@ struct DockView: View {
                 Text(metaText)
                     .font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 Spacer()
-                actionButton("숨기기", control: .hide, enabled: true) { model.hideWindow() }
-                actionButton("종료", control: .quit, enabled: true) { NSApplication.shared.terminate(nil) }
+                actionButton("숨기기", item: .hide, enabled: true) { model.hideWindow() }
+                actionButton("종료", item: .quit, enabled: true) { NSApplication.shared.terminate(nil) }
             }
 
             Text("Tab 이동 · Enter 실행 · Esc 닫기 · ⌃⌥⌘D 호출")
@@ -118,7 +139,7 @@ struct DockView: View {
     /// 마우스와 키보드가 같은 동작으로 들어간다. 키보드 포커스는 테두리로 표시한다.
     private func actionButton(
         _ title: String,
-        control: DockModel.Control,
+        item: DockModel.FocusItem,
         enabled: Bool,
         action: @escaping () -> Void
     ) -> some View {
@@ -126,16 +147,43 @@ struct DockView: View {
             Text(title)
                 .padding(.horizontal, 4)
                 .padding(.vertical, 1)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 4)
-                        .strokeBorder(
-                            model.focusedControl == control ? Color.accentColor : Color.clear,
-                            lineWidth: 2
-                        )
-                )
+                .overlay(focusRing(for: item))
         }
         .buttonStyle(.bordered)
         .disabled(!enabled)
+    }
+
+    /// 프로젝트 링크 한 줄. 이름과 URL을 함께 보여주고, 클릭하면 그 링크를 연다.
+    private func linkRow(_ link: ProjectLinkTarget, index: Int) -> some View {
+        HStack(spacing: 6) {
+            Button {
+                model.openLink(at: index, source: .mouse)
+            } label: {
+                Text(link.name)
+                    .font(.caption)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .overlay(focusRing(for: .link(index)))
+            }
+            .buttonStyle(.bordered)
+            // 오류·확인 중에는 링크도 실행할 수 없다(마우스·키보드 동일).
+            .disabled(!model.state.isActionable)
+
+            Text(link.url)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+        }
+    }
+
+    private func focusRing(for item: DockModel.FocusItem) -> some View {
+        RoundedRectangle(cornerRadius: 4)
+            .strokeBorder(
+                model.focusedItem == item ? Color.accentColor : Color.clear,
+                lineWidth: 2
+            )
     }
 
     private var stateLabel: String {

@@ -13,6 +13,8 @@ struct LaunchOptions {
     var stateLogPath: String?
     /// 설정 파일 경로 재정의. 없으면 기본 경로를 쓴다. 가짜 모드는 항상 메모리 전용이다.
     var settingsPath: String?
+    /// 프로젝트 카탈로그 경로 재정의. 없으면 기본 경로를 쓴다.
+    var projectsPath: String?
     /// 진단용: 시작 직후 창을 이 좌표로 옮긴다. 사용자가 창을 드래그한 것과 **같은 경로**를 탄다.
     var moveTo: CGPoint?
 
@@ -70,6 +72,13 @@ func parseLaunchOptions(_ arguments: [String]) -> LaunchOptions? {
                 exit(2)
             }
             options.settingsPath = arguments[index]
+        case "--projects-path":
+            index += 1
+            guard index < arguments.count else {
+                FileHandle.standardError.write(Data("--projects-path requires a path\n".utf8))
+                exit(2)
+            }
+            options.projectsPath = arguments[index]
         case "--state-log":
             index += 1
             guard index < arguments.count else {
