@@ -227,6 +227,9 @@ struct DockView: View {
         let host = model.state.hostAppID ?? "터미널"
         if let frontmost = model.state.hostFrontmost {
             parts.append(frontmost ? "\(host) 최전면" : "\(host) 비활성")
+        } else if model.state.display == .held {
+            // 최전면을 판정하지 못한 상태. "비활성"이라고 단정하지 않는다.
+            parts.append("\(host) 포커스 확인 불가")
         }
         return parts.isEmpty ? "대상 없음" : parts.joined(separator: " · ")
     }

@@ -120,7 +120,11 @@ public enum SelfTest {
     private static func targetSwitchChecks() -> [CheckResult] {
         let (store, _) = makeStore(directories: ["/work/a", "/work/b"])
         store.alignTarget(to: record(pane: "w1:p1", cwd: "/work/a"))
-        _ = store.apply(PaneObservation(generation: 1, record: record(pane: "w1:p1", cwd: "/work/a")))
+        // 이 검사는 **전환·경로 승격 규칙**을 본다. 포커스 판정은 명시적으로 준다
+        // (판정 불가(nil)의 의미는 별도 검사가 담당한다).
+        _ = store.apply(
+            PaneObservation(generation: 1, record: record(pane: "w1:p1", cwd: "/work/a"), hostFrontmost: true)
+        )
         let trackedBefore = store.current?.focusStatus == .tracked
 
         store.alignTarget(to: record(pane: "w1:p2", cwd: "/work/b"))
@@ -130,7 +134,7 @@ public enum SelfTest {
         let pendingDetail = "current.path=\(store.current?.reportedCWD ?? "nil") previous.path=\(store.previous?.reportedCWD ?? "nil")"
 
         _ = store.apply(
-            PaneObservation(generation: store.focusGeneration, record: record(pane: "w1:p2", cwd: "/work/b"))
+            PaneObservation(generation: store.focusGeneration, record: record(pane: "w1:p2", cwd: "/work/b"), hostFrontmost: true)
         )
         let pathUpdated = store.current?.reportedCWD == "/work/b"
             && store.current?.pathStatus == .valid
@@ -593,6 +597,7 @@ public enum SelfTest {
         results.append(contentsOf: projectChecks())
         results.append(contentsOf: cmuxChecks())
         results.append(contentsOf: hostRouterChecks())
+        results.append(contentsOf: hostBoundaryChecks())
         return results
     }
 
@@ -1891,14 +1896,15 @@ public enum SelfTest {
             TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
             results.append(
                 check(
-                    "cmux E: 최전면을 판정할 수 없으면 유지 중으로 단정하지 않는다",
-                    store.current?.focusStatus == .tracked && store.current?.hostFrontmost == nil
-                        && store.current?.reportedCWD == "/work/a",
+                    "cmux E: 최전면을 판정할 수 없으면 추적 중으로 승격하지 않는다",
+                    store.current?.focusStatus == .unknown && store.current?.hostFrontmost == nil
+                        && store.current?.reportedCWD == "/work/a"
+                        && store.current?.pathStatus == .valid,
                     "focus=\(store.current?.focusStatus.rawValue ?? "-") hostFrontmost=\(store.current?.hostFrontmost.map(String.init) ?? "nil")"
                 )
             )
         } catch {
-            results.append(check("cmux E: 최전면을 판정할 수 없으면 유지 중으로 단정하지 않는다", false, "\(error)"))
+            results.append(check("cmux E: 최전면을 판정할 수 없으면 추적 중으로 승격하지 않는다", false, "\(error)"))
         }
 
         // F-1: 포커스된 panel이 터미널이 아니면 이전 경로를 현재 대상처럼 남기지 않는다.
@@ -2034,10 +2040,15 @@ public enum SelfTest {
         let stubName: String
         private let paneID: String
         private let tabID: String
-        private let path: String?
+        private var path: String?
         private let source: CWDSource
         private let failure: TerminalHostQueryError?
         private(set) var queryCount = 0
+
+        /// 같은 panel에서 경로가 바뀐 상황을 만든다.
+        func setPath(_ newPath: String?) {
+            path = newPath
+        }
 
         init(
             name: String,
@@ -2064,18 +2075,14 @@ public enum SelfTest {
 
         func unsupportedVersionReason(_ version: String?) -> String? { nil }
 
+        /// 비터미널 panel(브라우저 등)을 흉내 낼 때 false로 둔다.
+        var isTerminalPanel = true
+
         func snapshot() throws -> TerminalHostSnapshot {
             queryCount += 1
             if let failure { throw failure }
-            return TerminalHostSnapshot(
-                version: nil,
-                frontmost: true,
-                frontWindowID: "win-1",
-                selectedTabID: tabID,
-                focusedTerminalID: paneID,
-                focusedWorkingDirectory: path,
-                focusedPanelIsTerminal: true,
-                terminals: [
+            let terminals = isTerminalPanel
+                ? [
                     TerminalHostTerminal(
                         terminalID: paneID,
                         windowID: "win-1",
@@ -2084,6 +2091,16 @@ public enum SelfTest {
                         name: nil
                     )
                 ]
+                : []
+            return TerminalHostSnapshot(
+                version: nil,
+                frontmost: true,
+                frontWindowID: "win-1",
+                selectedTabID: tabID,
+                focusedTerminalID: paneID,
+                focusedWorkingDirectory: isTerminalPanel ? path : nil,
+                focusedPanelIsTerminal: isTerminalPanel,
+                terminals: terminals
             )
         }
 
@@ -2104,7 +2121,9 @@ public enum SelfTest {
 
         func records(in snapshot: TerminalHostSnapshot) -> [PaneRecord] { [] }
 
-        func noTargetReason(in snapshot: TerminalHostSnapshot) -> String { "no target (\(stubName))" }
+        func noTargetReason(in snapshot: TerminalHostSnapshot) -> String {
+            isTerminalPanel ? "no target (\(stubName))" : "focused panel is not a terminal (\(stubName))"
+        }
     }
 
     /// 최전면 앱을 바꿀 수 있는 checker.
@@ -2251,6 +2270,239 @@ public enum SelfTest {
             )
         } catch {
             results.append(check("라우터: 호스트가 바뀌면 신원과 경로 출처가 함께 바뀐다", false, "\(error)"))
+        }
+
+        return results
+    }
+
+    // MARK: - 호스트 경계 (V13)
+
+    /// V13에서 확인하는 **호스트 사이의 경계**를 고정한다.
+    ///
+    /// 합성 입력으로만 만든 상태다. 실제 앱 전환 관측은 `docs/verification.md` V13에 따로 기록한다.
+    private static func hostBoundaryChecks() -> [CheckResult] {
+        var results: [CheckResult] = []
+
+        /// 프로브가 `refresh()`에서 하는 것과 같은 상태로 맞춘 조회 장치.
+        /// (연결을 세우지 않으면 화면 상태가 `error`가 되어 표시 규칙을 볼 수 없다.)
+        func makeBoundaryStore(
+            _ router: TerminalHostRouter,
+            _ directories: Set<String>
+        ) -> (adapter: TerminalHostRouter, store: ContextStore, resolver: FocusResolver, validator: StubValidator) {
+            let made = makeHostStore(router, directories: directories)
+            made.store.noteConnection(.connected)
+            return made
+        }
+
+        /// 지금 표시 묶음의 화면 상태를 만든다(포커스 동결 없이).
+        func displayState(_ store: ContextStore) -> DockState {
+            DockStateBuilder.make(
+                current: store.current,
+                previous: store.previous,
+                connection: store.connection,
+                failure: store.lastFailure,
+                lock: DockLock()
+            )
+        }
+
+        // 1) 최초 실행 + 최전면 판정 불가: 기본 호스트를 **조회 후보**로 삼되 추적 중으로 표시하지 않는다.
+        do {
+            let ghostty = StubHostAdapter(name: "ghostty", paneID: "term-A", path: "/work/a")
+            let cmux = StubHostAdapter(name: "cmux", paneID: "panel-B", path: "/work/b", source: .cmuxFocusedCWD)
+            let router = makeRouter(ghostty: ghostty, cmux: cmux, frontmost: StubFrontmostApp(nil))
+            let (adapter, store, resolver, validator) = makeBoundaryStore(router, ["/work/a", "/work/b"])
+
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let state = displayState(store)
+
+            results.append(
+                check(
+                    "V13: 최전면을 판정할 수 없으면 기본 호스트를 후보로만 삼고 추적 중으로 표시하지 않는다",
+                    ghostty.queryCount == 1 && cmux.queryCount == 0
+                        && store.current?.identity.adapterID == "ghostty"
+                        && store.current?.focusStatus == .unknown
+                        && store.current?.pathStatus == .valid
+                        && state.display == .held
+                        && (state.detail?.contains("포커스 확인 불가") ?? false),
+                    "host=\(store.current?.identity.adapterID ?? "-") focus=\(store.current?.focusStatus.rawValue ?? "-") validity=\(store.current?.pathStatus.rawValue ?? "-") display=\(state.display.rawValue)"
+                )
+            )
+        } catch {
+            results.append(check("V13: 최전면을 판정할 수 없으면 기본 호스트를 후보로만 삼고 추적 중으로 표시하지 않는다", false, "\(error)"))
+        }
+
+        // 2) 추적 중 → 최전면 판정 불가로 바뀜: 경로는 그대로, 포커스만 내려간다.
+        do {
+            let ghostty = StubHostAdapter(name: "ghostty", paneID: "term-A", path: "/work/a")
+            let cmux = StubHostAdapter(name: "cmux", paneID: "panel-B", path: "/work/b", source: .cmuxFocusedCWD)
+            let frontmost = StubFrontmostApp(GhosttyAdapter.bundleIdentifier)
+            let router = makeRouter(ghostty: ghostty, cmux: cmux, frontmost: frontmost)
+            let (adapter, store, resolver, validator) = makeBoundaryStore(router, ["/work/a", "/work/b"])
+
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let wasTracked = store.current?.focusStatus == .tracked
+            frontmost.bundleIdentifier = nil
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let state = displayState(store)
+
+            results.append(
+                check(
+                    "V13: 최전면을 판정할 수 없게 되면 경로는 유지하고 포커스만 확인 불가로 내린다",
+                    wasTracked
+                        && store.current?.focusStatus == .unknown
+                        && store.current?.reportedCWD == "/work/a"
+                        && store.current?.pathStatus == .valid
+                        && state.display == .held
+                        && state.fullPath == "/work/a"
+                        && (state.detail?.contains("포커스 확인 불가") ?? false),
+                    "focus=\(store.current?.focusStatus.rawValue ?? "-") path=\(store.current?.reportedCWD ?? "nil") display=\(state.display.rawValue)"
+                )
+            )
+        } catch {
+            results.append(check("V13: 최전면을 판정할 수 없게 되면 경로는 유지하고 포커스만 확인 불가로 내린다", false, "\(error)"))
+        }
+
+        // 3) 호스트 전환 뒤 **이전 호스트의 응답**이 도착해도 새 대상을 덮지 않는다.
+        //    두 Adapter가 **같은 형태의 pane ID**를 주는 경우까지 포함한다.
+        do {
+            let shared = "same-looking-pane-id"
+            let ghostty = StubHostAdapter(name: "ghostty", paneID: shared, path: "/work/a")
+            let cmux = StubHostAdapter(name: "cmux", paneID: shared, path: "/work/b", source: .cmuxFocusedCWD)
+            let frontmost = StubFrontmostApp(GhosttyAdapter.bundleIdentifier)
+            let router = makeRouter(ghostty: ghostty, cmux: cmux, frontmost: frontmost)
+            let (adapter, store, resolver, validator) = makeBoundaryStore(router, ["/work/a", "/work/b"])
+
+            let firstSnapshot = try adapter.snapshot()
+            let firstRecord = adapter.focusedRecord(in: firstSnapshot)
+            TerminalHostSnapshotApplier.apply(firstSnapshot, adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let generationBeforeSwitch = store.focusGeneration
+
+            frontmost.bundleIdentifier = CmuxAdapter.bundleIdentifier
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let late = firstRecord.map { store.apply(PaneObservation(generation: generationBeforeSwitch, record: $0)) }
+
+            results.append(
+                check(
+                    "V13: pane ID가 같아도 호스트가 바뀌면 세대를 올려 이전 호스트의 응답을 폐기한다",
+                    late == .discardedStale
+                        && store.focusGeneration > generationBeforeSwitch
+                        && store.current?.identity.adapterID == "cmux"
+                        && store.current?.reportedCWD == "/work/b"
+                        && store.current?.cwdSource == .cmuxFocusedCWD,
+                    "outcome=\(late.map(String.init(describing:)) ?? "nil") generation=\(generationBeforeSwitch)→\(store.focusGeneration) host=\(store.current?.identity.adapterID ?? "-")"
+                )
+            )
+        } catch {
+            results.append(check("V13: pane ID가 같아도 호스트가 바뀌면 세대를 올려 이전 호스트의 응답을 폐기한다", false, "\(error)"))
+        }
+
+        // 4) cmux 비터미널 panel: 안전하게 멈추고 **Ghostty로 대체하지 않는다.** 터미널로 돌아오면 복구한다.
+        do {
+            let ghostty = StubHostAdapter(name: "ghostty", paneID: "term-A", path: "/work/a")
+            let cmux = StubHostAdapter(name: "cmux", paneID: "panel-B", path: "/work/b", source: .cmuxFocusedCWD)
+            let router = makeRouter(
+                ghostty: ghostty, cmux: cmux, frontmost: StubFrontmostApp(CmuxAdapter.bundleIdentifier)
+            )
+            let (adapter, store, resolver, validator) = makeBoundaryStore(router, ["/work/a", "/work/b", "/work/c"])
+
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let terminalPath = store.current?.reportedCWD
+
+            // 포커스된 panel이 브라우저가 된다.
+            cmux.isTerminalPanel = false
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let stoppedPath = store.current?.reportedCWD
+            let stoppedPane = store.current?.identity.paneID
+            let stoppedPrevious = store.previous?.reportedCWD
+            let reason = store.lastFailure ?? ""
+            let substituted = ghostty.queryCount
+
+            // 터미널 surface로 돌아온다.
+            cmux.isTerminalPanel = true
+            cmux.setPath("/work/c")
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+
+            results.append(
+                check(
+                    "V13: 비터미널 panel에서는 멈추고 다른 호스트로 대체하지 않으며, 터미널 복귀 시 복구한다",
+                    terminalPath == "/work/b"
+                        && stoppedPath == nil
+                        && stoppedPane == "-"
+                        && reason.contains("not a terminal")
+                        && substituted == 0
+                        && stoppedPrevious == "/work/b"
+                        && store.current?.reportedCWD == "/work/c"
+                        && store.current?.identity.adapterID == "cmux"
+                        && store.current?.focusStatus == .tracked,
+                    "이전=\(terminalPath ?? "nil") 멈춤=\(stoppedPath ?? "nil") 멈춤이전=\(stoppedPrevious ?? "nil") ghostty조회=\(substituted)회 복구=\(store.current?.reportedCWD ?? "nil")"
+                )
+            )
+        } catch {
+            results.append(check("V13: 비터미널 panel에서는 멈추고 다른 호스트로 대체하지 않으며, 터미널 복귀 시 복구한다", false, "\(error)"))
+        }
+
+        // 5) 제3의 앱을 보는 동안: 마지막 작업 대상을 유지하고 pane·경로가 배경의 다른 대상으로 바뀌지 않는다.
+        do {
+            let ghostty = StubHostAdapter(name: "ghostty", paneID: "term-A", path: "/work/a")
+            let cmux = StubHostAdapter(name: "cmux", paneID: "panel-B", path: "/work/b", source: .cmuxFocusedCWD)
+            let frontmost = StubFrontmostApp(GhosttyAdapter.bundleIdentifier)
+            let router = makeRouter(ghostty: ghostty, cmux: cmux, frontmost: frontmost)
+            let (adapter, store, resolver, validator) = makeBoundaryStore(router, ["/work/a", "/work/b"])
+
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let paneBefore = store.current?.identity.paneID
+            let pathBefore = store.current?.reportedCWD
+
+            frontmost.bundleIdentifier = "com.example.browser"
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let state = displayState(store)
+
+            results.append(
+                check(
+                    "V13: 다른 앱을 보는 동안에는 마지막 작업 대상을 유지한다",
+                    paneBefore == "term-A" && pathBefore == "/work/a"
+                        && store.current?.identity.paneID == "term-A"
+                        && store.current?.reportedCWD == "/work/a"
+                        && store.current?.focusStatus == .held
+                        && state.display == .held
+                        && state.canOpenFolder
+                        && cmux.queryCount == 0,
+                    "pane=\(store.current?.identity.paneID ?? "-") path=\(store.current?.reportedCWD ?? "nil") display=\(state.display.rawValue) cmux조회=\(cmux.queryCount)회"
+                )
+            )
+        } catch {
+            results.append(check("V13: 다른 앱을 보는 동안에는 마지막 작업 대상을 유지한다", false, "\(error)"))
+        }
+
+        // 6) 선택(실행 계획) 중 호스트가 바뀌어도 실행 대상은 선택 시점 값을 유지한다.
+        do {
+            let ghostty = StubHostAdapter(name: "ghostty", paneID: "term-A", path: "/work/a")
+            let cmux = StubHostAdapter(name: "cmux", paneID: "panel-B", path: "/work/b", source: .cmuxFocusedCWD)
+            let frontmost = StubFrontmostApp(GhosttyAdapter.bundleIdentifier)
+            let router = makeRouter(ghostty: ghostty, cmux: cmux, frontmost: frontmost)
+            let (adapter, store, resolver, validator) = makeBoundaryStore(router, ["/work/a", "/work/b"])
+
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let frozen = store.current
+            let frozenPlan = frozen.map { DockActionPlanner.plan(.copyPath, for: $0, validator: validator) }
+
+            frontmost.bundleIdentifier = CmuxAdapter.bundleIdentifier
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let afterHostSwitch = frozen.map { DockActionPlanner.plan(.copyPath, for: $0, validator: validator) }
+            let currentPlan = store.current.map { DockActionPlanner.plan(.copyPath, for: $0, validator: validator) }
+
+            results.append(
+                check(
+                    "V13: 선택 중 호스트가 바뀌어도 실행 대상은 선택 시점 값을 유지한다",
+                    frozenPlan == .copyPath("/work/a")
+                        && afterHostSwitch == .copyPath("/work/a")
+                        && currentPlan == .copyPath("/work/b")
+                        && store.current?.identity.adapterID == "cmux",
+                    "frozen=\(String(describing: frozenPlan)) after=\(String(describing: afterHostSwitch)) current=\(String(describing: currentPlan))"
+                )
+            )
+        } catch {
+            results.append(check("V13: 선택 중 호스트가 바뀌어도 실행 대상은 선택 시점 값을 유지한다", false, "\(error)"))
         }
 
         return results

@@ -37,6 +37,8 @@ public final class ContextStore {
     public private(set) var lastFailure: String?
 
     private var cache: [String: CurrentWorkInfo] = [:]
+    /// 지금 표시 중인 대상이 나온 Adapter. 출처가 바뀌면 같은 pane ID라도 다른 대상으로 본다.
+    private var currentSourceID: String?
     private let resolver: FocusResolver
     private let validator: PathValidating
     private var factory: WorkInfoFactory
@@ -84,14 +86,23 @@ public final class ContextStore {
     /// 실제 포커스 pane으로 대상을 맞춘다.
     ///
     /// 이전 경로는 `previous`로만 옮기고, 새 대상의 경로 슬롯은 비워 둔다(`.pending`).
-    public func alignTarget(to record: PaneRecord) {
-        if current?.identity.paneID == record.paneID {
+    ///
+    /// `sourceID`는 이 레코드를 만든 Adapter다. **pane ID가 같아도 출처가 다르면 다른 대상이다** —
+    /// 두 Adapter가 같은 형태의 식별자를 쓸 수 있으므로, 출처가 바뀌면 세대를 올려
+    /// 이전 출처의 늦은 응답이 새 대상을 덮어쓰지 못하게 한다.
+    public func alignTarget(to record: PaneRecord, sourceID: String? = nil) {
+        let sourceChanged = currentSourceID != sourceID
+        if current?.identity.paneID == record.paneID, !sourceChanged {
             // 같은 pane이면 표시 묶음을 건드리지 않는다. 경로 갱신은 apply가 담당한다.
             return
         }
         if let existing = current {
             previous = existing
         }
+        if sourceChanged, current != nil {
+            resolver.invalidateForSourceChange()
+        }
+        currentSourceID = sourceID
         let generation = resolver.setTarget(record.paneID)
         current = factory.pendingWorkInfo(
             for: record,

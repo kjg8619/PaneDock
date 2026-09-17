@@ -145,6 +145,9 @@ final class DockModel: ObservableObject {
         stateLog?.append(
             refresh: refreshCount,
             display: state.display.rawValue,
+            // 어느 터미널을 따라가고 있는지, 그 경로가 어디서 왔는지 남긴다(호스트 전환 검증용).
+            host: actionInfo?.identity.hostAppID ?? state.hostAppID ?? "-",
+            source: actionInfo?.cwdSource?.rawValue ?? "-",
             folderName: state.folderName,
             fullPath: state.fullPath ?? "-",
             paneID: state.paneID ?? "-",

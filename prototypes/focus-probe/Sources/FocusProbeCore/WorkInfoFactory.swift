@@ -108,9 +108,17 @@ public struct WorkInfoFactory: Sendable {
         let focusStatus: FocusStatus
         switch pathStatus {
         case .valid:
-            // 바깥 앱이 최전면이 아니면 "마지막 위치를 유지해 표시 중"이다(기획서 §5).
-            // 경로가 유효할 때만 성립한다.
-            focusStatus = (hostFrontmost == false) ? .held : .tracked
+            // 경로가 유효해도 **포커스가 확인된 것과는 다르다.**
+            // - 최전면이면 `tracked`: 지금 보고 있는 대상이다.
+            // - 최전면이 아니면 `held`: 마지막 위치를 유지해 표시 중이다(기획서 §5).
+            // - **판정할 수 없으면 `unknown`**: 후보를 골랐을 뿐, 사용자가 보고 있는 대상을
+            //   확인한 것이 아니다. `tracked`로 승격하면 확인하지 않은 포커스를 확인한 것처럼
+            //   표시하게 된다(V13에서 고친 결함).
+            switch hostFrontmost {
+            case .some(true): focusStatus = .tracked
+            case .some(false): focusStatus = .held
+            case .none: focusStatus = .unknown
+            }
         case .pending:
             focusStatus = .pending
         case .missing, .unsupported:

@@ -62,7 +62,14 @@ public final class TerminalHostRouter: TerminalHostAdapter, @unchecked Sendable 
         let index = currentIndex()
         // 고른 호스트를 기억한다. 다음 조회에서 최전면이 아니어도 이 대상을 유지한다.
         lastIndex = index
-        return try hosts[index].adapter.snapshot()
+        var snapshot = try hosts[index].adapter.snapshot()
+        // **응답에 호스트를 붙인다.** 이후 위임은 이 값으로 호스트를 정하므로,
+        // 응답을 받은 뒤 선택이 바뀌어도 그 응답은 원래 호스트로 변환된다.
+        snapshot.sourceIndex = index
+        // 최전면 판정은 **라우터가 한 번만** 한다. 호스트 Adapter가 따로 판정하면
+        // "확인된 포커스"와 "확인 불가"가 서로 어긋난다.
+        snapshot.frontmost = frontmost.isFrontmost(hosts[index].bundleIdentifier)
+        return snapshot
     }
 
     /// `snapshot()`이 고른 호스트. 그 이후의 위임은 모두 이 호스트로 간다.
@@ -70,6 +77,12 @@ public final class TerminalHostRouter: TerminalHostAdapter, @unchecked Sendable 
     /// 스냅샷과 레코드 변환이 **같은 호스트**에서 나와야 한다. 두 호스트의 식별자 체계가 다르므로
     /// 섞이면 다른 pane의 경로를 현재 대상으로 표시하게 된다.
     private var chosen: Host { hosts[lastIndex ?? 0] }
+
+    /// 이 스냅샷을 만든 호스트. **스냅샷에 붙은 값을 먼저 본다** —
+    /// 응답을 받은 뒤 라우터 선택이 바뀌어도 그 응답은 원래 호스트로 변환해야 한다.
+    private func host(for snapshot: TerminalHostSnapshot) -> Host {
+        hosts[min(max(snapshot.sourceIndex ?? lastIndex ?? 0, 0), hosts.count - 1)]
+    }
 
     public var appName: String { chosen.adapter.appName }
 
@@ -82,14 +95,14 @@ public final class TerminalHostRouter: TerminalHostAdapter, @unchecked Sendable 
     }
 
     public func focusedRecord(in snapshot: TerminalHostSnapshot) -> PaneRecord? {
-        chosen.adapter.focusedRecord(in: snapshot)
+        host(for: snapshot).adapter.focusedRecord(in: snapshot)
     }
 
     public func records(in snapshot: TerminalHostSnapshot) -> [PaneRecord] {
-        chosen.adapter.records(in: snapshot)
+        host(for: snapshot).adapter.records(in: snapshot)
     }
 
     public func noTargetReason(in snapshot: TerminalHostSnapshot) -> String {
-        chosen.adapter.noTargetReason(in: snapshot)
+        host(for: snapshot).adapter.noTargetReason(in: snapshot)
     }
 }

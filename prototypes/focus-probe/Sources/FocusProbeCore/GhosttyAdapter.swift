@@ -197,6 +197,11 @@ public struct TerminalHostSnapshot: Equatable, Sendable {
     /// Ghostty는 이 값을 제공하지 않아 nil이다(터미널만 있으므로 구분할 것이 없다).
     /// **경로를 추측으로 채우지 않기 위해** "없다"와 "터미널이 아니다"를 구분하는 데만 쓴다.
     public var focusedPanelIsTerminal: Bool?
+    /// 이 스냅샷을 만든 호스트 후보의 인덱스(`TerminalHostRouter`가 붙인다).
+    ///
+    /// 라우터를 쓰지 않으면 nil이다. 라우터의 위임은 이 값을 먼저 본다 —
+    /// **응답을 받은 뒤 선택이 바뀌어도 그 응답은 원래 호스트로 변환**해야 하기 때문이다.
+    public var sourceIndex: Int?
     public var terminals: [TerminalHostTerminal]
 
     public init(
@@ -207,6 +212,7 @@ public struct TerminalHostSnapshot: Equatable, Sendable {
         focusedTerminalID: String?,
         focusedWorkingDirectory: String?,
         focusedPanelIsTerminal: Bool? = nil,
+        sourceIndex: Int? = nil,
         terminals: [TerminalHostTerminal]
     ) {
         self.version = version
@@ -216,6 +222,7 @@ public struct TerminalHostSnapshot: Equatable, Sendable {
         self.focusedTerminalID = focusedTerminalID
         self.focusedWorkingDirectory = focusedWorkingDirectory
         self.focusedPanelIsTerminal = focusedPanelIsTerminal
+        self.sourceIndex = sourceIndex
         self.terminals = terminals
     }
 
@@ -281,7 +288,7 @@ public enum TerminalHostSnapshotApplier {
             return Result(target: nil, background: [])
         }
 
-        store.alignTarget(to: targetRecord)
+        store.alignTarget(to: targetRecord, sourceID: adapter.factory.adapterID)
 
         var background: [BackgroundPaneInfo] = []
         for other in adapter.records(in: snapshot) where other.paneID != target.terminalID {

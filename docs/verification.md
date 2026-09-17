@@ -2043,6 +2043,129 @@ EVENT refresh=1 display=tracked folder=PaneDock path=…/tool/PaneDock pane=4300
 - **두 호스트를 동시에 조회하지 않는다.** 고른 하나만 조회하므로 비용이 늘지 않는다.
 - V11의 미확인 2번(터미널이 아닌 panel)은 그대로 남는다.
 
+## V13. 2026-09-17 — 자동 전환 실제 검증과 판정 불가 처리 보완
+
+### V13.1 기준선 (V13 착수 시 실제 측정)
+
+V12 기록의 해시를 그대로 옮기지 않고 이 시점에 다시 측정했다.
+
+| 항목 | V12 최종(기록값) | **V13 착수 실측** | V13 최종 |
+| --- | --- | --- | --- |
+| HEAD | `f5a998a` | `f5a998a` (원격과 동일) | 미커밋 (V13.8) |
+| 작업 트리 | — | 소스 변경 없음. 미추적은 `.omp/`뿐 | 아래 참조 |
+| 자동 검사 | 104/104 | **104/104** | **110/110** |
+| 코어 CLI | `3c12c18717a251eb` | **`0cff76874d0fd388`** | **`5509e7104cd01c72`** |
+| 앱 번들 | `04e69d52ec6212c6` | **`04e69d52ec6212c6`** | **`b1407acf7499fba9`** |
+
+앱 번들 해시는 V12 기록값과 일치했고(V13 착수 시 재빌드해 확인), 코어 CLI는 달랐다.
+빌드마다 값이 달라질 수 있으므로 **해시는 같은 세션 안에서 비교할 때만** 근거로 쓴다(V11.1과 같은 결론).
+
+### V13.2 [1] 판정 불가 처리 — 결함 1건을 찾아 고쳤다
+
+**결함:** `hostFrontmost == nil`(최전면 판정 불가)이 `focusStatus = .tracked`로 매핑됐다.
+즉 **포커스를 확인하지 못했는데 "추적 중"(확인 완료)으로 표시**했다.
+
+V11.11은 `nil → false`(거짓 "유지 중")만 막았고, `nil → true`(거짓 "추적 중")는 남아 있었다.
+지시하신 "nil을 최전면 확인 성공으로 취급해서도 안 된다"가 이 지점이다.
+
+| 구분해야 하는 것 | 실현 수단 | 판정 불가일 때 |
+| --- | --- | --- |
+| **조회할 호스트 후보 선택** | `TerminalHostRouter`(최전면 → 마지막 → 기본) | 후보 선택은 정상 동작 — 마지막/기본 호스트를 조회한다 |
+| **사용자가 보고 있는 호스트 확인** | `FrontmostAppChecking.frontmostBundleIdentifier()` | **nil을 확인으로 바꾸지 않는다** |
+| **해당 대상의 경로 유효성** | `PathValidating` + `PathStatus` | 경로가 실제로 있으면 `.valid` 그대로 (포커스 불명과 무관) |
+
+**수정(최소):**
+
+| 파일 | 변경 |
+| --- | --- |
+| `WorkInfoFactory.currentWorkInfo` | 경로가 유효할 때 `hostFrontmost`가 nil이면 `.unknown`(기존 `FocusStatus` 값) — `tracked`로 승격하지 않는다 |
+| `DockStateBuilder.make` | 경로 유효 + `.unknown` → 표시는 `held`, `detail`에 "포커스 확인 불가 — 마지막으로 확인한 대상을 표시 중입니다". 경로 유효성은 건드리지 않아 `missing`/`error`로 **오분류하지 않는다** |
+| `DockView.metaText` | `"(호스트) 포커스 확인 불가"` — "비활성"이라고 단정하지 않는다 |
+
+**기존 검사 3건이 `nil → tracked`를 가정하고 있었다.** 그 검사들의 관심사는 **전환·경로 승격 규칙**이므로
+포커스를 명시(`hostFrontmost: true`)해 원래 의도를 유지하고, nil의 의미는 별도 검사로 분리했다.
+검사 이름·기대값을 새 동작에 끼워 맞춘 것이 아니라 **관심사를 나눈 것**이다.
+
+`.unknown`은 기존 `FocusStatus` 값이고 표시도 기존 `held`를 쓰므로 **상태 모델을 늘리지 않았다.**
+
+### V13.3 [2] 호스트 경계 — 정보 혼합을 두 곳에서 막았다
+
+**(a) 응답에 호스트를 붙인다.** `TerminalHostSnapshot.sourceIndex`(라우터가 설정)를 추가하고,
+라우터의 위임(`focusedRecord`·`records`·`noTargetReason`)이 **스냅샷에 붙은 값을 먼저** 보게 했다.
+응답을 받은 뒤 라우터 선택이 바뀌어도 그 응답은 원래 호스트로 변환된다.
+
+**(b) 출처가 바뀌면 다른 대상이다.** `ContextStore.alignTarget(to:sourceID:)` + `currentSourceID`.
+두 Adapter가 **같은 형태의 pane ID**를 줄 수 있으므로, 출처가 다르면 `FocusResolver.invalidateForSourceChange()`로
+세대를 올려 **이전 출처의 늦은 응답을 폐기**하고 새 대상은 `pending`으로 시작한다.
+
+**최전면 판정 출처 단일화:** 라우터가 스냅샷의 `frontmost`를 자기 판정으로 덮는다.
+호스트 Adapter가 따로 판정하면 두 값이 어긋나 "확인된 포커스"와 "확인 불가"가 섞인다.
+
+**유지한 규칙:** cmux `identify`와 `sidebar-state.focused_panel`이 어긋나면 **경로를 인정하지 않는다.**
+workspace 요약 `cwd`나 이전 surface 경로로 대신 채우지 않는다(로그 `15:16:38`에서 `cwdSource=-`로 확인).
+
+### V13.4 [3] 실제 auto 왕복 — A~G (사용자 조작, 에이전트가 상태 로그로 분석)
+
+**하나의 PaneDock 프로세스**를 `--adapter auto --state-log`로 실행하고 사용자가 조작했다(로그 193줄).
+아래는 그 로그의 전이와 사건이다.
+
+| # | 요구 | 관측 (로그) | 판정 |
+| --- | --- | --- | --- |
+| **A** | Ghostty에서 프로젝트 A | `15:17:15 tracked host=ghostty cwdSource=ghostty:terminal.workingDirectory path=…/mac-tool-pack/egde-nochi pane=5D31DDD8 project=egde-nochi(2)` — 출처·terminal·CWD·프로젝트 일치 | ✓ |
+| **B** | cmux에서 프로젝트 B | `15:17:14 tracked host=cmux cwdSource=cmux:sidebar-state.focused_cwd path=…/make-games/CodeMose pane=B36DA838 project=codemose(2)` — surface·focused_cwd·프로젝트 일치 | ✓ |
+| **C** | Ghostty의 A로 복귀 | `15:17:27/29 tracked host=ghostty …egde-nochi pane=5D31DDD8 project=egde-nochi(2)` — **cmux·CodeMose 정보가 남지 않았다**(경로·pane·프로젝트 모두 Ghostty 것) | ✓ |
+| (보너스) | 빠른 왕복 | `15:17:15`~`15:17:30` 사이 A↔B를 6회 오갔고 **매번 host·pane·경로·프로젝트가 함께** 바뀌었다 | ✓ |
+| **D** | 각 호스트에서 링크 실행 | `15:17:40 EVENT link=repo project=codemose … url=https://github.com/kjg8619/CodeMose` (cmux) / `15:17:45·48 EVENT link=repo project=egde-nochi … url=https://github.com/kjg8619/egde-nochi` (Ghostty) — **표시 당시 프로젝트의 링크**가 열렸다 | ✓ |
+| **E** | 외부 브라우저로 이동 | 링크 직후 `display=held`가 되었고 **pane과 경로가 그대로**였다(예: `15:17:49 held host=ghostty pane=5D31DDD8 path=…/egde-nochi`). 배경의 다른 대상으로 바뀌지 않았다 | ✓ |
+| **F** | cmux 비터미널 panel | `15:18:09`~`15:18:14` 여섯 번의 조회 동안 `display=pending host=cmux path=- pane=- cwdSource=-` — **이전 터미널 경로를 붙이지 않았고**, 같은 구간에 `host=ghostty`로 바뀌지 않았다(**대체 없음**). 이 구간에 실행 이벤트 **0건**. `15:18:15` 터미널로 돌아오자 `tracked … CodeMose`로 **복구** | ✓ |
+| **G** | 호출·잠금 중 호스트 전환 | `15:18:20 EVENT invoke frozenFrontmost=true focus=link:0 target=…/CodeMose` → `15:18:24 activate control=lock` → `display=locked host=cmux path=…/CodeMose locked=true` → (잠금 중 Ghostty로 전환됨) → `15:18:29 activate control=lock`(해제) → `display=tracked host=ghostty …egde-nochi` — **잠금 중 대상이 고정**되고, **해제 후 현재 포커스를 다시 확인**했다 | ✓ |
+
+**A~G 전부 실제 조작으로 확인했다.** 관측하지 못한 항목은 없다.
+
+### V13.5 [4] 자체 검사 — 110/110 (V12 104 + V13 6)
+
+| 검사 | 확인 내용 | 결과 |
+| --- | --- | --- |
+| V13 | 최전면 판정 불가 + 최초 실행 → 기본 호스트를 **후보로만** 삼고 추적 중으로 표시하지 않는다(display `held`, detail 사유, 경로는 `.valid`) | PASS |
+| V13 | 추적 중 판정 불가로 바뀜 → 경로 유지, 포커스만 확인 불가로 내린다 | PASS |
+| V13 | **pane ID가 같아도** 호스트가 바뀌면 세대를 올려 이전 호스트의 응답을 폐기한다 | PASS |
+| V13 | 비터미널 panel → 멈추고 다른 호스트로 대체하지 않으며, 터미널 복귀 시 복구한다(대체 호스트 조회 0회) | PASS |
+| V13 | 다른 앱을 보는 동안 마지막 작업 대상을 유지한다(pane·경로 불변, 실행 가능) | PASS |
+| V13 | 선택 중 호스트가 바뀌어도 실행 대상은 선택 시점 값을 유지한다 | PASS |
+
+이 6건은 **합성 입력**이다. V13.4의 실제 관측과 등급을 섞지 않는다.
+운영 앱 종료·TCC 초기화로 오류를 강제로 만들지 않았다.
+
+### V13.6 요구된 결론
+
+1. **두 호스트의 auto 왕복을 실제로 확인했는가?** — **예.** A(ghostty)·B(cmux)·C(복귀)를 한 프로세스에서
+   순서대로 확인했고, 6회 빠른 왕복에서도 섞이지 않았다.
+2. **판정 불가를 정상 추적으로 잘못 표시하는가?** — **수정 전에는 그랬다**(nil → `tracked`).
+   수정 후에는 `unknown` + 표시 `held` + 사유 문구다. 합성 검사로 고정했다.
+   실제 nil 상황은 실행 문맥에 따라 발생하며(V11.11), 이번 세션의 로그에서는 발생하지 않았다.
+3. **비터미널 panel에서 안전하게 멈추고 복구하는가?** — **예.** 6초간 `pending`으로 멈추고
+   경로를 채우지 않았으며, 다른 호스트로 대체하지 않았고(조회 0회), 실행도 0건이었고, 복귀가 정상이었다.
+4. **표시 대상과 실제 실행 대상이 일치하는가?** — **예.** 링크 3회가 모두 표시 당시 프로젝트의 URL로 열렸고,
+   잠금 중 호스트 전환에서도 실행 대상이 흔들리지 않았다.
+
+### V13.7 남은 제약
+
+- **cmux 연동 전제:** 이 기기의 `socketControlMode = automation`에서만 확인됐다.
+  기본값(`cmuxOnly`)이면 바깥 프로세스는 연결할 수 없다. **다른 설치본에서도 그렇다고 표시하지 않는다.**
+- **중첩 TUI·원격 경로**는 지원하지 않는다(V6 이후 동일).
+- **여러 cmux 창/workspace 동시 운용**에서의 전환은 별도로 검증하지 않았다(단일 선택 대상만 확인).
+- 상태 로그에 `detail` 문자열을 넣지 않아, 경로 미제공 순간의 **사유 문구**는 로그만으로 확정할 수 없다.
+  (V13.4의 `15:16:38`은 `cwdSource=-`로 경로를 채우지 않은 것은 확인되지만, 사유는 추론이다.)
+- 메뉴로 추적 소스를 바꾸는 런타임 전환은 없다(실행 인자만).
+- 프로젝트 편집 UI·위젯·테마·새 Adapter는 이번에도 추가하지 않았다.
+
+### V13.8 커밋 후보 (승인 대기)
+
+| 구분 | 파일 |
+| --- | --- |
+| 커밋 대상 | `FocusProbeCore/{WorkInfoFactory,DockState,FocusResolver,ContextStore,GhosttyAdapter,TerminalHostRouter,SelfTest}.swift`, `PaneDockApp/{DockView,DockModel,StateLog}.swift`, `docs/verification.md` |
+| 제외 | `.omp/`(개인 설정), `.build/`·`dist/`(빌드 산출물), `/tmp/pd-v13.log`(진단 로그) |
+
 ---
 
 ## 정정 이력

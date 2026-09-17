@@ -28,6 +28,16 @@ public final class FocusResolver {
         return generation
     }
 
+    /// **출처(Adapter)가 바뀔 때** 호출한다.
+    ///
+    /// 두 Adapter가 같은 형태의 pane ID를 줄 수 있으므로(예: 둘 다 UUID), pane ID가 같아도
+    /// 다른 대상이다. 이전 출처에서 나간 요청의 응답을 무효화한다.
+    @discardableResult
+    public func invalidateForSourceChange() -> UInt64 {
+        generation += 1
+        return generation
+    }
+
     /// 대상이 사라졌을 때 호출한다(예: cmux에서 터미널이 아닌 패널로 포커스가 옮겨간 경우).
     ///
     /// 세대를 올려 **이전 대상에 대한 늦은 응답이 현재 대상으로 되살아나지 않게** 한다.

@@ -117,8 +117,13 @@ public enum DockStateBuilder {
             display = .locked
             detail = nil
         } else if let active, active.pathStatus == .valid {
+            // 경로는 유효하다. 포커스가 확인됐으면 추적 중, 아니면 유지 중이다.
             display = active.focusStatus == .tracked ? .tracked : .held
-            detail = nil
+            // 다만 **포커스를 확인하지 못한 것**과 "최전면이 아닌 것"은 다르다.
+            // 경로 유효성은 그대로 두고(오류로 만들지 않는다) 사유만 밝힌다.
+            detail = active.focusStatus == .unknown
+                ? "포커스 확인 불가 — 마지막으로 확인한 대상을 표시 중입니다"
+                : nil
         } else if active == nil || active?.pathStatus == .pending {
             display = .pending
             detail = failure

@@ -17,8 +17,8 @@ final class StateLog {
         try? FileManager.default.removeItem(atPath: path)
     }
 
-    func append(refresh: Int, display: String, folderName: String, fullPath: String, paneID: String, locked: Bool, project: String) {
-        write("\(formatter.string(from: Date())) refresh=\(refresh) display=\(display) folder=\(folderName) path=\(fullPath) pane=\(paneID) locked=\(locked) project=\(project)")
+    func append(refresh: Int, display: String, host: String, source: String, folderName: String, fullPath: String, paneID: String, locked: Bool, project: String) {
+        write("\(formatter.string(from: Date())) refresh=\(refresh) display=\(display) host=\(host) cwdSource=\(source) folder=\(folderName) path=\(fullPath) pane=\(paneID) locked=\(locked) project=\(project)")
     }
 
     /// 상태 갱신이 아닌 사건(호출·닫기·포커스 이동·실행)을 남긴다.
