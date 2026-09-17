@@ -14,6 +14,10 @@ import SwiftUI
 final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let options: LaunchOptions
     private var panel: NSPanel?
+    /// 지금 창 크기를 맞추는 중인지. 이때 생기는 이동은 사용자의 위치가 아니므로 저장하지 않는다.
+    private var isApplyingLayout = false
+    /// 프로그램이 마지막으로 크기를 맞춘 시각. 알림이 늦게 도착하는 경우까지 막는다.
+    private var lastProgrammaticLayout: Date?
     private var statusItem: NSStatusItem?
     private var model: DockModel?
     private var settings: SettingsStore?
@@ -244,7 +248,11 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         )
         let panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.nonactivatingPanel, .titled, .closable, .utilityWindow, .fullSizeContentView],
+            // 테두리 없는 패널: 제목 표시줄이 없어 **프레임 크기 == 내용 크기**가 된다.
+            // 제목 표시줄이 있으면 창 높이가 19pt 어긋나(요청 76 / 실제 95) 레이아웃이 일어날 때마다
+            // 크기 변경이 반복되고 바가 밀려 내려간다(V14 사용자 보고에서 확인).
+            // 창 이동은 본문의 드래그 영역(`WindowDragHandle`)이 담당한다.
+            styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
         )
@@ -282,16 +290,38 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             linkCount: model.project?.links.count ?? 0,
             detailsVisible: model.isDetailsVisible
         )
-        guard abs(panel.frame.width - size.width) > 0.5 || abs(panel.frame.height - size.height) > 0.5 else {
+        // 테두리 없는 패널이라 프레임 크기 == 내용 크기다. 그래도 읽는 값은 프레임 하나로 통일한다.
+        let current = panel.frame.size
+        // 창 크기를 바꾼 이유와 결과를 남긴다(위치가 밀리는 문제를 눈이 아니라 로그로 본다).
+        model.appendEvent(
+            "layout want=\(Int(size.width))x\(Int(size.height)) "
+                + "frame=\(Int(current.width))x\(Int(current.height)) "
+                + "origin=(\(Int(panel.frame.origin.x)),\(Int(panel.frame.origin.y))) "
+                + "details=\(model.isDetailsVisible)"
+        )
+        guard abs(current.width - size.width) > 0.5 || abs(current.height - size.height) > 0.5 else {
+            model.appendEvent("layout result=unchanged")
             return
         }
+        isApplyingLayout = true
+        lastProgrammaticLayout = Date()
+        // 하단(좌하단 좌표)을 고정한다. 상세 보기는 위로 펼쳐진다.
         let origin = panel.frame.origin
         panel.setFrame(NSRect(origin: origin, size: size), display: true)
-        panel.setFrameOrigin(ScreenGeometry.resolve(origin: origin, size: panel.frame.size))
+        panel.setFrameOrigin(origin)
+        model.appendEvent(
+            "layout result=resized frame=\(Int(panel.frame.width))x\(Int(panel.frame.height)) "
+                + "origin=(\(Int(panel.frame.origin.x)),\(Int(panel.frame.origin.y)))"
+        )
+        isApplyingLayout = false
     }
 
     /// 위치 저장. 드래그 중에는 매번 쓰지 않고 잠깐 멈췄을 때 한 번만 쓴다.
     func windowDidMove(_ notification: Notification) {
+        // **내가 크기를 맞추느라 옮긴 것은 사용자의 위치가 아니다.** 이것을 저장하면
+        // 레이아웃이 일어날 때마다 위치가 조금씩 밀려 내려간다(V14 사용자 보고).
+        if isApplyingLayout { return }
+        if let last = lastProgrammaticLayout, Date().timeIntervalSince(last) < 0.75 { return }
         guard let panel, let settings, settings.canWrite else { return }
         let origin = panel.frame.origin
         pendingPositionSave?.cancel()

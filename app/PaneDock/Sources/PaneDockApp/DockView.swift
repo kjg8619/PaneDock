@@ -63,6 +63,20 @@ struct DockView: View {
         HStack(spacing: 10) {
             stateBadge
 
+            if model.isFake {
+                // 창 제목 표시줄이 없어졌으므로 가짜 모드 표시를 바 안에 둔다.
+                // 압축되지 않게 고정하고, 대비를 확실히 준다(회색 배경 위 붉은 글씨는 읽히지 않았다).
+                Text("FAKE")
+                    .font(.caption2).bold()
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 7).padding(.vertical, 4)
+                    .background(Color.red.opacity(0.85))
+                    .clipShape(Capsule())
+                    .fixedSize(horizontal: true, vertical: false)
+                    .help("가짜 데이터 모드입니다. 실제 터미널에 연결되지 않았습니다")
+                    .accessibilityLabel("가짜 데이터 모드")
+            }
+
             identityBlock
 
             if !model.links(forInline: visibleLinkCount).isEmpty {
