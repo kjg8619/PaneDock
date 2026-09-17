@@ -18,6 +18,13 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private var editorWindow: NSWindow?
     /// 지금 창 크기를 맞추는 중인지. 이때 생기는 이동은 사용자의 위치가 아니므로 저장하지 않는다.
     private var isApplyingLayout = false
+    /// 자동 접기 예약. **늦게 도착한 타이머**가 새로 펼친 Dock을 접지 못하게 토큰으로 막는다.
+    private let collapseScheduler = CollapseScheduler()
+    private var collapseWork: DispatchWorkItem?
+    /// 사용자가 명시적으로 숨긴 상태(자동 접기와 구분한다). 숨긴 Dock은 타이머가 다시 띄우지 않는다.
+    private var isUserHidden = false
+    /// 마우스 버튼을 놓는 순간을 우리 앱 안에서만 본다(전역 감시 아님).
+    private var mouseUpMonitor: Any?
     /// 프로그램이 마지막으로 크기를 맞춘 시각. 알림이 늦게 도착하는 경우까지 막는다.
     private var lastProgrammaticLayout: Date?
     private var statusItem: NSStatusItem?
@@ -136,6 +143,11 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             }
         }
 
+        // 마우스 버튼을 놓으면(드래그·클릭 종료) 접기 조건을 다시 본다. 앱 안에서만 받는다.
+        mouseUpMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp, .rightMouseUp]) { [weak self] event in
+            self?.scheduleCollapseCheck()
+            return event
+        }
         installStatusItem(model: model)
         installHotKey(model: model)
         model.start(intervalMilliseconds: options.intervalMilliseconds)
@@ -228,7 +240,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let line = "PaneDock startup: mode=\(mode) adapter=\(options.hostSource.rawValue) settings=\(outcome) file=\(file) "
             + "catalog=\(catalog) "
             + "origin=(\(Int(frame.origin.x)),\(Int(frame.origin.y))) size=\(Int(frame.width))x\(Int(frame.height)) "
-            + "appearance=\(model?.effectiveAppearance.size.rawValue ?? "-")/\(model?.effectiveAppearance.labelMode.rawValue ?? "-")/\(model?.effectiveAppearance.colorMode.rawValue ?? "-") "
+            + "appearance=\(model?.effectiveAppearance.size.rawValue ?? "-")/\(model?.effectiveAppearance.labelMode.rawValue ?? "-")/\(model?.effectiveAppearance.colorMode.rawValue ?? "-")/\(model?.effectiveAppearance.displayMode.rawValue ?? "-") "
             + "panel=\(Int(panel?.frame.width ?? 0))x\(Int(panel?.frame.height ?? 0)) "
             + "panelAppearance=\(panel?.appearance?.name.rawValue ?? "nil") "
             + "hotKey=\(hotKey) hotKeyStatus=\(hotKeyRegistration.message) notice=\(notice)\n"
@@ -314,12 +326,21 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     // MARK: - 창
 
-    private func makePanel(model: DockModel) -> NSPanel {
-        let size = ScreenGeometry.dockBarSize(
+    /// 지금 내용에 맞는 창 크기. **접힘·창 생성·레이아웃이 모두 이 함수 하나를 쓴다** —
+    /// 같은 계산을 두 곳에 두면 한 곳만 고쳐지는 실수가 난다(V16.8).
+    private func panelSize(for model: DockModel) -> NSSize {
+        if model.isCollapsed {
+            return NSSize(width: DockBarLayout.handleWidth, height: DockBarLayout.handleHeight)
+        }
+        return ScreenGeometry.dockBarSize(
             linkCount: model.resolution.allItems.count,
             detailsVisible: model.isDetailsVisible,
             barHeight: model.effectiveAppearance.size.barHeight
         )
+    }
+
+    private func makePanel(model: DockModel) -> NSPanel {
+        let size = panelSize(for: model)
         let panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: size),
             // 테두리 없는 패널: 제목 표시줄이 없어 **프레임 크기 == 내용 크기**가 된다.
@@ -347,6 +368,17 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         panel.isMovableByWindowBackground = false
         panel.contentView = NSHostingView(rootView: DockView(model: model))
 
+        // 마우스가 Dock·호출 손잡이를 떠난 것을 **우리 창의 추적 영역**으로 안다.
+        // 전역 마우스 감시도, 화면 읽기도 쓰지 않는다(입력 포커스도 건드리지 않는다).
+        panel.contentView?.addTrackingArea(
+            NSTrackingArea(
+                rect: .zero,
+                options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                owner: self,
+                userInfo: nil
+            )
+        )
+
         // 저장된 위치가 있으면 그대로 쓰고, 없으면 화면 하단이 기본이다.
         let saved = settings?.settings.windowOrigin
         let origin = ScreenGeometry.resolve(
@@ -363,11 +395,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     /// 크기가 바뀌어 화면 밖으로 나가면 보이는 영역으로 보정한다(저장 위치는 건드리지 않는다).
     private func applyPanelSize() {
         guard let panel, let model else { return }
-        let size = ScreenGeometry.dockBarSize(
-            linkCount: model.resolution.allItems.count,
-            detailsVisible: model.isDetailsVisible,
-            barHeight: model.effectiveAppearance.size.barHeight
-        )
+        let size = panelSize(for: model)
         // 색상 모드는 패널 외형으로 적용한다(SwiftUI 선호 색상보다 확실하다).
         panel.appearance = Self.panelAppearance(for: model.effectiveAppearance.colorMode)
         // 테두리 없는 패널이라 프레임 크기 == 내용 크기다. 그래도 읽는 값은 프레임 하나로 통일한다.
@@ -395,6 +423,8 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 + "origin=(\(Int(panel.frame.origin.x)),\(Int(panel.frame.origin.y)))"
         )
         isApplyingLayout = false
+        // 펼침/접힘 자체도 레이아웃 변경이므로, 여기서 조건을 다시 보되 이미 접혀 있으면 그대로 둔다.
+        scheduleCollapseCheck()
     }
 
     // MARK: - Dock 편집창
@@ -498,11 +528,75 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         endInvocation()
     }
 
+    // MARK: - 자동 접기
+
+    /// 지금 상태에서 접기 판단을 다시 한다(마우스 이탈·상호작용 종료·레이아웃 변경에서 부른다).
+    private func scheduleCollapseCheck(after delay: TimeInterval = DockCollapsePolicy.delay) {
+        collapseWork?.cancel()
+        let token = collapseScheduler.nextToken()
+        let work = DispatchWorkItem { [weak self] in self?.collapseIfAllowed(token: token) }
+        collapseWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func collapseContext() -> DockCollapseContext {
+        let frame = panel?.frame ?? .zero
+        let inside = (panel?.isVisible ?? false) && frame.contains(NSEvent.mouseLocation)
+        return DockCollapseContext(
+            mode: model?.effectiveAppearance.displayMode ?? .alwaysVisible,
+            isCollapsed: model?.isCollapsed ?? false,
+            mouseInsideDock: inside,
+            isMouseButtonDown: NSEvent.pressedMouseButtons != 0,
+            isInvoked: model?.isKeyboardSessionActive ?? false,
+            isDetailsVisible: model?.isDetailsVisible ?? false,
+            isEditorOpen: editorWindow?.isVisible ?? false,
+            isModalOpen: NSApplication.shared.modalWindow != nil,
+            isUserHidden: isUserHidden
+        )
+    }
+
+    private func collapseIfAllowed(token: Int) {
+        guard collapseScheduler.isCurrent(token) else {
+            // 늦게 도착한 예약. 새로 펼친 Dock을 접지 않는다.
+            model?.appendEvent("collapse result=stale")
+            return
+        }
+        guard let model else { return }
+        if let block = DockCollapsePolicy.collapseBlock(collapseContext()) {
+            model.appendEvent("collapse result=blocked reason=\(block)")
+            // 마우스를 누르고 있는 동안만 잠시 뒤 다시 본다(놓으면 접힌다).
+            if DockCollapsePolicy.needsRecheckAfterBlock(block) { scheduleCollapseCheck(after: 0.5) }
+            return
+        }
+        model.appendEvent("collapse result=collapsing")
+        model.setCollapsed(true)
+    }
+
+    /// 마우스가 들어왔다(호출 손잡이 포함). **포커스를 빼앗지 않고** 펼치기만 한다.
+    @objc func mouseEntered(with event: NSEvent) {
+        model?.appendEvent("mouse=entered")
+        collapseWork?.cancel()
+        collapseScheduler.cancel()
+        guard let model else { return }
+        guard DockCollapsePolicy.shouldExpandForHover(collapseContext()) else { return }
+        model.appendEvent("expand source=hover")
+        model.setCollapsed(false)
+    }
+
+    /// 마우스가 떠났다. **바로 접지 않고** 잠시 뒤 조건을 다시 본다.
+    @objc func mouseExited(with event: NSEvent) {
+        model?.appendEvent("mouse=exited")
+        scheduleCollapseCheck()
+    }
+
     // MARK: - 호출/숨김
 
     /// 사용자가 명시적으로 호출했다. 이때만 활성화하고 키보드 포커스를 준다.
     private func showPanel() {
         guard let panel else { return }
+        // 명시적 호출은 **숨김을 풀고 펼친다**(접힌 상태에서도 기존 키보드 조작을 쓸 수 있게).
+        isUserHidden = false
+        model?.setCollapsed(false)
         // 숨겨진 동안 내용이 바뀌었을 수 있다. 크기를 먼저 맞춘다.
         applyPanelSize()
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -512,6 +606,8 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     private func hidePanel() {
+        // 사용자가 명시적으로 숨긴 것이다. 타이머·프로젝트 전환으로 다시 띄우지 않는다.
+        isUserHidden = true
         endInvocation()
         panel?.orderOut(nil)
         // 여기서 Ghostty를 활성화하지 않는다. 사용자가 다른 앱으로 간 의도를 덮어쓰지 않는다.
@@ -520,6 +616,14 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private func endInvocation() {
         removeKeyMonitor()
         model?.setDockInvoked(false)
+        // 호출 세션이 끝났으니 접기 조건을 다시 본다.
+        scheduleCollapseCheck()
+    }
+
+    /// 다른 앱으로 이동하면 키보드 호출 세션을 해제한다(그 앱을 앞으로 가져오지는 않는다).
+    func applicationDidResignActive(_ notification: Notification) {
+        guard model?.isKeyboardSessionActive == true else { return }
+        endInvocation()
     }
 
     private func togglePanel() {

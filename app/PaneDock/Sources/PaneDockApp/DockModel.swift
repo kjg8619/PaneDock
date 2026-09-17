@@ -102,7 +102,7 @@ final class DockModel: ObservableObject {
     /// 편집창에서 외형을 **미리** 바꾼다. 디스크에는 쓰지 않는다.
     func previewAppearanceChange(_ appearance: DockAppearance) {
         previewAppearance = appearance
-        stateLog?.appendEvent("appearance=preview size=\(appearance.size.rawValue) label=\(appearance.labelMode.rawValue) color=\(appearance.colorMode.rawValue)")
+        stateLog?.appendEvent("appearance=preview size=\(appearance.size.rawValue) label=\(appearance.labelMode.rawValue) color=\(appearance.colorMode.rawValue) display=\(appearance.displayMode.rawValue)")
         onLayoutChange?()
     }
 
@@ -147,6 +147,9 @@ final class DockModel: ObservableObject {
 
     /// 상세 보기 표시 여부. 창 크기는 AppDelegate가 이 값에 맞춘다.
     @Published private(set) var isDetailsVisible = false
+    /// **자동 접기** 상태(작은 호출 손잡이만 남긴 상태).
+    /// 표시 방식일 뿐이며 **추적·잠금·표시 대상과는 분리**돼 있다.
+    @Published private(set) var isCollapsed = false
     /// 창 크기 재계산 요청. AppDelegate가 처리한다.
     var onLayoutChange: (() -> Void)?
 
@@ -298,6 +301,25 @@ final class DockModel: ObservableObject {
 
     func hideWindow() {
         onHide?()
+    }
+
+    // MARK: - 접기/펼치기 (표시만 바꾼다)
+
+    /// 키보드 호출 세션이 진행 중인가(자동 접기 판단에 쓴다).
+    var isKeyboardSessionActive: Bool { isDockInvoked }
+
+    /// 접힘/펼침을 바꾼다. **추적·잠금·표시 대상은 건드리지 않는다.**
+    func setCollapsed(_ collapsed: Bool) {
+        guard isCollapsed != collapsed else { return }
+        isCollapsed = collapsed
+        stateLog?.appendEvent("collapse state=\(collapsed ? "collapsed" : "expanded")")
+        onLayoutChange?()
+    }
+
+    /// 호출 손잡이에서 펼친다. **호출(키보드) 세션은 시작하지 않는다** —
+    /// hover만으로 고정 세션이 열리면 안 되기 때문이다.
+    func expandFromHandle() {
+        setCollapsed(false)
     }
 
     // MARK: - 호출 상태 (키보드 접근)
@@ -642,21 +664,42 @@ final class DockModel: ObservableObject {
     func saveAll() {
         var saved: [String] = []
         var failed: [String] = []
-        if previewAppearance != nil {
-            if saveAppearancePreview() { saved.append("모양") } else { failed.append("모양") }
+        var unchanged: [String] = []
+        // **바뀐 것만 쓴다.** 값이 같으면 파일을 건드리지 않는다(백업도 만들지 않는다).
+        if let preview = previewAppearance {
+            if preview == appearance {
+                unchanged.append("모양")
+                discardAppearancePreview()
+            } else if saveAppearancePreview() {
+                saved.append("모양")
+            } else {
+                failed.append("모양")
+            }
         }
         // 항목은 **창을 닫지 않고** 저장한다(모양이 실패했는데 창이 닫히면 실패가 가려진다).
-        if draft != nil {
-            if saveDraft(closeOnSuccess: false) { saved.append("항목") } else { failed.append("항목") }
+        if let current = draft {
+            if current.catalog == catalog {
+                unchanged.append("항목")
+                draft = nil
+            } else if saveDraft(closeOnSuccess: false) {
+                saved.append("항목")
+            } else {
+                failed.append("항목")
+            }
         }
         guard failed.isEmpty else {
             // 하나만 저장된 상태를 "전체 성공"으로 보여주지 않는다.
             editorNotice = "일부만 저장했습니다 — 저장됨: \(saved.isEmpty ? "없음" : saved.joined(separator: ", ")) / 실패: \(failed.joined(separator: ", "))"
-            stateLog?.appendEvent("editor=save result=partial saved=\(saved.count) failed=\(failed.count)")
+            stateLog?.appendEvent("editor=save result=partial saved=\(saved.count) failed=\(failed.count) unchanged=\(unchanged.count)")
             return
         }
-        // 전부 저장됐을 때만 창을 닫는다.
-        if !saved.isEmpty { draft = nil; onCloseEditor?() }
+        stateLog?.appendEvent("editor=save result=ok saved=\(saved.count) unchanged=\(unchanged.count)")
+        // 저장할 것이 없었으면 그렇게 말하고, 있으면 이제 닫는다.
+        if saved.isEmpty {
+            editorNotice = unchanged.isEmpty ? "변경된 내용이 없습니다." : "변경된 내용이 없습니다(같은 값이라 파일을 쓰지 않았습니다)."
+        }
+        draft = nil
+        onCloseEditor?()
     }
 
     /// 초안을 저장한다. 파일 쓰기는 AppDelegate가 하고, 여기서는 결과만 받는다.

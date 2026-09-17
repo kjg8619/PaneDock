@@ -12,6 +12,11 @@ public enum DockBarLayout {
     public static let detailsHeight: CGFloat = 300
     /// 바 최소 너비. 항목이 없어도 주요 조작이 뭉개지지 않게 한다.
     public static let minimumBarWidth: CGFloat = 460
+
+    /// 자동 접기 상태에서 남기는 **호출 손잡이** 크기.
+    /// 화면 가장자리로 숨기는 방식이 아니라, 지금 위치에 작게 남아 마우스를 받는 영역이다.
+    public static let handleWidth: CGFloat = 168
+    public static let handleHeight: CGFloat = 30
     /// 바 최대 너비. 이보다 넓어지면 화면을 넘지 않도록 줄이고, 넘치는 링크는 더보기로 보낸다.
     public static let maximumBarWidth: CGFloat = 1_100
     /// 화면 가장자리에서 남길 여백(양쪽 합계).

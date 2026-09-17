@@ -603,6 +603,129 @@ public enum SelfTest {
         results.append(contentsOf: itemEditorChecks())
         results.append(contentsOf: editorFlowChecks())
         results.append(contentsOf: appearanceChecks())
+        results.append(contentsOf: collapseAndSaveChecks())
+        return results
+    }
+
+    // MARK: - 자동 접기·변경 없는 저장 (V17)
+
+    /// 접기 규칙은 **화면 없이 값으로** 판단하므로 여기서 고정한다.
+    /// 저장 규칙은 "값이 같은 것"과 "파일을 건드리지 않는 것"이 다르다는 점을 검사한다.
+    private static func collapseAndSaveChecks() -> [CheckResult] {
+        var results: [CheckResult] = []
+        let fileManager = FileManager.default
+
+        // 1. 표시 모드가 없던 설정 파일 → 항상 표시로 실행된다
+        do {
+            let url = temporarySettingsURL()
+            try? fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let legacy = #"{"schemaVersion":2,"hotKey":"controlOptionCommandD","hotKeyEnabled":true,"windowOrigin":{"x":10,"y":20}}"#
+            try? Data(legacy.utf8).write(to: url)
+            let store = SettingsStore(url: url)
+            let ok = store.outcome == .loaded
+                && store.settings.appearance.displayMode == .alwaysVisible
+                && store.settings.appearance.size == .regular
+            results.append(check(
+                "표시 모드: 없던 설정 파일은 '항상 표시'로 읽는다",
+                ok,
+                "outcome=\(store.outcome) mode=\(store.settings.appearance.displayMode.rawValue) size=\(store.settings.appearance.size.rawValue)"
+            ))
+            try? fileManager.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 2. 표시 모드 저장 → 재로드 왕복
+        do {
+            let url = temporarySettingsURL()
+            let store = SettingsStore(url: url)
+            store.update { $0.appearance.displayMode = .autoCollapse }
+            let reloaded = SettingsStore(url: url)
+            results.append(check(
+                "표시 모드: 자동 접기가 저장·복원된다",
+                reloaded.settings.appearance.displayMode == .autoCollapse && reloaded.outcome == .loaded,
+                "mode=\(reloaded.settings.appearance.displayMode.rawValue) outcome=\(reloaded.outcome)"
+            ))
+            try? fileManager.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 3. 접기 판단 — 상호작용이 없으면 접는다
+        let base = DockCollapseContext(mode: .autoCollapse)
+        results.append(check(
+            "접기: 아무 상호작용이 없으면 접는다",
+            DockCollapsePolicy.shouldCollapse(base),
+            "block=\(DockCollapsePolicy.collapseBlock(base) ?? "-")"
+        ))
+
+        // 4. 접으면 안 되는 상태들
+        let blockers: [(String, DockCollapseContext)] = [
+            ("마우스가 Dock 위", DockCollapseContext(mode: .autoCollapse, mouseInsideDock: true)),
+            ("버튼 누름·창 드래그", DockCollapseContext(mode: .autoCollapse, isMouseButtonDown: true)),
+            ("단축키 호출(키보드 선택) 중", DockCollapseContext(mode: .autoCollapse, isInvoked: true)),
+            ("상세 보기 열림", DockCollapseContext(mode: .autoCollapse, isDetailsVisible: true)),
+            ("편집창 열림", DockCollapseContext(mode: .autoCollapse, isEditorOpen: true)),
+            ("메뉴·대화상자 열림", DockCollapseContext(mode: .autoCollapse, isModalOpen: true)),
+            ("사용자가 명시적으로 숨김", DockCollapseContext(mode: .autoCollapse, isUserHidden: true)),
+            ("항상 표시 모드", DockCollapseContext(mode: .alwaysVisible)),
+            ("이미 접힘", DockCollapseContext(mode: .autoCollapse, isCollapsed: true)),
+        ]
+        let blocked = blockers.allSatisfy { !DockCollapsePolicy.shouldCollapse($0.1) }
+        results.append(check(
+            "접기 금지: 9가지 상태에서는 접지 않는다",
+            blocked,
+            blockers.map { "\($0.0)=\(DockCollapsePolicy.collapseBlock($0.1) ?? "접힘!")" }.joined(separator: " ")
+        ))
+
+        // 5. 손잡이 hover — 접힌 자동 접기에서만, 숨긴 상태에서는 아니다
+        let hoverAuto = DockCollapsePolicy.shouldExpandForHover(DockCollapseContext(mode: .autoCollapse, isCollapsed: true))
+        let hoverAlways = DockCollapsePolicy.shouldExpandForHover(DockCollapseContext(mode: .alwaysVisible, isCollapsed: true))
+        let hoverHidden = DockCollapsePolicy.shouldExpandForHover(
+            DockCollapseContext(mode: .autoCollapse, isCollapsed: true, isUserHidden: true)
+        )
+        results.append(check(
+            "손잡이: hover는 접힌 자동 접기에서만 펼친다(숨김은 아님)",
+            hoverAuto && !hoverAlways && !hoverHidden,
+            "auto=\(hoverAuto) always=\(hoverAlways) hidden=\(hoverHidden)"
+        ))
+
+        // 6. 늦게 도착한 타이머는 새로 펼친 Dock을 접지 않는다
+        let scheduler = CollapseScheduler()
+        let first = scheduler.nextToken()
+        let second = scheduler.nextToken()
+        let staleIgnored = !scheduler.isCurrent(first) && scheduler.isCurrent(second)
+        scheduler.cancel()
+        results.append(check(
+            "접기 예약: 이전 타이머·취소된 타이머는 실행되지 않는다",
+            staleIgnored && !scheduler.isCurrent(second),
+            "이전=\(scheduler.isCurrent(first)) 최신=\(scheduler.isCurrent(second))"
+        ))
+
+        // 7. 접힌 크기는 실제로 더 작다(보이지 않는 큰 창이 남지 않는다)
+        results.append(check(
+            "손잡이: 접힌 크기가 바보다 작다",
+            DockBarLayout.handleWidth < DockBarLayout.minimumBarWidth
+                && DockBarLayout.handleHeight < DockSizeSetting.small.barHeight,
+            "handle=\(Int(DockBarLayout.handleWidth))x\(Int(DockBarLayout.handleHeight)) barMin=\(Int(DockBarLayout.minimumBarWidth))x\(DockSizeSetting.small.barHeight)"
+        ))
+
+        // 8. 내용이 같은 설정 저장은 파일을 건드리지 않는다
+        do {
+            let url = temporarySettingsURL()
+            let store = SettingsStore(url: url)
+            store.update { $0.appearance.size = .large }
+            let afterFirst = store.writeCount
+            let written = (try? Data(contentsOf: url)) ?? Data()
+            store.update { $0.appearance.size = .large }   // 같은 값
+            let afterSame = store.writeCount
+            let sameBytes = ((try? Data(contentsOf: url)) ?? Data()) == written
+            store.update { $0.appearance.size = .small }   // 다른 값
+            let afterDifferent = store.writeCount
+            results.append(check(
+                "저장: 내용이 같으면 쓰지 않고, 바뀌면 쓴다",
+                afterFirst == 1 && afterSame == 1 && sameBytes && afterDifferent == 2,
+                "writeCount 1회=\(afterFirst) 같은 값 후=\(afterSame) 다른 값 후=\(afterDifferent) 바이트동일=\(sameBytes)"
+            ))
+            try? fileManager.removeItem(at: url.deletingLastPathComponent())
+        }
+
         return results
     }
 

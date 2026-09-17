@@ -263,6 +263,11 @@ public final class ProjectCatalogStore {
             if let loadedSignature, Self.signature(of: current) != loadedSignature {
                 return .conflict(detail: "편집 중에 프로젝트 파일이 밖에서 바뀌었습니다. 덮어쓰지 않았습니다.")
             }
+            // **내용이 같으면 쓰지도 백업하지도 않는다.** 모양만 바꿔 저장했는데
+            // 항목 파일이 다시 쓰이거나 백업이 쌓이는 일을 막는다.
+            if let encoded = try? draft.encoded(), encoded == current {
+                return .saved(backupPath: nil)
+            }
         }
 
         var backupPath: String?

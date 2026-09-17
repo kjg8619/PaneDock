@@ -80,6 +80,37 @@ struct DockView: View {
     }
 
     var body: some View {
+        if model.isCollapsed { collapsedHandle } else { expandedBody }
+    }
+
+    /// 자동 접기 상태에서 남는 **호출 손잡이**.
+    /// 화면 가장자리로 숨기는 방식이 아니라, 지금 자리에 작게 남아 마우스를 받는다.
+    private var collapsedHandle: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "chevron.up")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Circle().fill(stateColor).frame(width: 8, height: 8)
+            Text("Dock").font(.caption2).bold().foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            // hover만으로 펼친다. **호출 세션(키보드 선택·고정)은 시작하지 않는다.**
+            if inside { model.expandFromHandle() }
+        }
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+        )
+        .help("Dock이 접혀 있습니다 — 마우스를 올리면 펼쳐집니다")
+        .accessibilityLabel("Dock 호출 손잡이")
+        .accessibilityHint("마우스를 올리거나 단축키로 Dock을 펼칩니다")
+    }
+
+    private var expandedBody: some View {
         VStack(spacing: 0) {
             if model.isDetailsVisible {
                 // 상세 보기는 **바 위로** 펼쳐진다. 창 크기는 AppDelegate가 맞춘다.

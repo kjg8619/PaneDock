@@ -263,6 +263,12 @@ struct ItemEditorView: View {
                 Text("바꾸면 Dock에 바로 보입니다. 저장을 눌러야 유지됩니다.")
                     .font(.caption2).foregroundStyle(.tertiary)
             }
+            // 두 방식의 차이(화면 가장자리 자동 숨김 vs 이 자리에서 접기)를 UI에서 분명히 말한다.
+            Text(model.effectiveAppearance.displayMode.summary)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            // 선택기가 4개라 한 줄에 넣으면 창 밖으로 나간다 → 두 줄로 나눈다.
+            VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 16) {
                 appearancePicker(
                     "크기",
@@ -285,6 +291,18 @@ struct ItemEditorView: View {
                     titleFor: { $0.label }
                 )
                 appearancePicker(
+                    "표시 모드",
+                    selection: appearanceBinding(\.displayMode, set: { value in
+                        var next = model.effectiveAppearance
+                        next.displayMode = value
+                        model.previewAppearanceChange(next)
+                    }),
+                    options: DockDisplayMode.allCases,
+                    titleFor: { $0.label }
+                )
+            }
+            HStack(spacing: 16) {
+                appearancePicker(
                     "색상 모드",
                     selection: appearanceBinding(\.colorMode, set: { value in
                         var next = model.effectiveAppearance
@@ -294,6 +312,7 @@ struct ItemEditorView: View {
                     options: DockColorMode.allCases,
                     titleFor: { $0.label }
                 )
+            }
             }
         }
     }

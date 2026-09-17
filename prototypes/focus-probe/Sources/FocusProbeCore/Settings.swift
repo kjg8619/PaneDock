@@ -124,6 +124,9 @@ public final class SettingsStore {
 
     public var isMemoryOnly: Bool { url == nil }
 
+    /// 실제로 파일을 쓴 횟수. **내용이 같아 건너뛴 저장은 세지 않는다**(검사용).
+    public private(set) var writeCount = 0
+
     public var fileURL: URL? { url }
 
     // MARK: - 로드
@@ -201,6 +204,9 @@ public final class SettingsStore {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(settings) else { return false }
+        // **내용이 같으면 쓰지 않는다.** 값이 같은 것과 파일을 건드리지 않는 것은 다르다 —
+        // 파일 시각·백업이 바뀌지 않아야 "변경 없음"이 실제로 변경 없음이 된다.
+        if let existing = try? Data(contentsOf: url), existing == data { return true }
 
         do {
             try FileManager.default.createDirectory(
@@ -216,6 +222,7 @@ public final class SettingsStore {
             } else {
                 try FileManager.default.moveItem(at: temporary, to: url)
             }
+            writeCount += 1
             return true
         } catch {
             // 저장 실패는 치명적이지 않다. 다음 변경에서 다시 시도한다. 다만 **성공으로 보고하지는 않는다.**

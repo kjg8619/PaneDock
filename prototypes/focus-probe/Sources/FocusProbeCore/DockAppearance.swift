@@ -81,15 +81,19 @@ public struct DockAppearance: Codable, Equatable, Sendable {
     public var size: DockSizeSetting
     public var labelMode: DockLabelMode
     public var colorMode: DockColorMode
+    /// 표시 모드. **이전 설정 파일에는 없으므로** 없으면 `alwaysVisible`(지금까지의 동작)로 읽는다.
+    public var displayMode: DockDisplayMode
 
     public init(
         size: DockSizeSetting = .regular,
         labelMode: DockLabelMode = .nameAndIcon,
-        colorMode: DockColorMode = .system
+        colorMode: DockColorMode = .system,
+        displayMode: DockDisplayMode = .alwaysVisible
     ) {
         self.size = size
         self.labelMode = labelMode
         self.colorMode = colorMode
+        self.displayMode = displayMode
     }
 
     /// 지금까지의 외형. 기본값으로 쓴다.
@@ -101,5 +105,6 @@ public struct DockAppearance: Codable, Equatable, Sendable {
         size = (try? container.decodeIfPresent(DockSizeSetting.self, forKey: .size)) .flatMap { $0 } ?? .regular
         labelMode = (try? container.decodeIfPresent(DockLabelMode.self, forKey: .labelMode)).flatMap { $0 } ?? .nameAndIcon
         colorMode = (try? container.decodeIfPresent(DockColorMode.self, forKey: .colorMode)).flatMap { $0 } ?? .system
+        displayMode = (try? container.decodeIfPresent(DockDisplayMode.self, forKey: .displayMode)).flatMap { $0 } ?? .alwaysVisible
     }
 }
