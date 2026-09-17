@@ -36,6 +36,24 @@ if options.selfCheck {
     print("paneID      \(state.paneID ?? "-")")
     print("frontmost   \(state.hostFrontmost.map(String.init) ?? "-")")
     print("detail      \(state.detail ?? "-")")
+
+    // 프로젝트 판정 (카탈로그가 있을 때만)
+    let catalogStore = ProjectCatalogStore(url: projectCatalogURL(for: options))
+    let resolution = snapshot.current.reportedCWD.flatMap {
+        ProjectResolver.resolve(cwd: $0, catalog: catalogStore.catalog, catalogDiagnostics: catalogStore.diagnostics)
+    }
+    if let resolution {
+        print("project     \(resolution.projectName) (\(resolution.projectID)) links=\(resolution.links.count)")
+        for link in resolution.links {
+            print("  link      \(link.name) → \(ProjectLinkPrivacy.redactedForLog(link.url))")
+        }
+    } else {
+        print("project     - (기본 Dock) catalog=\(catalogStore.outcome.label) projects=\(catalogStore.catalog.projects.count)")
+    }
+    for diagnostic in catalogStore.diagnostics.prefix(3) {
+        print("warning     \(diagnostic)")
+    }
+
     print("openPlan    \(DockActionPlanner.plan(.openFolder, for: snapshot.current, validator: FileSystemPathValidator()))")
     print("copyPlan    \(DockActionPlanner.plan(.copyPath, for: snapshot.current, validator: FileSystemPathValidator()))")
     exit(state.display == .error ? 1 : 0)

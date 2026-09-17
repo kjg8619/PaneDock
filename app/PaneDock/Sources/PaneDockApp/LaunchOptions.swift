@@ -127,3 +127,18 @@ func makeGhosttyAdapter(_ options: LaunchOptions) -> GhosttyAdapter {
     }
     return GhosttyAdapter()
 }
+
+/// 프로젝트 카탈로그 경로. `--projects-path` > 기본 경로. 가짜 모드는 파일을 쓰지 않는다.
+func projectCatalogURL(for options: LaunchOptions) -> URL? {
+    if let override = options.projectsPath {
+        return URL(fileURLWithPath: override)
+    }
+    if options.isFake {
+        return nil
+    }
+    return FileManager.default
+        .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+        .first?
+        .appendingPathComponent("PaneDock", isDirectory: true)
+        .appendingPathComponent("projects.json")
+}

@@ -78,10 +78,12 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             panel.setFrameOrigin(target)
         }
 
-        // 진단용 다시 읽기. 메뉴의 "프로젝트 설정 다시 읽기"와 같은 동작을 한 번 수행한다.
+        // 진단용 다시 읽기. **메뉴 항목의 target/action을 그대로 호출**해 메뉴 배선까지 지나간다.
         if let delay = options.reloadAfterMilliseconds {
             DispatchQueue.main.asyncAfter(deadline: .now() + Double(delay) / 1000.0) { [weak self] in
-                self?.reloadCatalogAction()
+                guard let self else { return }
+                let invoked = self.performMenuItem(titled: "프로젝트 설정 다시 읽기")
+                self.model?.appendEvent("menu-invoke title=프로젝트 설정 다시 읽기 result=\(invoked)")
             }
         }
     }
@@ -113,6 +115,27 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         return "다른 PaneDock 인스턴스 \(others.count)개가 실행 중입니다. 호출 단축키는 한쪽에서만 동작합니다."
     }
 
+    /// 상태바 메뉴에서 제목으로 항목을 찾아 **그 항목의 target/action을 그대로 호출**한다.
+    ///
+    /// 실제 클릭 이벤트는 아니지만, 메뉴 배선(항목 존재·target·selector)을 그대로 지나간다.
+    @discardableResult
+    private func performMenuItem(titled title: String) -> Bool {
+        guard let menu = statusItem?.menu,
+              let item = menu.items.first(where: { $0.title == title }),
+              let action = item.action
+        else { return false }
+        return NSApp.sendAction(action, to: item.target, from: item)
+    }
+
+    /// 메뉴 구성를 로그에 남긴다(창을 보지 않고 항목 존재·활성 여부를 확인할 수 있게).
+    private func menuSummary() -> String {
+        guard let menu = statusItem?.menu else { return "-" }
+        return menu.items
+            .filter { !$0.isSeparatorItem }
+            .map { "\($0.title)\($0.isEnabled ? "" : "(비활성)")" }
+            .joined(separator: " | ")
+    }
+
     /// 시작 상태를 한 줄로 남긴다. 화면을 읽지 않고도 모드·설정·단축키 등록 결과를 확인할 수 있다.
     private func logStartup() {
         let store = settings
@@ -129,6 +152,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             + "catalog=\(catalog) "
             + "origin=(\(Int(frame.origin.x)),\(Int(frame.origin.y))) size=\(Int(frame.width))x\(Int(frame.height)) "
             + "hotKey=\(hotKey) hotKeyStatus=\(hotKeyRegistration.message) notice=\(notice)\n"
+            + "PaneDock menu: \(menuSummary())\n"
         FileHandle.standardError.write(Data(line.utf8))
     }
 
@@ -170,18 +194,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     /// 프로젝트 카탈로그는 **읽기만** 한다. 앱이 사용자 파일을 덮어쓰지 않는다.
     private func makeCatalogStore() -> ProjectCatalogStore {
-        if let override = options.projectsPath {
-            return ProjectCatalogStore(url: URL(fileURLWithPath: override))
-        }
-        if options.isFake {
-            return ProjectCatalogStore(url: nil)
-        }
-        let url = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?
-            .appendingPathComponent("PaneDock", isDirectory: true)
-            .appendingPathComponent("projects.json")
-        return ProjectCatalogStore(url: url)
+        ProjectCatalogStore(url: projectCatalogURL(for: options))
     }
 
     /// 카탈로그를 하나의 일관된 구성으로 반영한다.

@@ -1556,6 +1556,114 @@ V9의 관측 자체(당시 동작)는 지우지 않고 여기에 변경 사실�
 **여전히 미실시로 유지:** 실제 자동화 권한 거부·Ghostty 종료, 확인 중 상태의 별도 GUI 키보드 검사,
 Finder 창 이름보다 강한 전체 경로 대조, 그리고 **C(메뉴 재로딩)의 사용자 실행**.
 
+### V10.11 에이전트가 직접 수행한 추가 검증 (2026-09-17 13:27~)
+
+사용자가 "직접 테스트할 수 있는지"를 물어, **권한이 필요 없는 범위에서 에이전트가 추가로 확인**했다.
+
+**C — 메뉴 배선까지 확인 (물리적 클릭 제외)**
+
+진단 훅(`--reload-after`)을 **메뉴 항목을 직접 호출하지 않고, 상태바 메뉴에서 항목을 찾아
+그 항목의 `target/action`을 그대로 호출**(`NSApp.sendAction`)하도록 바꿔 검증했다.
+이는 실제 클릭과 달리 마우스 이벤트만 없을 뿐, **메뉴 배선(항목 존재·target·selector)을 그대로 지난다.**
+
+| 관측 | 값 |
+| --- | --- |
+| 메뉴 구성(시작 로그) | `Dock 호출/닫기 \| 잠금/해제 \| 창 위치 초기화 \| 프로젝트 설정 다시 읽기 \| 호출 단축키 \| PaneDock 종료` — **항목이 존재하고 활성 상태**(비활성 표시 없음) |
+| 메뉴 호출 | `EVENT menu-invoke title=프로젝트 설정 다시 읽기 result=true` |
+| 결과 | `EVENT reload catalog outcome=loaded projects=1 diagnostics=0`, `notice=프로젝트 설정을 다시 읽었습니다 — 프로젝트 1개` |
+| 반영 | 실행 중 파일을 링크 1개→2개로 수정 → 상태가 `project=tmparea(1)` → **`tmparea(2)`** |
+| 부작용 없음 | 재로딩 구간에 링크 실행 이벤트 **0건** |
+
+**남은 미확인:** 실제 **마우스 클릭 이벤트가 그 항목에 전달되는지**. AppKit이 유효한 target/action을 가진
+활성 항목에 대해 보장하는 부분이라 위험은 낮지만, **관측은 하지 않았다.**
+
+**D — 브라우저 전면 동작 측정 (일회용 도구, 앱과 무관)**
+
+| 측정 | 결과 |
+| --- | --- |
+| `NSWorkspace.shared.open(https://example.com/)` | `true`, 브라우저(Aside)가 **앞으로 온다**(직후 `lsappinfo front` = Aside, 브라우저 창 존재) |
+| 전환 시점 | 첫 측정에서 `+2.0s`에는 `NSWorkspace.frontmostApplication`이 아직 Ghostty를 가리켰고 그 직후 `lsappinfo`는 Aside였다. **정확한 지연은 측정이 엇갈려 단정하지 않는다** |
+| `OpenConfiguration.activates = false` | **측정 불가(결론 없음).** 측정 시작 시점에 브라우저가 이미 최전면이라 "앞으로 오는지"를 구분할 수 없었다. 제대로 재려면 **Ghostty가 최전면인 상태**에서 시작해야 하며, 이는 사용자 조작이 필요하다 |
+
+**해석:** 링크를 열면 브라우저가 앞으로 오고, 그동안 Dock은 **유지 중**으로 표시된다(정상).
+Ghostty로 돌아오면 **추적 중**으로 복귀한다(V9.9에서 `held → tracked` 전이 확인).
+즉 "뒤로 열려서 사용자가 혼란스러운" 상황은 **이 환경에서 재현되지 않았다.**
+
+**부수 효과:** 측정 과정에서 브라우저에 `example.com` 탭이 3개 열렸다(에이전트가 연 것). 앱 동작과 무관하다.
+
+**빌드:** 이 검증으로 앱 번들이 `d3dd3291e447f006` → **`01253e68c91a1496`** 으로 바뀌었다
+(진단 훅이 메뉴 배선을 지나가게 하고, 메뉴 구성을 로그에 남기도록 수정).
+
+**두 번째 프로젝트 교체:** V10.9~V10.10에서 `markdown-viewer`를 두 번째 프로젝트로 썼으나
+**URL 출처가 없어 링크가 0개**였다. 사용자가 `CodeMose`를 두 번째 프로젝트로 지정해 교체했다.
+
+| 프로젝트 | 기준 폴더 | 링크 |
+| --- | --- | --- |
+| Edge Notch | `~/Workspace/mac-tool-pack/egde-nochi` | 저장소, 이슈 (2개) |
+| CodeMose | `~/Workspace/make-games/CodeMose` | 저장소, 이슈 (2개) |
+
+두 URL 모두 각 저장소의 **git origin에서 읽은 실제 값**이다(`git remote get-url origin`, 자격증명 제거).
+`markdown-viewer` 항목은 제거했다.
+
+| 확인 | 결과 |
+| --- | --- |
+| 카탈로그 로드 (GUI) | `catalog=loaded projects=2 diagnostics=0`, `EVENT catalog projects=2` |
+| 비프로젝트 경로 판정 | 현재 포커스 pane `/Users/kangjingoo` → `project - (기본 Dock) catalog=loaded projects=2` |
+| 두 프로젝트 경로 존재 | 둘 다 디렉터리 존재 확인 |
+| 앱 번들(재빌드) | `2d9bd1f9fef97fc1` |
+
+**미확인:** 실제 pane이 **두 프로젝트 폴더에 있을 때**의 판정. 현재 포커스 pane은 홈이고,
+`egde-nochi`에는 Ghostty pane이 있으나 **포커스를 옮기는 것은 사용자 조작**이라 에이전트가 하지 않았다.
+(V10.9의 A/B 전환 관측은 `markdown-viewer` 기준이므로 CodeMose 기준으로 다시 확인이 필요하다.)
+
+### V10.12 사용자 확인 — CodeMose 기준 프로젝트 판정 (2026-09-17)
+
+위 항목을 사용자가 직접 확인하고 **"잘 잡혀"** 라고 보고했다. 즉 두 프로젝트가 각각의 기준 폴더에서
+**의도한 프로젝트로 판정됨**을 사용자가 관측했다.
+
+**등급: 사용자 보고.** 에이전트는 이 확인을 **재실행으로 재확인하지 않았다**(보고를 사실로 기록).
+이번 확인에는 **상태 로그를 수집하지 않았으므로**, 판정의 세부(양방향 여부·하위 폴더 매칭·링크 실행)는
+보고에 포함되지 않아 **미확인으로 남긴다.**
+
+**여전히 미확인:** 하위 폴더 매칭 · 링크 실행까지의 왕복 · 메뉴 항목의 실제 마우스 클릭 ·
+자동화 권한 거부 · Ghostty 종료 · 확인 중 상태의 별도 키보드 검사 · Finder 창 이름보다 강한 전체 경로 대조.
+
+### V10.13 에이전트 직접 검증 — 실제 마우스 클릭과 하위 폴더 (2026-09-17 13:45~13:46)
+
+위 V10.12에 남긴 미확인 항목 중 **하위 폴더 매칭, 메뉴 실제 클릭, 링크 실제 클릭**을 에이전트가 직접 수행했다.
+
+**방법:** 저장소에 남기지 않는 **일회용 Swift 도구**(`CGEvent` 마우스 이벤트 + `AXUIElement`)로
+PaneDock 프로세스에 **실제 마우스 클릭**을 보냈다. 사전 확인: `AXIsProcessTrusted=true` —
+**새 권한을 요청하거나 부여받지 않았고, 시스템 설정을 변경하지 않았다.**
+
+| # | 대상 | 클릭 지점 | 결과 |
+| --- | --- | --- | --- |
+| 1 | 상태바 항목 `PaneDock` | `(872,4) 84x24` | 메뉴 열림 → 항목 **`프로젝트 설정 다시 읽기`** `(868,111) 203x24` 클릭 |
+| 1 | 재로딩 결과 | — | `EVENT reload catalog outcome=loaded projects=2 diagnostics=0`, `notice=프로젝트 설정을 다시 읽었습니다 — 프로젝트 2개` |
+| 2 | 하위 폴더 매칭 | — | 실제 pane `…/make-games/CodeMose/docs` + 실제 카탈로그 → `project CodeMose (codemose) links=2` |
+| 3 | Dock 링크 `저장소` | `(73,832) 50x20` | `EVENT link=repo project=codemose source=mouse result=allowed url=https://github.com/kjg8619/CodeMose` |
+| 3 | Dock 링크 `이슈` | `(73,860) 41x20` | `EVENT link=issues project=codemose source=mouse result=allowed url=https://github.com/kjg8619/CodeMose/issues` |
+
+**독립 확인 (앱 로그 밖):**
+
+| 항목 | 값 |
+| --- | --- |
+| 브라우저 창 제목 | `kjg8619/CodeMose`, `Issues · kjg8619/CodeMose` |
+| Dock이 포커스를 뺏지 않았는지 | 클릭 직후 최전면 앱 = **`Aside`**(브라우저). PaneDock이 아님 |
+| 상위 폴더 경로 일치 | terminal working directory = `…/make-games/CodeMose/docs`, 앱이 보고한 `path`와 동일 |
+
+**작은 발견:** SwiftUI 버튼은 `AXTitle`이 비어 있지만 **`AXDescription`에 라벨이 들어 있다.**
+이번에 관측된 Dock 버튼 라벨: `저장소`, `이슈`, `폴더 열기`, `경로 복사`, `잠금`, `숨기기`, `종료`.
+(보조 기술로 Dock을 조작할 때 이 라벨이 쓰인다. 코드에 별도 `accessibilityLabel`을 붙이지 않은 버튼도
+라벨이 노출된다는 뜻이다.)
+
+**이로써 해소된 미확인:** 메뉴 항목의 실제 마우스 클릭 · 하위 폴더 매칭 · 링크 실행 왕복(마우스).
+
+**여전히 미확인:** 자동화 권한 거부 · Ghostty 종료 · 확인 중(`pending`) 상태의 별도 키보드 검사 ·
+Finder 창 이름보다 강한 전체 경로 대조 · `activates=false` 재측정(Ghostty가 최전면일 때만 가능).
+
+**빌드:** 코드 변경 없음(`2d9bd1f9fef97fc1`). 검증용 도구는 저장소에 추가하지 않았다.
+
 ---
 
 ## 정정 이력
