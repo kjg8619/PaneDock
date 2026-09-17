@@ -460,19 +460,31 @@ final class DockModel: ObservableObject {
     /// 키보드로 한 칸 이동(드래그를 쓰지 않는 사용자용).
     func editorMove(_ itemID: String, by offset: Int) {
         guard var draft else { return }
+        let before = draft.items.map(\.id)
         draft.move(itemID: itemID, by: offset)
         self.draft = draft
+        let after = draft.items.map(\.id)
+        stateLog?.appendEvent(
+            "editor=move scope=\(draft.scope.scopeID) item=\(itemID) by=\(offset) before=\(before.joined(separator: ",")) after=\(after.joined(separator: ","))"
+        )
     }
 
     func editorBeginDrag(_ itemID: String) {
         editorDragging = itemID
+        // 로그에는 범위·항목 ID만 남긴다(이름·URL은 남기지 않는다).
+        stateLog?.appendEvent("editor=drag scope=\(draft?.scope.scopeID ?? "-") item=\(itemID)")
     }
 
     func editorDrop(_ itemID: String, toIndex index: Int) {
         defer { editorDragging = nil }
         guard var draft, editorDragging != nil || editorSelection != nil else { return }
+        let before = draft.items.map(\.id)
         draft.move(itemID: itemID, toIndex: index)
         self.draft = draft
+        let after = draft.items.map(\.id)
+        stateLog?.appendEvent(
+            "editor=drop scope=\(draft.scope.scopeID) item=\(itemID) toIndex=\(index) before=\(before.joined(separator: ",")) after=\(after.joined(separator: ","))"
+        )
     }
 
     func editorEndDrag() {

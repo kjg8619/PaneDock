@@ -182,6 +182,9 @@ struct ItemEditorView: View {
         .contentShape(Rectangle())
         // 실행은 클릭이 아니라 **선택**만 한다(편집 중에는 실행하지 않는다).
         .onTapGesture { model.editorSelect(item.id) }
+        // 행을 AX로 찾을 수 있게 라벨을 준다(순서 확인 + 보조기술 접근).
+        .accessibilityLabel("항목 \(index + 1) \(item.kind.label) \(item.name)")
+        .accessibilityIdentifier("editor-row-\(index)")
         .onDrag {
             model.editorBeginDrag(item.id)
             return NSItemProvider(object: item.id as NSString)
