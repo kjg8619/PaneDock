@@ -11,6 +11,8 @@ private func itemSymbol(for kind: DockItemKind) -> String {
 private func itemIconImage(for item: DockItemTarget) -> NSImage? {
     guard item.kind == .app else { return nil }
     let image = NSWorkspace.shared.icon(forFile: item.target)
+    // 실제 앱 아이콘을 **그대로** 그린다(단색 템플릿으로 바뀌면 앱을 알아볼 수 없다).
+    image.isTemplate = false
     image.size = NSSize(width: 16, height: 16)
     return image
 }
@@ -259,7 +261,7 @@ struct DockView: View {
         Button(action: action) {
             HStack(spacing: 4) {
                 if let image {
-                    Image(nsImage: image).frame(width: 14, height: 14)
+                    Image(nsImage: image).frame(width: 16, height: 16)
                 } else {
                     Image(systemName: icon).font(.system(size: 11, weight: .medium))
                 }

@@ -52,6 +52,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         model.onLayoutChange = { [weak self] in self?.applyPanelSize() }
         // Dock 편집: 별도 창을 띄우고, 저장은 **사용자가 저장을 눌렀을 때만** 파일에 쓴다.
         model.onOpenEditor = { [weak self] in self?.openEditor() }
+        model.onCloseEditor = { [weak self] in self?.closeEditor() }
         model.onSaveDraft = { [weak self] catalog in
             guard let self else { return (message: "저장할 수 없습니다", succeeded: false) }
             return self.saveDraft(catalog, model: model)
@@ -80,16 +81,41 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if options.editorAtLaunch {
             openEditor()
         }
-        // 진단용: 편집 초안에 항목을 추가하고 **저장까지** 해 본다(임시 카탈로그 전용).
+        // 진단용: 편집 초안에 앱·폴더·링크를 넣고 순서를 바꾼 뒤 **저장까지** 해 본다(임시 카탈로그 전용).
         if let delay = options.editorSelfTestAfterMilliseconds {
             DispatchQueue.main.asyncAfter(deadline: .now() + Double(delay) / 1000.0) { [weak self] in
                 guard let self, let model = self.model else { return }
                 model.beginEditing(scope: .common)
+                // 1) 실제 설치된 앱
+                model.editorBeginAdd(kind: .app)
+                model.editorUpdateForm(name: "터미널", target: "/System/Applications/Utilities/Terminal.app")
+                model.editorCommitForm()
+                // 2) 고정 폴더
                 model.editorBeginAdd(kind: .folder)
                 model.editorUpdateForm(name: "스크래치", target: "/tmp")
                 model.editorCommitForm()
+                // 3) 웹 링크
+                model.editorBeginAdd(kind: .link)
+                model.editorUpdateForm(name: "예시", target: "https://example.com/v15")
+                model.editorCommitForm()
+                // 4) 순서 바꾸기(키보드 이동) — 맨 아래 링크를 한 칸 위로
+                if let last = model.draft?.items.last?.id {
+                    model.editorMove(last, by: -1)
+                }
                 model.saveDraft()
-                model.appendEvent("editor-selftest done")
+                model.appendEvent("editor-selftest save done items=\(model.draft?.items.count ?? -1)")
+            }
+        }
+        // 진단용: 편집만 하고 **취소**하면 저장된 구성이 바뀌지 않는지 확인한다.
+        if let delay = options.editorCancelAfterMilliseconds {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(delay) / 1000.0) { [weak self] in
+                guard let self, let model = self.model else { return }
+                model.beginEditing(scope: .common)
+                model.editorBeginAdd(kind: .folder)
+                model.editorUpdateForm(name: "취소될 항목", target: "/tmp")
+                model.editorCommitForm()
+                model.cancelEditing()
+                model.appendEvent("editor-selftest cancel done")
             }
         }
 
@@ -367,6 +393,12 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
+    /// 편집창을 닫는다(저장 성공·취소). **추적 대상·잠금 상태는 건드리지 않는다.**
+    @MainActor
+    private func closeEditor() {
+        editorWindow?.close()
+    }
+
     /// 초안을 저장한다. **사용자가 저장을 눌렀을 때만** 파일에 쓴다.
     ///
     /// - 성공하면 기존 재로딩 경로(`applyCatalog`)로 즉시 반영한다(선택 취소 포함).
@@ -386,7 +418,11 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             }
             return (message: "저장했습니다.", succeeded: true)
         case .conflict(let detail):
-            return (message: "\(detail)\n메뉴에서 '프로젝트 설정 다시 읽기'를 한 뒤 다시 시도해 주세요.", succeeded: false)
+            return (
+                message: "\(detail)\n'다시 시도'하면 지금 초안이 저장됩니다(바깥 변경을 덮어씁니다). "
+                    + "바깥 변경을 살리려면 취소하고 '프로젝트 설정 다시 읽기' 후 다시 편집해 주세요.",
+                succeeded: false
+            )
         case .refused(let reason), .failed(let reason):
             return (message: "저장하지 못했습니다: \(reason)", succeeded: false)
         }

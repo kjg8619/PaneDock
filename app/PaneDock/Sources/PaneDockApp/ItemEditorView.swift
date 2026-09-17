@@ -8,6 +8,14 @@ import UniformTypeIdentifiers
 /// - 초안으로 작업한다. **저장을 누르기 전에는 실제 설정과 Dock 구성이 바뀌지 않는다.**
 /// - 편집 대상은 열 때 정해지고, 터미널 포커스가 바뀌어도 자동으로 바뀌지 않는다(헤더에 명시).
 /// - SwiftUI `@State`를 쓸 수 없는 환경이라 선택·폼 상태는 `DockModel`이 들고 있다.
+/// 실제 앱 아이콘(템플릿 아님). 없으면 nil이라 기호로 대체한다.
+func appIcon(forFile path: String) -> NSImage {
+    let image = NSWorkspace.shared.icon(forFile: path)
+    image.isTemplate = false
+    image.size = NSSize(width: 16, height: 16)
+    return image
+}
+
 struct ItemEditorView: View {
     @ObservedObject var model: DockModel
 
@@ -153,7 +161,7 @@ struct ItemEditorView: View {
         HStack(spacing: 6) {
             Image(systemName: "line.3.horizontal").font(.caption2).foregroundStyle(.tertiary)
             if item.kind == .app {
-                Image(nsImage: NSWorkspace.shared.icon(forFile: item.target)).frame(width: 14, height: 14)
+                Image(nsImage: appIcon(forFile: item.target)).frame(width: 16, height: 16)
             } else {
                 Image(systemName: item.kind == .folder ? "folder" : "link").font(.caption2)
             }

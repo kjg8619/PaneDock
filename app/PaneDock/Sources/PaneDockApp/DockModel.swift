@@ -74,6 +74,8 @@ final class DockModel: ObservableObject {
 
     /// 편집창 열기 요청. AppDelegate가 창을 만든다.
     var onOpenEditor: (() -> Void)?
+    /// 편집창 닫기 요청(저장 성공·취소). AppDelegate가 창을 닫는다.
+    var onCloseEditor: (() -> Void)?
     /// 초안 저장 요청. AppDelegate가 실제 파일에 쓰고 (안내문, 성공 여부)를 돌려준다.
     var onSaveDraft: ((ProjectCatalog) -> (message: String, succeeded: Bool))?
 
@@ -372,6 +374,8 @@ final class DockModel: ObservableObject {
     /// 편집을 시작한다. 범위를 지정하지 않으면 **지금 표시 중인 대상**을 고른다.
     /// 이후 포커스가 바뀌어도 이 범위는 바뀌지 않는다.
     func beginEditing(scope: ItemScope? = nil) {
+        // 편집을 시작할 때 **상세 보기는 접는다**(편집창과 겹쳐 화면이 복잡해지지 않게).
+        hideDetails()
         let chosen = scope ?? (resolution.hasProject ? ItemScope.project(id: resolution.projectID) : .common)
         // 없는 프로젝트를 가리키면 공통으로 떨어진다.
         let safe = ProjectCatalogDraft(catalog: catalog, scope: chosen).isScopeAvailable(chosen) ? chosen : .common
@@ -385,6 +389,7 @@ final class DockModel: ObservableObject {
         draft = nil
         editorNotice = nil
         stateLog?.appendEvent("editor=close result=cancelled")
+        onCloseEditor?()
     }
 
     /// 편집 범위를 사용자가 직접 바꾼다(자동 변경 경로는 없다).
@@ -587,9 +592,10 @@ final class DockModel: ObservableObject {
         let result = onSaveDraft?(draft.catalog) ?? (message: "저장할 수 없습니다: 설정 파일을 사용할 수 없습니다", succeeded: false)
         editorNotice = result.message
         stateLog?.appendEvent("editor=save result=\(result.succeeded ? "ok" : "failed")")
-        // 저장에 성공하면 편집을 끝낸다(구성은 재로딩으로 이미 반영됐다).
+        // 저장에 성공하면 편집을 끝내고 **창도 닫는다**(구성은 재로딩으로 이미 반영됐다).
         if result.succeeded {
             self.draft = nil
+            onCloseEditor?()
         }
     }
 

@@ -601,6 +601,7 @@ public enum SelfTest {
         results.append(contentsOf: candidatePathChecks())
         results.append(contentsOf: dockBarChecks())
         results.append(contentsOf: itemEditorChecks())
+        results.append(contentsOf: editorFlowChecks())
         return results
     }
 
@@ -2985,6 +2986,152 @@ public enum SelfTest {
                     "다른프로젝트허용=\(crossAllowed) 같은프로젝트차단=\(sameBlocked)"
                 )
             )
+        }
+
+        return results
+    }
+
+    // MARK: - 편집 흐름 경계 (V15.8)
+
+    /// 사용자가 실제로 밟는 경로의 **결함 경계**를 고정한다.
+    /// 합성·임시 파일만 쓴다(실제 사용자 설정은 건드리지 않는다).
+    private static func editorFlowChecks() -> [CheckResult] {
+        var results: [CheckResult] = []
+
+        func temporaryDirectory() -> URL {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("pane-dock-flow-\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            return url
+        }
+
+        // 1) 저장·정렬·추가·삭제를 거쳐도 **기존 항목 id가 바뀌지 않는다**
+        do {
+            let directory = temporaryDirectory()
+            let url = directory.appendingPathComponent("projects.json")
+            let original = #"{"schemaVersion":2,"common":[{"id":"term","kind":"app","name":"터미널","target":"/Applications/Utilities/Terminal.app"}],"projects":[{"id":"shop","name":"Shop","root":"/work/shop","items":[{"id":"repo","kind":"link","name":"저장소","target":"https://example.com/repo"},{"id":"issues","kind":"link","name":"이슈","target":"https://example.com/issues"}]}]}"#
+            try? original.data(using: .utf8)?.write(to: url)
+            let store = ProjectCatalogStore(url: url)
+            let originalIDs = store.catalog.projects[0].items.map(\.id) + store.catalog.common.map(\.id)
+
+            var draft = ProjectCatalogDraft(catalog: store.catalog, scope: .project(id: "shop"))
+            // 순서를 뒤집고(드래그), 하나 추가하고, 하나 지운다.
+            draft.move(itemID: "issues", toIndex: 0)
+            draft.add(DockItem(id: "board", kind: .link, name: "보드", target: "https://example.com/board"))
+            draft.remove(itemID: "repo")
+            draft.move(itemID: "issues", by: -1)   // 이미 맨 위 → 변화 없음
+
+            let saved = store.save(draft.catalog)
+            let reloaded = ProjectCatalogStore(url: url)
+            let currentIDs = reloaded.catalog.projects[0].items.map(\.id) + reloaded.catalog.common.map(\.id)
+            // 지운 항목(repo)만 빠지고, 남은 항목의 id는 원본과 같아야 한다(새 UUID로 갈아치우지 않는다).
+            let keptIDs = Set(originalIDs).subtracting(["repo"]) == Set(currentIDs).subtracting(["board"])
+            let order = reloaded.catalog.projects[0].items.map(\.id)
+
+            results.append(
+                check(
+                    "V15.8: 정렬·추가·삭제를 거쳐도 기존 항목 id는 그대로 유지된다",
+                    saved.isSaved && keptIDs && order == ["issues", "board"] && reloaded.catalog.common.map(\.id) == ["term"],
+                    "저장=\(saved.isSaved) 기존id유지=\(keptIDs) 순서=\(order)"
+                )
+            )
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        // 2) 선택·실행은 **범위와 항목 id를 함께** 본다
+        do {
+            let catalog = ProjectCatalog(
+                common: [DockItem(id: "repo", kind: .link, name: "공통 저장소", target: "https://example.com/common")],
+                projects: [
+                    Project(id: "shop", name: "Shop", root: "/work/shop", items: [
+                        DockItem(id: "repo", kind: .link, name: "저장소", target: "https://example.com/shop")
+                    ])
+                ]
+            )
+            let resolution = ProjectResolver.resolve(cwd: "/work/shop/api", catalog: catalog)
+            let state = DockStateBuilder.make(
+                current: workInfo(cwd: "/work/shop/api", pathStatus: .valid, focusStatus: .tracked),
+                previous: nil, connection: .connected, failure: nil, lock: DockLock()
+            )
+            let validator = StubValidator(directories: [])
+            // 같은 id지만 **범위가 다른** 항목(공통 자리에 프로젝트 id로 만든 대상)은 거부된다.
+            let wrongScope = DockItemTarget(
+                scopeID: "shop", isCommon: false, itemID: "repo", kind: .link, name: "저장소", target: "https://example.com/common"
+            )
+            let wrongScopePlan = DockItemActionPlanner.plan(target: wrongScope, in: resolution, state: state, validator: validator)
+            // 범위·id·대상이 모두 맞으면 실행된다.
+            let commonPlan = DockItemActionPlanner.plan(target: resolution.commonItems[0], in: resolution, state: state, validator: validator)
+            let projectPlan = DockItemActionPlanner.plan(target: resolution.projectItems[0], in: resolution, state: state, validator: validator)
+
+            results.append(
+                check(
+                    "V15.8: 같은 id라도 범위가 다르면 실행하지 않고, (범위·id)가 맞으면 실행한다",
+                    wrongScopePlan.rejectionReason != nil
+                        && commonPlan == .openURL(URL(string: "https://example.com/common")!)
+                        && projectPlan == .openURL(URL(string: "https://example.com/shop")!),
+                    "범위불일치=\(wrongScopePlan.rejectionReason != nil) 공통=\(String(describing: commonPlan)) 프로젝트=\(String(describing: projectPlan))"
+                )
+            )
+        }
+
+        // 3) 외부 변경 충돌 → **다시 읽고 재시도하면 저장된다**
+        do {
+            let directory = temporaryDirectory()
+            let url = directory.appendingPathComponent("projects.json")
+            try? #"{"schemaVersion":2,"common":[],"projects":[]}"#.data(using: .utf8)?.write(to: url)
+            let store = ProjectCatalogStore(url: url)
+
+            // 밖에서 파일이 바뀐다.
+            let external = #"{"schemaVersion":2,"common":[{"id":"outside","kind":"folder","name":"밖","target":"/tmp"}],"projects":[]}"#
+            try? external.data(using: .utf8)?.write(to: url)
+
+            var draft = ProjectCatalogDraft(catalog: store.catalog, scope: .common)
+            draft.add(DockItem(id: "mine", kind: .folder, name: "내것", target: "/tmp"))
+            let conflict = store.save(draft.catalog)
+            let conflictDetected: Bool = { if case .conflict = conflict { return true }; return false }()
+            let externalKept = (try? Data(contentsOf: url)) == Data(external.utf8)
+
+            // 다시 읽고 **같은 초안을** 재시도한다(초안은 보존돼 있다).
+            store.reload()
+            let retried = store.save(draft.catalog)
+            let retriedSaved = retried.isSaved
+            // 재시도는 **초안을 그대로 저장**한다(병합하지 않는다). 그래서 저장된 내용은 초안의 구성이다.
+            let savedIsDraft = ProjectCatalogStore(url: url).catalog.common.map(\.id) == ["mine"]
+            // 바깥 변경은 충돌 안내 전까지 **디스크에 그대로 남아 있었다**(조용히 지우지 않았다).
+            let externalSurvivedUntilRetry = externalKept
+
+            results.append(
+                check(
+                    "V15.8: 외부 변경 충돌은 알리고 덮어쓰지 않으며, 다시 읽은 뒤 재시도하면 초안이 저장된다",
+                    conflictDetected && externalSurvivedUntilRetry && retriedSaved && savedIsDraft,
+                    "충돌=\(conflictDetected) 외부보존=\(externalKept) 재시도=\(retriedSaved) 초안저장=\(savedIsDraft)"
+                )
+            )
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        // 4) 서로 다른 프로젝트에 같은 repo/issues id가 있어도 저장된다(실제 파일 형태)
+        do {
+            let directory = temporaryDirectory()
+            let url = directory.appendingPathComponent("projects.json")
+            let real = #"{"schemaVersion":1,"projects":[{"id":"a","name":"A","root":"/work/a","links":[{"id":"repo","name":"저장소","url":"https://example.com/a"},{"id":"issues","name":"이슈","url":"https://example.com/a/issues"}]},{"id":"b","name":"B","root":"/work/b","links":[{"id":"repo","name":"저장소","url":"https://example.com/b"},{"id":"issues","name":"이슈","url":"https://example.com/b/issues"}]}]}"#
+            try? real.data(using: .utf8)?.write(to: url)
+            let store = ProjectCatalogStore(url: url)
+            var draft = ProjectCatalogDraft(catalog: store.catalog, scope: .common)
+            draft.add(DockItem(id: "finder", kind: .app, name: "Finder", target: "/System/Library/CoreServices/Finder.app"))
+            let outcome = store.save(draft.catalog)
+            let reopened = ProjectCatalogStore(url: url).catalog
+
+            results.append(
+                check(
+                    "V15.8: 두 프로젝트가 같은 id를 써도 저장되고 양쪽이 보존된다",
+                    outcome.isSaved
+                        && reopened.projects.map { $0.items.map(\.id) } == [["repo", "issues"], ["repo", "issues"]]
+                        && reopened.common.map(\.id) == ["finder"],
+                    "저장=\(outcome.isSaved) 프로젝트=\(reopened.projects.map { $0.items.map(\.id) })"
+                )
+            )
+            try? FileManager.default.removeItem(at: directory)
         }
 
         return results
