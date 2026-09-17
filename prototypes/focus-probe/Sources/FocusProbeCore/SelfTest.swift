@@ -1665,13 +1665,13 @@ public enum SelfTest {
     }
 
     private final class StubFrontmostApp: FrontmostAppChecking, @unchecked Sendable {
-        var value: Bool
+        var value: Bool?
 
-        init(_ value: Bool) {
+        init(_ value: Bool?) {
             self.value = value
         }
 
-        func isFrontmost(_ bundleIdentifier: String) -> Bool { value }
+        func isFrontmost(_ bundleIdentifier: String) -> Bool? { value }
     }
 
     /// cmux의 4단계(window → workspace → pane → surface)를 그대로 담는다.
@@ -1875,6 +1875,28 @@ public enum SelfTest {
             )
         } catch {
             results.append(check("cmux E: 최전면이 아니면 마지막으로 확인한 대상을 유지 중으로 구분한다", false, "\(error)"))
+        }
+
+        // E-2: 최전면을 **판정할 수 없으면** "유지 중"으로 단정하지 않는다.
+        // (TTY 없이 분리 실행된 프로세스에서 실제로 발생한 문맥이다 — V11)
+        do {
+            let (adapter, store, resolver, validator) = makeCmuxStore(
+                directories: ["/work/a"],
+                identifies: [cmuxIdentify(cmuxFocus(workspace: "ws-1", surface: "panel-A"))],
+                sidebars: [cmuxSidebar(cwd: "/work/a", focusedCWD: "/work/a", panel: "panel-A")],
+                frontmost: StubFrontmostApp(nil)
+            )
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            results.append(
+                check(
+                    "cmux E: 최전면을 판정할 수 없으면 유지 중으로 단정하지 않는다",
+                    store.current?.focusStatus == .tracked && store.current?.hostFrontmost == nil
+                        && store.current?.reportedCWD == "/work/a",
+                    "focus=\(store.current?.focusStatus.rawValue ?? "-") hostFrontmost=\(store.current?.hostFrontmost.map(String.init) ?? "nil")"
+                )
+            )
+        } catch {
+            results.append(check("cmux E: 최전면을 판정할 수 없으면 유지 중으로 단정하지 않는다", false, "\(error)"))
         }
 
         // F-1: 포커스된 panel이 터미널이 아니면 이전 경로를 현재 대상처럼 남기지 않는다.

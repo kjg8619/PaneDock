@@ -169,8 +169,14 @@ public protocol CmuxQuerying: Sendable {
 }
 
 /// 최전면 앱 판정. 소켓이 알려주지 않으므로 **OS에서** 읽는다.
+///
+/// 반환값이 옵셔널인 이유: **판정할 수 없는 실행 문맥이 있다.**
+/// WindowServer에 연결되지 않은 프로세스(예: TTY 없이 분리 실행된 감시 프로세스)에서는
+/// `frontmostApplication`이 nil이 된다. 그때 `false`로 단정하면 "최전면 아님"이라는
+/// **거짓 상태**를 만들어 창이 "유지 중"으로 잘못 표시된다(V11에서 실제로 관측했다).
 public protocol FrontmostAppChecking: Sendable {
-    func isFrontmost(_ bundleIdentifier: String) -> Bool
+    /// 최전면이면 true, 아니면 false, **판정할 수 없으면 nil**.
+    func isFrontmost(_ bundleIdentifier: String) -> Bool?
 }
 
 /// 조회 실패. 연결 상태 표시로 바로 매핑된다.
