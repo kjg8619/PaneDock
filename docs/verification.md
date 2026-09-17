@@ -1664,6 +1664,257 @@ Finder 창 이름보다 강한 전체 경로 대조 · `activates=false` 재측�
 
 **빌드:** 코드 변경 없음(`2d9bd1f9fef97fc1`). 검증용 도구는 저장소에 추가하지 않았다.
 
+## V11. 2026-09-17 — 0.1d 기준선 정리 + cmux 읽기 전용 추적 실험
+
+### V11.1 기준선 (V11 변경 전 측정)
+
+**V10.1의 "미커밋" 기록은 현재 사실이 아니다.** V10의 변경은 `d6aa0f8`·`01f27b0`·`ca4b994`로
+커밋·푸시됐고, V11 착수 시점의 작업 트리는 **깨끗했다**.
+
+| 항목 | V11 착수 시점 | V11 최종 |
+| --- | --- | --- |
+| HEAD | `ca4b994` (원격과 동일) | 미커밋 (V11.10) |
+| 작업 트리 | 소스 변경 없음. 미추적은 `.omp/`뿐 | 아래 커밋 후보 참조 |
+| 자동 검사 | **86/86** | **98/98** |
+| 앱 번들 SHA-256 앞 16자리 | `2d9bd1f9fef97fc1` (V10.13과 동일) | **`4f79ce4e034167e6`** |
+| 코어 CLI SHA-256 앞 16자리 | `1d7e43aee4865fad` | **`048eb0badbeeff67`** |
+
+**해시에 대해 확인한 것:** 같은 소스로 두 번 빌드하면 **같은 해시**가 나온다(변경 없이 `touch` 후 재빌드 2회).
+**확인하지 못한 것:** V10.13이 기록한 CLI 해시 `190f86ae42a4a134`와 V11 착수 시점의 측정값
+`1d7e43aee4865fad`가 다르다. 두 시점 사이에 `prototypes/focus-probe` 소스는 바뀌지 않았다.
+**원인을 규명하지 못했다.** 따라서 이 기록에서 해시는 **같은 세션 안에서 비교할 때만** 근거로 쓴다.
+
+### V11.2 cmux 설치·실행 상태
+
+| 항목 | 값 | 근거 |
+| --- | --- | --- |
+| CLI 버전 | `cmux 0.64.22 (102) [ddd4a01bc]` | `cmux --version` |
+| 앱 버전 | `0.64.22` | `Info.plist` `CFBundleShortVersionString` |
+| 실행 파일 | `/Applications/cmux.app`, `/opt/homebrew/bin/cmux`(심볼릭) | `ls -l` |
+| **착수 시 실행 상태** | **실행 중이 아님** | `pgrep -lf cmux.app` 결과 없음 |
+| 남아 있던 소켓 | `~/Library/Application Support/cmux/cmux.sock` (`May 27`, `srw-------`) — **stale** | `ls -l` |
+| **V11.5 실관측 시점** | **실행 중** (pid 86842). **사용자 승인 후 에이전트가 실행** | `pgrep` |
+
+V1의 "미실행" 결론을 재사용하지 않고 다시 측정했다.
+
+### V11.3 공식 연동 조사 — 두 경로를 모두 실측했고 결론이 뒤집혔다
+
+#### (a) 소켓 — **이 기기에서는 열려 있다** (설정을 바꾸지 않았다)
+
+공식 문서(`https://cmux.com/docs/api`)는 세 모드(Off/cmuxOnly/allowAll)와
+"cmux processes only가 기본"을 설명한다. 그러나 **실제로 확인한 값은 `automation`**이다.
+
+| 확인 | 값 | 근거 |
+| --- | --- | --- |
+| 접근 모드 | **`automation`** | `cmux capabilities` → `access_mode` |
+| 모드의 공식성 | 공식 스키마 enum 값 (`off`,`cmuxOnly`,`automation`,`password`,`allowAll`,`openAccess`,`fullOpenAccess`,`notifications`,`full`) | `web/data/cmux.schema.json` `properties.automation.socketControlMode` (스키마의 `default`는 `cmuxOnly`) |
+| 이 기기의 설정 | `socketControlMode = automation` | `defaults read com.cmuxterm.app` |
+| **바깥 프로세스에서 접속** | **성공** — `cmux ping` → `PONG` | 에이전트 셸(외부 프로세스)에서 실행 |
+| 소켓 경로 | `~/.local/state/cmux/cmux.sock` | `capabilities.socket_path` |
+
+**설정을 변경하지 않았고, 제한을 완화하지도 않았고, 인증을 우회하지도 않았다.**
+이미 허용된 공식 모드를 그대로 썼다. (모드를 기본값 `cmuxOnly`로 되돌리면 바깥 프로세스는
+연결할 수 없다 — 그 사실 자체가 이 연동의 전제 조건이다.)
+
+#### (b) AppleScript — **사전은 있지만 쓸 수 없다** (V11.3 초안의 결론을 뒤집음)
+
+cmux는 스크립팅 사전을 포함하고 스크립트 가능으로 선언돼 있다:
+
+| 근거 | 값 |
+| --- | --- |
+| 사전 | `/Applications/cmux.app/Contents/Resources/cmux.sdef` |
+| 선언 | `Info.plist`: `NSAppleScriptEnabled=true`, `OSAScriptingDefinition=cmux.sdef` |
+| 사전이 노출하는 읽기 속성 | `application.frontmost`·`front window`·`version`, `window.id`·`name`·`selected tab`, `tab.id`·`name`·`index`·`selected`·`focused terminal`, `terminal.id`·`name`·`working directory` |
+
+**그런데 객체 모델이 응답하지 않는다.** 한 줄씩 최소 단위로 실행한 결과(각 6초 상한):
+
+| AppleScript | 결과 |
+| --- | --- |
+| `get version` | `0.64.22` (즉시) |
+| `get frontmost` | `true` (즉시) |
+| `exists front window` | `true` (즉시) |
+| `count of windows` | **타임아웃(응답 없음)** |
+| `id of front window` / `name of front window` | **타임아웃** |
+| `selected tab of front window` / `count of tabs of front window` | **타임아웃** |
+| `count of terminals` / `count of terminals of front window` | **타임아웃** |
+| `working directory of terminal 1` | **타임아웃** |
+
+전체 Adapter 스크립트를 실행했을 때는 **34초 동안 응답이 없어** 중단했다(해당 `osascript`는 종료).
+**권한 대화상자가 떠 있었던 것은 아니다** — 화면의 창 목록에 보안 대화상자가 없었다.
+
+→ **창·workspace·panel·경로를 AppleScript로 읽을 수 없다.** AppleScript 경로는 폐기했다.
+
+#### (c) 소켓이 실제로 주는 것 (읽기 전용)
+
+`cmux identify --json --id-format uuids`:
+
+```json
+"focused": { "window_id": "502A2510-…", "workspace_id": "6D10FF4A-…",
+             "pane_id": "5CEA7EBC-…", "surface_id": "43007C41-…", "tab_id": "43007C41-…",
+             "surface_type": "terminal", "is_browser_surface": false },
+"caller": null
+```
+
+`cmux sidebar-state --workspace <id>`:
+
+```
+cwd=/Users/kangjingoo            ← workspace 요약
+focused_cwd=/Users/kangjingoo    ← 포커스된 panel의 경로
+focused_panel=43007C41-…         ← 그 경로가 어느 panel의 것인지
+```
+
+| 확인 | 결과 |
+| --- | --- |
+| `focused_panel`과 선택된 surface의 일치 | `focused_panel`(43007C41-…) == `identify.focused.surface_id`(43007C41-…) **일치** |
+| workspace·창 식별자 일치 | `list-workspaces`의 `6D10FF4A-…`(선택)·`list-windows`의 `502A2510-…`와 각각 일치 |
+| 표시 이름/제목 | `list-pane-surfaces`에 `title`이 있다(경로 추측에는 쓰지 않는다) |
+| **비활성 panel의 경로** | **읽는 공식 방법을 확인하지 못했다.** `sidebar-state`는 포커스된 panel 것만 준다 |
+| **앱 최전면 여부** | **소켓이 알려주지 않는다**(`app.focus_override.set`·`app.simulate_active`는 테스트용 쓰기) → **OS에서 읽는다** |
+
+### V11.4 구현 (CLI 실험 경로만)
+
+**GUI 파일(`app/PaneDock/Sources/PaneDockApp/*`)은 한 줄도 수정하지 않았다.**
+
+| 파일 | 변경 |
+| --- | --- |
+| `FocusProbeCore/CmuxAdapter.swift` | **신규.** `identify` + `sidebar-state` 두 읽기 명령만 실행하는 소켓 CLI 연동 |
+| `FocusProbeCore/FrontmostAppChecker.swift` | **신규.** OS(`NSWorkspace`)로 최전면 판정(소켓이 제공하지 않음) |
+| `FocusProbeCore/GhosttyAdapter.swift` | 공통 조각을 앱 중립으로 일반화: `TerminalHostSnapshot`·`TerminalHostTerminal`·`TerminalHostSnapshotApplier`·`TerminalHostMapping`·`TerminalHostAdapter`·`TerminalHostPayload.parse`·`TerminalHostQueryFailure`, `focusedPanelIsTerminal` 필드 |
+| `FocusProbeCore/GhosttyProbe.swift` | `TerminalHostAdapter`를 받도록 일반화(이름은 GUI 호환을 위해 유지), 버전 게이트 위임, 오류는 `TerminalHostQueryFailure`로 |
+| `FocusProbeCore/CurrentWorkInfo.swift` | `CWDSource.cmuxFocusedCWD = "cmux:sidebar-state.focused_cwd"` |
+| `FocusProbeCore/FocusResolver.swift` | `clearTarget()` — 대상이 사라질 때 세대를 올려 늦은 응답 무효화 |
+| `FocusProbeCore/ContextStore.swift` | `markTargetUnknown()` — 이전 대상을 현재 대상처럼 남기지 않는다 |
+| `FocusProbeCore/DiagnosticsReport.swift` | 연결 줄에 **전송 수단**을 표시(`cmux socket CLI` / `AppleScript`) |
+| `FocusProbeCLI/main.swift` | `--adapter cmux`, 사용법·한계, 실험 경고 |
+| `FocusProbeCLI/GhosttyProbes.swift` | `GhosttyWatchProbe` → `WatchProbe`(probe 주입) |
+| `FocusProbeCore/SelfTest.swift` | cmux 검사(소켓 합성) |
+
+**경로를 추측하지 않기 위한 규칙 두 개(코드로 강제)**
+
+1. **workspace 요약 `cwd`를 surface 경로로 쓰지 않는다.** 경로는 `focused_cwd`에서만 온다.
+2. `focused_cwd`는 `focused_panel`이 **선택된 surface와 같을 때만** 인정한다. 다르면 `unsupported`다.
+
+**식별자 매핑** — cmux는 `window → workspace → pane → surface` 4단계, 공통 스키마는 3단계다:
+
+| cmux | 공통 스키마 |
+| --- | --- |
+| `window_id` | `workspaceID` 슬롯(창) |
+| `workspace_id` | `tabID` 슬롯(창 안의 탭 역할) |
+| `surface_id` | `paneID`·`terminalID`(표시 대상 panel) |
+| `pane_id`(분할 컨테이너), 별도 `tab_id` | 이 최소 진단에서는 표시하지 않음 |
+
+**실행 방법**
+
+```
+focus-probe --adapter cmux              # 한 번 조회
+focus-probe --adapter cmux --watch      # 폴링(기본 1000ms)
+focus-probe --adapter cmux --json       # 기계 판독
+focus-probe --self-test                 # 98건
+```
+
+**하지 않는 것:** workspace·pane·surface 생성/이동/포커스 변경, 입력 전송, 앱 활성화.
+조회 명령은 `identify`와 `sidebar-state` **둘뿐**이다. 프로세스는 무한 대기를 피하려 상한(4초)을 둔다.
+
+### V11.5 검증
+
+#### 합성 검사 — 98/98 (기존 86 + cmux). **실제 관측이 아니다.**
+
+| 검사 | 확인 내용 | 결과 |
+| --- | --- | --- |
+| cmux A | workspace 전환 → 새 식별자·새 경로, `cwdSource=cmux:sidebar-state.focused_cwd`, `adapterID=cmux` | PASS |
+| cmux B | 같은 surface에서 cd → 식별자·세대 유지, 경로만 갱신, `previous` 없음 | PASS |
+| cmux 요약 함정 | workspace 요약 `cwd`가 달라도 표시 경로는 `focused_cwd`를 따른다 | PASS |
+| cmux C | 비활성 panel을 **조회하지 않는다**(배경 경로가 표시를 바꿀 수 없다) | PASS |
+| cmux D | 전환 전 surface의 늦은 응답 → `discardedStale` | PASS |
+| cmux E | 최전면 아님 → `held`, 경로 유지 | PASS |
+| cmux F | 터미널이 아닌 panel → 이전 경로를 현재 대상처럼 남기지 않음(`previous`로만) | PASS |
+| cmux F | 터미널이 아닌 panel 뒤 늦은 응답이 되살아나지 않음 | PASS |
+| cmux F | `focused_panel`이 선택된 surface와 다르면 경로를 인정하지 않음 | PASS |
+| cmux F | 연결 실패 → 경로 없이 구분, **사유에 cmux라고 표시** | PASS |
+| cmux | 해석할 수 없는 응답·빈 값을 경로로 만들지 않음 | PASS |
+| 회귀 | Ghostty는 대상이 없어도 새 규칙으로 대상을 지우지 않는다 | PASS |
+
+#### 실제 관측 — cmux 실행 중 (에이전트 수행, 14:28)
+
+| 관측 | 결과 |
+| --- | --- |
+| `--adapter cmux` | `connection connected cmux socket CLI (identify + sidebar-state)`, `focus tracked`, `path /Users/kangjingoo`, `cwdSource cmux:sidebar-state.focused_cwd`, `validity valid`, exit=0 |
+| 식별자 | `pane 43007C41-…` / `workspace 502A2510-…` / `tab 6D10FF4A-…` / `terminal 43007C41-…` — `identify`·`list-workspaces`·`list-windows`·`sidebar-state.focused_panel` 값과 **모두 일치** |
+| `--watch` | 같은 상태를 반복 보고 |
+| 최전면 | `frontmost true` — OS의 최전면 앱(`lsappinfo front` = cmux)과 **일치** |
+| **변경 없음** | 조회가 workspace·pane·surface·포커스를 바꾸지 않았다(조회 후 `list-workspaces`의 선택 그대로) |
+
+#### 실제 관측 — AppleScript 차단 (에이전트 수행)
+
+V11.3(b)의 표. `osascript`가 34초 응답 없이 멈춘 것을 확인하고 해당 프로세스를 종료했다.
+
+#### 실제 관측 — Ghostty 회귀 (에이전트 수행)
+
+| 관측 | 결과 |
+| --- | --- |
+| 앱 `--self-check` | `display held`(cmux가 최전면이므로 유지 중 — 정상), `…/CodeMose/docs`, `project CodeMose (codemose) links=2` |
+| GUI 스모크(가짜 모드) | 시작 로그·메뉴 구성이 V10.13과 동일 |
+| CLI 기본 경로 | `cwdSource ghostty:terminal.workingDirectory`, `path …/CodeMose/docs` |
+
+#### 사용자 보고
+
+없음. 이번 검증에서 사용자는 아무것도 확인하지 않았다.
+
+#### 미검증 — **사용자 조작이 필요하다**
+
+| # | 항목 | 필요한 조작 |
+| --- | --- | --- |
+| 1 | `focused_cwd`가 **live pwd**인지(cd 갱신) | cmux의 그 pane에서 `cd` |
+| 2 | 터미널이 아닌 panel이 포커스될 때의 동작 | 브라우저 panel을 포커스 |
+| 3 | workspace A → B 전환(A) | 다른 workspace 선택 |
+| 4 | 최전면이 아닐 때의 `held`(E) | 다른 앱을 최전면으로 |
+| 5 | 중첩 TUI·원격 경로 | 이번 범위 밖(Ghostty와 같은 한계) |
+
+합성 검사는 **우리 코드**만 검증한다. 위 5개는 실제 cmux에서만 확인된다.
+
+### V11.6 기존 앱을 수정하지 않고 연동할 수 있는가
+
+- **가능하다.** GUI 파일은 수정하지 않았고, cmux 조회는 `--adapter cmux`로만 도달한다.
+- 앱의 Ghostty 경로는 공유를 위한 일반화만 거쳤고 동작이 같음을 self-check·스모크로 확인했다.
+- **전제 조건:** 이 기기의 소켓 접근 모드가 `automation`이어야 한다(현재 그렇다).
+  기본값 `cmuxOnly`로 되돌리면 바깥 프로세스는 연결할 수 없다. 이 연동은 **설정을 바꾸지 않는다.**
+- 앱을 cmux에 연결하려면 Adapter 선택 경로만 추가하면 된다. 조회·반영·표시 코드는 이미 공유된다.
+
+### V11.7 다음 GUI 연결에 필요한 최소 작업
+
+1. 앱에서 Adapter를 **명시 선택**하는 최소 경로(실행 인자 또는 설정 1개). 자동 전환·메뉴 확장 없음.
+2. V11.5의 미검증 1~4를 실제 cmux에서 관측한 뒤 연결. 특히 #2를 확인하기 전에는
+   cmux 경로를 "지원"으로 표시하지 않는다.
+3. cmux 미실행·터미널 아닌 panel일 때의 표시 문구 검토(현재는 영문 사유 한 줄).
+4. Ghostty와 cmux **동시 지원·자동 전환**은 이번 범위 밖이다.
+
+### V11.8 이번 단계에서 하지 않은 것
+
+- cmux 소켓 접근 **설정 변경**(`automation`은 이 기기의 기존 값이다), 인증 우회, cmux 수정·패치·포크
+- **AppleScript로 우회 구현** — 객체 모델이 응답하지 않는다는 사실을 확인하고 경로 자체를 폐기했다
+- GUI의 cmux 메뉴, 자동 전환 엔진, 프로젝트 편집 UI·위젯·새 실행 기능, Herdr 재조사, 타 터미널 Adapter
+- cmux 실행은 **사용자 승인 후에만** 했다(V11.2). 기존 작업 중인 pane은 건드리지 않았다.
+
+### V11.9 정정 — 이 절의 초안이 틀렸던 지점
+
+이 절을 처음 쓸 때 나는 **공식 문서의 기본값만 보고** 두 가지를 추론했다. 실측이 둘 다 뒤집었다.
+
+| 초안의 주장 | 실제 측정 | 뒤집힌 근거 |
+| --- | --- | --- |
+| "소켓은 바깥 프로세스에 닫혀 있다(기본 모드 cmuxOnly)" | **이 기기는 `automation` 모드이고 바깥 프로세스가 연결된다** | `capabilities.access_mode` = `automation`, `defaults read` = `automation`, `cmux ping` → `PONG` |
+| "AppleScript가 유일한 공식 경로다" | **AppleScript는 객체 모델이 응답하지 않아 쓸 수 없다** | `count of windows` 등 6초 타임아웃, 전체 스크립트 34초 무응답 |
+
+교훈을 기록한다: **접근 가능성과 지원 여부는 문서의 기본값으로 판단하지 말고 설치본에서 측정한다.**
+`NSAppleScriptEnabled=true`와 사전 파일의 존재는 "동작한다"는 증거가 아니었다.
+
+### V11.10 커밋 후보
+
+| 구분 | 파일 |
+| --- | --- |
+| 커밋 대상 | `FocusProbeCore/*`, `FocusProbeCLI/*`, `docs/verification.md` |
+| 제외 | `.omp/`(개인 설정), `.build/`·`dist/`(빌드 산출물, gitignore) |
+| 포함하지 않는 것 | 자격증명, 셸 이력, 전체 환경변수, 진단 로그, cmux 설정 파일 |
+
 ---
 
 ## 정정 이력

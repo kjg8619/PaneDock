@@ -332,18 +332,22 @@ public enum SelfTest {
         }
 
         func run(_ source: String) throws -> String {
-            guard !outputs.isEmpty else { throw GhosttyQueryError.other("stub exhausted") }
+            guard !outputs.isEmpty else { throw TerminalHostQueryError.other("stub exhausted") }
             return outputs.removeFirst()
         }
     }
 
     /// AppleScript 스크립트가 실제로 내는 것과 같은 형식의 출력을 만든다.
-    private static func ghosttyOutput(
+    ///
+    /// Ghostty와 cmux가 **같은 형식**을 쓴다. `focused`가 nil이면 `focusedTerminal`/`focusedWD` 줄이
+    /// 없고, `focusedPanelIsTerminal`이 주어지면 그 줄이 추가된다(터미널이 아닌 패널을 뜻한다).
+    private static func hostOutput(
         version: String = "1.3.1",
         frontmost: Bool = true,
         frontWindow: String = "win-1",
         selectedTab: String = "tab-1",
-        focused: String = "term-A",
+        focused: String? = "term-A",
+        focusedPanelIsTerminal: Bool? = nil,
         terminals: [(window: String, tab: String, id: String, wd: String?, name: String?)]
     ) -> String {
         var lines: [String] = [
@@ -351,20 +355,25 @@ public enum SelfTest {
             "frontmost=\(frontmost)",
             "frontWindow=\(frontWindow)",
             "selectedTab=\(selectedTab)",
-            "focusedTerminal=\(focused)",
-            "focusedWD=\(terminals.first { $0.id == focused }?.wd ?? "")",
         ]
+        if let focused {
+            lines.append("focusedTerminal=\(focused)")
+            lines.append("focusedWD=\(terminals.first { $0.id == focused }?.wd ?? "")")
+        }
+        if let focusedPanelIsTerminal {
+            lines.append("focusedPanelIsTerminal=\(focusedPanelIsTerminal)")
+        }
         for terminal in terminals {
             lines.append("term=\(terminal.window)\t\(terminal.tab)\t\(terminal.id)\t\(terminal.wd ?? "")\t\(terminal.name ?? "")")
         }
         return lines.joined(separator: "\n") + "\n"
     }
 
-    private static func makeGhosttyStore(
-        directories: Set<String>,
-        outputs: [String]
-    ) -> (adapter: GhosttyAdapter, store: ContextStore, resolver: FocusResolver, validator: StubValidator) {
-        let adapter = GhosttyAdapter(runner: StubAppleScript(outputs: outputs))
+    /// Adapter 종류와 무관하게 같은 조회·반영 경로를 세운다. 두 Adapter의 차이는 Adapter뿐이다.
+    private static func makeHostStore<A: TerminalHostAdapter>(
+        _ adapter: A,
+        directories: Set<String>
+    ) -> (adapter: A, store: ContextStore, resolver: FocusResolver, validator: StubValidator) {
         let resolver = FocusResolver()
         let validator = StubValidator(directories: directories)
         let store = ContextStore(
@@ -375,6 +384,25 @@ public enum SelfTest {
             clock: { now }
         )
         return (adapter, store, resolver, validator)
+    }
+
+    private static func makeGhosttyStore(
+        directories: Set<String>,
+        outputs: [String]
+    ) -> (adapter: GhosttyAdapter, store: ContextStore, resolver: FocusResolver, validator: StubValidator) {
+        makeHostStore(GhosttyAdapter(runner: StubAppleScript(outputs: outputs)), directories: directories)
+    }
+
+    private static func makeCmuxStore(
+        directories: Set<String>,
+        identifies: [CmuxIdentify],
+        sidebars: [CmuxSidebarState],
+        frontmost: StubFrontmostApp = StubFrontmostApp(true)
+    ) -> (adapter: CmuxAdapter, store: ContextStore, resolver: FocusResolver, validator: StubValidator) {
+        makeHostStore(
+            CmuxAdapter(client: StubCmuxQueries(identifies: identifies, sidebars: sidebars), frontmost: frontmost),
+            directories: directories
+        )
     }
 
     private static func ghosttyChecks() -> [CheckResult] {
@@ -390,17 +418,17 @@ public enum SelfTest {
             let (adapter, store, resolver, validator) = makeGhosttyStore(
                 directories: ["/work/a", "/work/b"],
                 outputs: [
-                    ghosttyOutput(focused: "term-A", terminals: twoPanes),
-                    ghosttyOutput(focused: "term-B", terminals: twoPanes),
+                    hostOutput(focused: "term-A", terminals: twoPanes),
+                    hostOutput(focused: "term-B", terminals: twoPanes),
                 ]
             )
             let first = try adapter.snapshot()
-            GhosttySnapshotApplier.apply(first, adapter: adapter, store: store, resolver: resolver, validator: validator)
+            TerminalHostSnapshotApplier.apply(first, adapter: adapter, store: store, resolver: resolver, validator: validator)
             let firstPane = store.current?.identity.paneID
             let firstPath = store.current?.reportedCWD
 
             let second = try adapter.snapshot()
-            GhosttySnapshotApplier.apply(second, adapter: adapter, store: store, resolver: resolver, validator: validator)
+            TerminalHostSnapshotApplier.apply(second, adapter: adapter, store: store, resolver: resolver, validator: validator)
             let secondPane = store.current?.identity.paneID
             let secondPath = store.current?.reportedCWD
             let previousPath = store.previous?.reportedCWD
@@ -424,15 +452,15 @@ public enum SelfTest {
             let (adapter, store, resolver, validator) = makeGhosttyStore(
                 directories: ["/work/a", "/work/c"],
                 outputs: [
-                    ghosttyOutput(focused: "term-A", terminals: [(window: "win-1", tab: "tab-1", id: "term-A", wd: "/work/a", name: "a" as String?)]),
-                    ghosttyOutput(focused: "term-A", terminals: [(window: "win-1", tab: "tab-1", id: "term-A", wd: "/work/c", name: "a" as String?)]),
+                    hostOutput(focused: "term-A", terminals: [(window: "win-1", tab: "tab-1", id: "term-A", wd: "/work/a", name: "a" as String?)]),
+                    hostOutput(focused: "term-A", terminals: [(window: "win-1", tab: "tab-1", id: "term-A", wd: "/work/c", name: "a" as String?)]),
                 ]
             )
             let first = try adapter.snapshot()
-            GhosttySnapshotApplier.apply(first, adapter: adapter, store: store, resolver: resolver, validator: validator)
+            TerminalHostSnapshotApplier.apply(first, adapter: adapter, store: store, resolver: resolver, validator: validator)
             let generationBefore = store.focusGeneration
             let second = try adapter.snapshot()
-            GhosttySnapshotApplier.apply(second, adapter: adapter, store: store, resolver: resolver, validator: validator)
+            TerminalHostSnapshotApplier.apply(second, adapter: adapter, store: store, resolver: resolver, validator: validator)
 
             results.append(
                 check(
@@ -452,8 +480,8 @@ public enum SelfTest {
             let (adapter, store, resolver, validator) = makeGhosttyStore(
                 directories: ["/work/a", "/work/b", "/work/c"],
                 outputs: [
-                    ghosttyOutput(focused: "term-A", terminals: twoPanes),
-                    ghosttyOutput(
+                    hostOutput(focused: "term-A", terminals: twoPanes),
+                    hostOutput(
                         focused: "term-A",
                         terminals: [
                             (window: "win-1", tab: "tab-1", id: "term-A", wd: "/work/a", name: "a" as String?),
@@ -463,9 +491,9 @@ public enum SelfTest {
                 ]
             )
             let first = try adapter.snapshot()
-            GhosttySnapshotApplier.apply(first, adapter: adapter, store: store, resolver: resolver, validator: validator)
+            TerminalHostSnapshotApplier.apply(first, adapter: adapter, store: store, resolver: resolver, validator: validator)
             let second = try adapter.snapshot()
-            let result = GhosttySnapshotApplier.apply(second, adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let result = TerminalHostSnapshotApplier.apply(second, adapter: adapter, store: store, resolver: resolver, validator: validator)
 
             let backgroundMoved = result.background.first { $0.paneID == "term-B" }?.reportedCWD
             results.append(
@@ -507,7 +535,7 @@ public enum SelfTest {
             let (adapter, store, resolver, validator) = makeGhosttyStore(
                 directories: ["/work/a"],
                 outputs: [
-                    ghosttyOutput(
+                    hostOutput(
                         focused: "term-A",
                         terminals: [
                             (window: "win-1", tab: "tab-1", id: "term-A", wd: nil, name: "no-path" as String?),
@@ -517,15 +545,15 @@ public enum SelfTest {
                 ]
             )
             let snapshot = try adapter.snapshot()
-            GhosttySnapshotApplier.apply(snapshot, adapter: adapter, store: store, resolver: resolver, validator: validator)
+            TerminalHostSnapshotApplier.apply(snapshot, adapter: adapter, store: store, resolver: resolver, validator: validator)
             let noPath = store.current?.pathStatus == .unsupported && store.current?.focusStatus == .unknown
 
             let (adapter2, store2, resolver2, validator2) = makeGhosttyStore(
                 directories: [],
-                outputs: [ghosttyOutput(focused: "term-B", terminals: [(window: "win-1", tab: "tab-1", id: "term-B", wd: "/work/gone", name: "gone" as String?)])]
+                outputs: [hostOutput(focused: "term-B", terminals: [(window: "win-1", tab: "tab-1", id: "term-B", wd: "/work/gone", name: "gone" as String?)])]
             )
             let snapshot2 = try adapter2.snapshot()
-            GhosttySnapshotApplier.apply(snapshot2, adapter: adapter2, store: store2, resolver: resolver2, validator: validator2)
+            TerminalHostSnapshotApplier.apply(snapshot2, adapter: adapter2, store: store2, resolver: resolver2, validator: validator2)
             let missing = store2.current?.pathStatus == .missing && store2.current?.focusStatus == .unknown
 
             results.append(
@@ -543,10 +571,10 @@ public enum SelfTest {
         do {
             let (adapter, store, resolver, validator) = makeGhosttyStore(
                 directories: ["/work/a"],
-                outputs: [ghosttyOutput(frontmost: false, focused: "term-A", terminals: [(window: "win-1", tab: "tab-1", id: "term-A", wd: "/work/a", name: "a" as String?)])]
+                outputs: [hostOutput(frontmost: false, focused: "term-A", terminals: [(window: "win-1", tab: "tab-1", id: "term-A", wd: "/work/a", name: "a" as String?)])]
             )
             let snapshot = try adapter.snapshot()
-            GhosttySnapshotApplier.apply(snapshot, adapter: adapter, store: store, resolver: resolver, validator: validator)
+            TerminalHostSnapshotApplier.apply(snapshot, adapter: adapter, store: store, resolver: resolver, validator: validator)
             results.append(
                 check(
                     "최전면 아님 + 유효 경로 → held",
@@ -563,6 +591,7 @@ public enum SelfTest {
         results.append(contentsOf: dockChecks())
         results.append(contentsOf: settingsChecks())
         results.append(contentsOf: projectChecks())
+        results.append(contentsOf: cmuxChecks())
         return results
     }
 
@@ -1536,14 +1565,14 @@ public enum SelfTest {
     }
 
     private static func ghosttyErrorChecks() -> [CheckResult] {
-        let cases: [(String, Int, GhosttyQueryError, ConnectionStatus)] = [
+        let cases: [(String, Int, TerminalHostQueryError, ConnectionStatus)] = [
             ("앱 미실행", -600, .notRunning, .unavailable),
             ("자동화 권한 거부", -1743, .automationDenied, .denied),
             ("AppleScript 미지원", -1708, .appleScriptUnsupported, .incompatible),
             ("창 없음", -1728, .noWindow, .connected),
         ]
         return cases.map { label, code, expected, status in
-            let classified = GhosttyQueryError.classify(
+            let classified = TerminalHostQueryError.classify(
                 stderr: "execution error: Ghostty got an error: something. (\(code))",
                 status: 1
             )
@@ -1559,8 +1588,8 @@ public enum SelfTest {
         var results: [CheckResult] = []
 
         do {
-            let snapshot = try GhosttyAdapter.parse(
-                ghosttyOutput(focused: "term-B", terminals: [
+            let snapshot = try TerminalHostPayload.parse(
+                hostOutput(focused: "term-B", terminals: [
                     (window: "win-1", tab: "tab-1", id: "term-A", wd: "/work/a", name: "a" as String?),
                     (window: "win-1", tab: "tab-2", id: "term-B", wd: "/work/b", name: "b" as String?),
                 ])
@@ -1579,9 +1608,9 @@ public enum SelfTest {
         }
 
         do {
-            _ = try GhosttyAdapter.parse("notRunning=true\n")
+            _ = try TerminalHostPayload.parse("notRunning=true\n")
             results.append(check("파싱: 미실행 응답 거부", false, "오류가 나지 않았다"))
-        } catch let failure as GhosttyQueryError {
+        } catch let failure as TerminalHostQueryError {
             results.append(check("파싱: 미실행 응답 거부", failure == .notRunning, "\(failure)"))
         } catch {
             results.append(check("파싱: 미실행 응답 거부", false, "\(error)"))
@@ -1596,6 +1625,380 @@ public enum SelfTest {
                 "1.2.9<1.3.0<1.3.1 비교"
             )
         )
+
+        return results
+    }
+
+    // MARK: - cmux (실험 경로)
+
+    /// cmux는 **소켓(공식 CLI)** 으로 조회한다. AppleScript는 사전이 있어도 객체 모델이 응답하지
+    /// 않아 쓸 수 없다(V11 실측: `count of windows`, `working directory of terminal 1` 모두 타임아웃).
+    ///
+    /// 여기서는 그 조회 결과를 합성해 **공통 반영 경로**를 지나간다.
+    /// **이것은 합성 검사다.** 실제 cmux 관측은 `docs/verification.md` V11에 따로 기록하며,
+    /// 여기 통과를 실제 동작 확인으로 승격하지 않는다.
+
+    private final class StubCmuxQueries: CmuxQuerying, @unchecked Sendable {
+        private var identifies: [CmuxIdentify]
+        private var sidebars: [CmuxSidebarState]
+        private let failure: CmuxQueryError?
+        private(set) var queriedWorkspaces: [String] = []
+
+        init(identifies: [CmuxIdentify] = [], sidebars: [CmuxSidebarState] = [], failure: CmuxQueryError? = nil) {
+            self.identifies = identifies
+            self.sidebars = sidebars
+            self.failure = failure
+        }
+
+        func identify() throws -> CmuxIdentify {
+            if let failure { throw failure }
+            guard !identifies.isEmpty else { throw CmuxQueryError.malformed("identify stub exhausted") }
+            return identifies.removeFirst()
+        }
+
+        func sidebarState(workspaceID: String) throws -> CmuxSidebarState {
+            queriedWorkspaces.append(workspaceID)
+            if let failure { throw failure }
+            guard !sidebars.isEmpty else { throw CmuxQueryError.malformed("sidebar stub exhausted") }
+            return sidebars.removeFirst()
+        }
+    }
+
+    private final class StubFrontmostApp: FrontmostAppChecking, @unchecked Sendable {
+        var value: Bool
+
+        init(_ value: Bool) {
+            self.value = value
+        }
+
+        func isFrontmost(_ bundleIdentifier: String) -> Bool { value }
+    }
+
+    /// cmux의 4단계(window → workspace → pane → surface)를 그대로 담는다.
+    private static func cmuxFocus(
+        workspace: String,
+        surface: String,
+        pane: String = "pane-1",
+        type: String = "terminal",
+        browser: Bool = false
+    ) -> CmuxFocused {
+        CmuxFocused(
+            windowID: "win-1",
+            workspaceID: workspace,
+            paneID: pane,
+            surfaceID: surface,
+            tabID: surface,
+            surfaceType: type,
+            isBrowserSurface: browser
+        )
+    }
+
+    private static func cmuxIdentify(_ focused: CmuxFocused?, caller: String? = nil) -> CmuxIdentify {
+        CmuxIdentify(caller: caller, focused: focused)
+    }
+
+    private static func cmuxSidebar(cwd: String?, focusedCWD: String?, panel: String?) -> CmuxSidebarState {
+        CmuxSidebarState(cwd: cwd, focusedCWD: focusedCWD, focusedPanel: panel)
+    }
+
+    private static func cmuxChecks() -> [CheckResult] {
+        var results: [CheckResult] = []
+
+        // A: workspace A → B 전환. 새 workspace·surface 식별자와 새 경로가 함께 바뀐다.
+        do {
+            let (adapter, store, resolver, validator) = makeCmuxStore(
+                directories: ["/work/a", "/work/b"],
+                identifies: [
+                    cmuxIdentify(cmuxFocus(workspace: "ws-1", surface: "panel-A")),
+                    cmuxIdentify(cmuxFocus(workspace: "ws-2", surface: "panel-B", pane: "pane-2")),
+                ],
+                sidebars: [
+                    cmuxSidebar(cwd: "/work/a", focusedCWD: "/work/a", panel: "panel-A"),
+                    cmuxSidebar(cwd: "/work/b", focusedCWD: "/work/b", panel: "panel-B"),
+                ]
+            )
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let first = "\(store.current?.identity.tabID ?? "-")/\(store.current?.identity.paneID ?? "-")/\(store.current?.reportedCWD ?? "-")"
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let second = "\(store.current?.identity.tabID ?? "-")/\(store.current?.identity.paneID ?? "-")/\(store.current?.reportedCWD ?? "-")"
+            let sourceIsCmux = store.current?.cwdSource == .cmuxFocusedCWD
+                && store.current?.identity.adapterID == CmuxAdapter.adapterID
+                && store.current?.identity.hostAppID == "cmux"
+            results.append(
+                check(
+                    "cmux A: workspace 전환 시 새 식별자와 새 경로",
+                    first == "ws-1/panel-A//work/a" && second == "ws-2/panel-B//work/b" && sourceIsCmux,
+                    "\(first) → \(second) source=\(store.current?.cwdSource?.rawValue ?? "-")"
+                )
+            )
+        } catch {
+            results.append(check("cmux A: workspace 전환 시 새 식별자와 새 경로", false, "\(error)"))
+        }
+
+        // B: 같은 surface에서 cd. 식별자는 유지되고 경로만 갱신된다.
+        do {
+            let (adapter, store, resolver, validator) = makeCmuxStore(
+                directories: ["/work/a", "/work/c"],
+                identifies: [
+                    cmuxIdentify(cmuxFocus(workspace: "ws-1", surface: "panel-A")),
+                    cmuxIdentify(cmuxFocus(workspace: "ws-1", surface: "panel-A")),
+                ],
+                sidebars: [
+                    cmuxSidebar(cwd: "/work/a", focusedCWD: "/work/a", panel: "panel-A"),
+                    cmuxSidebar(cwd: "/work/a", focusedCWD: "/work/c", panel: "panel-A"),
+                ]
+            )
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let paneBefore = store.current?.identity.paneID
+            let pathBefore = store.current?.reportedCWD
+            let generationBefore = store.focusGeneration
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            results.append(
+                check(
+                    "cmux B: 같은 surface에서 cd는 식별자를 유지하고 경로만 갱신",
+                    paneBefore == "panel-A" && pathBefore == "/work/a"
+                        && store.current?.identity.paneID == "panel-A"
+                        && store.current?.reportedCWD == "/work/c"
+                        && store.focusGeneration == generationBefore
+                        && store.previous == nil,
+                    "\(paneBefore ?? "-")/\(pathBefore ?? "-") → \(store.current?.reportedCWD ?? "-")"
+                )
+            )
+        } catch {
+            results.append(check("cmux B: 같은 surface에서 cd는 식별자를 유지하고 경로만 갱신", false, "\(error)"))
+        }
+
+        // 요약 경로 함정: workspace 요약 cwd가 달라도 표시 경로는 focused_cwd를 따른다.
+        do {
+            let (adapter, store, resolver, validator) = makeCmuxStore(
+                directories: ["/work/a", "/summary"],
+                identifies: [
+                    cmuxIdentify(cmuxFocus(workspace: "ws-1", surface: "panel-A")),
+                    cmuxIdentify(cmuxFocus(workspace: "ws-1", surface: "panel-A")),
+                ],
+                sidebars: [
+                    cmuxSidebar(cwd: "/work/a", focusedCWD: "/work/a", panel: "panel-A"),
+                    cmuxSidebar(cwd: "/summary", focusedCWD: "/work/a", panel: "panel-A"),
+                ]
+            )
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            results.append(
+                check(
+                    "cmux: workspace 요약 cwd를 surface 경로로 쓰지 않는다",
+                    store.current?.reportedCWD == "/work/a" && store.current?.cwdSource == .cmuxFocusedCWD,
+                    "path=\(store.current?.reportedCWD ?? "nil") source=\(store.current?.cwdSource?.rawValue ?? "-")"
+                )
+            )
+        } catch {
+            results.append(check("cmux: workspace 요약 cwd를 surface 경로로 쓰지 않는다", false, "\(error)"))
+        }
+
+        // C: 비활성 panel은 아예 조회하지 않는다 → 표시가 바뀔 수 없다.
+        do {
+            let (adapter, _, _, _) = makeCmuxStore(
+                directories: ["/work/a"],
+                identifies: [cmuxIdentify(cmuxFocus(workspace: "ws-1", surface: "panel-A"))],
+                sidebars: [cmuxSidebar(cwd: "/work/a", focusedCWD: "/work/a", panel: "panel-A")]
+            )
+            let snapshot = try adapter.snapshot()
+            results.append(
+                check(
+                    "cmux C: 비활성 panel을 조회하지 않으므로 배경 경로가 표시를 바꿀 수 없다",
+                    adapter.records(in: snapshot).isEmpty && snapshot.terminals.count == 1,
+                    "terminals=\(snapshot.terminals.count) background=\(adapter.records(in: snapshot).count)"
+                )
+            )
+        } catch {
+            results.append(check("cmux C: 비활성 panel을 조회하지 않으므로 배경 경로가 표시를 바꿀 수 없다", false, "\(error)"))
+        }
+
+        // D: 전환 전 surface에 대한 늦은 응답은 버려진다.
+        do {
+            let (adapter, store, resolver, validator) = makeCmuxStore(
+                directories: ["/work/a", "/work/b"],
+                identifies: [
+                    cmuxIdentify(cmuxFocus(workspace: "ws-1", surface: "panel-A")),
+                    cmuxIdentify(cmuxFocus(workspace: "ws-2", surface: "panel-B", pane: "pane-2")),
+                ],
+                sidebars: [
+                    cmuxSidebar(cwd: "/work/a", focusedCWD: "/work/a", panel: "panel-A"),
+                    cmuxSidebar(cwd: "/work/b", focusedCWD: "/work/b", panel: "panel-B"),
+                ]
+            )
+            let firstSnapshot = try adapter.snapshot()
+            let firstRecord = adapter.focusedRecord(in: firstSnapshot)
+            TerminalHostSnapshotApplier.apply(firstSnapshot, adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let staleGeneration = store.focusGeneration
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let late = firstRecord.map { store.apply(PaneObservation(generation: staleGeneration, record: $0)) }
+            results.append(
+                check(
+                    "cmux D: 전환 전 surface의 늦은 응답은 최종 선택을 덮어쓰지 않는다",
+                    late == .discardedStale
+                        && store.current?.identity.paneID == "panel-B"
+                        && store.current?.reportedCWD == "/work/b",
+                    "outcome=\(late.map(String.init(describing:)) ?? "nil") current=\(store.current?.identity.paneID ?? "-")"
+                )
+            )
+        } catch {
+            results.append(check("cmux D: 전환 전 surface의 늦은 응답은 최종 선택을 덮어쓰지 않는다", false, "\(error)"))
+        }
+
+        // E: cmux가 최전면이 아니면 마지막으로 확인한 대상을 "유지 중"으로 구분한다.
+        do {
+            let frontmost = StubFrontmostApp(true)
+            let (adapter, store, resolver, validator) = makeCmuxStore(
+                directories: ["/work/a"],
+                identifies: [
+                    cmuxIdentify(cmuxFocus(workspace: "ws-1", surface: "panel-A")),
+                    cmuxIdentify(cmuxFocus(workspace: "ws-1", surface: "panel-A")),
+                ],
+                sidebars: [
+                    cmuxSidebar(cwd: "/work/a", focusedCWD: "/work/a", panel: "panel-A"),
+                    cmuxSidebar(cwd: "/work/a", focusedCWD: "/work/a", panel: "panel-A"),
+                ],
+                frontmost: frontmost
+            )
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let wasTracked = store.current?.focusStatus == .tracked
+            frontmost.value = false
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            results.append(
+                check(
+                    "cmux E: 최전면이 아니면 마지막으로 확인한 대상을 유지 중으로 구분한다",
+                    wasTracked && store.current?.focusStatus == .held
+                        && store.current?.reportedCWD == "/work/a"
+                        && store.current?.hostFrontmost == false,
+                    "tracked=\(wasTracked) focus=\(store.current?.focusStatus.rawValue ?? "-")"
+                )
+            )
+        } catch {
+            results.append(check("cmux E: 최전면이 아니면 마지막으로 확인한 대상을 유지 중으로 구분한다", false, "\(error)"))
+        }
+
+        // F-1: 포커스된 panel이 터미널이 아니면 이전 경로를 현재 대상처럼 남기지 않는다.
+        do {
+            let (adapter, store, resolver, validator) = makeCmuxStore(
+                directories: ["/work/a"],
+                identifies: [
+                    cmuxIdentify(cmuxFocus(workspace: "ws-1", surface: "panel-A")),
+                    cmuxIdentify(cmuxFocus(workspace: "ws-1", surface: "browser-A", type: "browser", browser: true)),
+                ],
+                sidebars: [
+                    cmuxSidebar(cwd: "/work/a", focusedCWD: "/work/a", panel: "panel-A"),
+                    cmuxSidebar(cwd: "/work/a", focusedCWD: nil, panel: "browser-A"),
+                ]
+            )
+            let firstSnapshot = try adapter.snapshot()
+            let firstRecord = adapter.focusedRecord(in: firstSnapshot)
+            TerminalHostSnapshotApplier.apply(firstSnapshot, adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let generationBefore = store.focusGeneration
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            let reason = store.lastFailure ?? ""
+            results.append(
+                check(
+                    "cmux F: 터미널이 아닌 panel로 가면 이전 경로를 현재 대상처럼 남기지 않는다",
+                    store.current?.reportedCWD == nil && store.current?.pathStatus == .pending
+                        && store.current?.identity.paneID == "-"
+                        && store.previous?.reportedCWD == "/work/a"
+                        && reason.contains("not a terminal"),
+                    "current=\(store.current?.identity.paneID ?? "-")/\(store.current?.reportedCWD ?? "nil") previous=\(store.previous?.reportedCWD ?? "nil")"
+                )
+            )
+            if let firstRecord {
+                let late = store.apply(PaneObservation(generation: generationBefore, record: firstRecord))
+                results.append(
+                    check(
+                        "cmux F: 터미널이 아닌 panel로 간 뒤 이전 대상의 늦은 응답이 되살아나지 않는다",
+                        late == .discardedStale && store.current?.reportedCWD == nil,
+                        "outcome=\(late) current=\(store.current?.reportedCWD ?? "nil")"
+                    )
+                )
+            }
+        } catch {
+            results.append(check("cmux F: 터미널이 아닌 panel로 가면 이전 경로를 현재 대상처럼 남기지 않는다", false, "\(error)"))
+        }
+
+        // F-2: focused_panel이 선택된 surface와 다르면 그 경로를 인정하지 않는다.
+        do {
+            let (adapter, store, resolver, validator) = makeCmuxStore(
+                directories: ["/work/other"],
+                identifies: [cmuxIdentify(cmuxFocus(workspace: "ws-1", surface: "panel-A"))],
+                sidebars: [cmuxSidebar(cwd: "/work/a", focusedCWD: "/work/other", panel: "panel-Z")]
+            )
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            results.append(
+                check(
+                    "cmux F: focused_panel이 선택된 surface와 다르면 경로를 인정하지 않는다",
+                    store.current?.reportedCWD == nil && store.current?.pathStatus == .unsupported
+                        && store.current?.cwdSource == nil,
+                    "path=\(store.current?.reportedCWD ?? "nil") validity=\(store.current?.pathStatus.rawValue ?? "-")"
+                )
+            )
+        } catch {
+            results.append(check("cmux F: focused_panel이 선택된 surface와 다르면 경로를 인정하지 않는다", false, "\(error)"))
+        }
+
+        // F-3: 연결 실패는 경로 없이 구분하고, 사유는 cmux라고 말한다.
+        do {
+            let probe = GhosttyProbe(
+                adapter: CmuxAdapter(client: StubCmuxQueries(failure: .notRunning), frontmost: StubFrontmostApp(false)),
+                validator: StubValidator(directories: [])
+            )
+            probe.refresh()
+            let failure = probe.store.lastFailure ?? ""
+            results.append(
+                check(
+                    "cmux F: 연결 실패는 경로 없이 구분하고 사유에 cmux라고 표시한다",
+                    probe.store.connection == .unavailable && probe.store.current == nil
+                        && failure.contains("cmux") && !failure.contains("Ghostty"),
+                    "connection=\(probe.store.connection.rawValue) failure=\(failure)"
+                )
+            )
+        }
+
+        // F-4: 해석할 수 없는 응답을 경로로 바꾸지 않는다.
+        do {
+            var rejected = false
+            do {
+                _ = try CmuxIdentify.parse(Data("not json".utf8))
+            } catch {
+                rejected = true
+            }
+            let empty = CmuxSidebarState.parse("cwd=/work/a\nfocused_cwd=none\nfocused_panel=\n")
+            results.append(
+                check(
+                    "cmux: 해석할 수 없는 응답과 빈 값을 경로로 만들지 않는다",
+                    rejected && empty.focusedCWD == nil && empty.focusedPanel == nil && empty.cwd == "/work/a",
+                    "rejected=\(rejected) focused_cwd=\(empty.focusedCWD ?? "nil") panel=\(empty.focusedPanel ?? "nil")"
+                )
+            )
+        }
+
+        // 회귀: Ghostty는 이 신호를 주지 않으므로 새 규칙이 Ghostty의 대상을 지우면 안 된다.
+        do {
+            let panel = [(window: "win-1", tab: "tab-1", id: "term-A", wd: "/work/a", name: "a" as String?)]
+            let (adapter, store, resolver, validator) = makeGhosttyStore(
+                directories: ["/work/a"],
+                outputs: [
+                    hostOutput(focused: "term-A", terminals: panel),
+                    hostOutput(frontWindow: "win-9", selectedTab: "tab-9", focused: nil, terminals: panel),
+                ]
+            )
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            TerminalHostSnapshotApplier.apply(try adapter.snapshot(), adapter: adapter, store: store, resolver: resolver, validator: validator)
+            results.append(
+                check(
+                    "회귀: Ghostty는 대상이 없어도 새 규칙으로 대상을 지우지 않는다",
+                    store.current?.identity.paneID == "term-A" && store.current?.reportedCWD == "/work/a"
+                        && store.targetPaneID == "term-A",
+                    "current=\(store.current?.identity.paneID ?? "-")/\(store.current?.reportedCWD ?? "nil")"
+                )
+            )
+        } catch {
+            results.append(check("회귀: Ghostty는 대상이 없어도 새 규칙으로 대상을 지우지 않는다", false, "\(error)"))
+        }
 
         return results
     }

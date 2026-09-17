@@ -19,6 +19,7 @@ focus-probe — PaneDock 검증용 진단 프로토타입
   focus-probe [--once] [--json] [--interval <ms>]
   focus-probe --watch [--interval <ms>] [--json]
   focus-probe --self-test
+  focus-probe --adapter cmux [--once|--watch] [--json]   (실험)
   focus-probe --adapter herdr [--once] [--socket <path>] [--caller]   (실험)
 
 모드:
@@ -27,7 +28,7 @@ focus-probe — PaneDock 검증용 진단 프로토타입
   --self-test   연동 없이 결정적 검사를 실행한다
 
 옵션:
-  --adapter <name>  ghostty(기본, 정상 경로) | herdr(실험, 지원 범위 밖)
+  --adapter <name>  ghostty(기본, 정상 경로) | cmux(실험) | herdr(실험, 지원 범위 밖)
   --interval <ms>   --watch 재조회 주기 (기본 1000)
   --json            기계 판독용 JSON 출력
   --socket <path>   herdr 소켓 경로 (--adapter herdr 전용)
@@ -43,10 +44,21 @@ focus-probe — PaneDock 검증용 진단 프로토타입
   대상 terminal에서 herdr/tmux 같은 중첩 TUI가 돌고 있으면 보고되는 경로는
   바깥 프로세스의 cwd이며 그 TUI의 내부 프로젝트 경로가 아니다.
   공식 조회로 중첩 여부를 확실히 판별할 수 없으므로 자동 감지하지 않는다.
+
+cmux (실험):
+  cmux는 공식 소켓 API로 선택된 surface와 그 경로를 제공한다. 이 도구는 공식 CLI의
+  **읽기 명령 두 개만** 실행한다(identify, sidebar-state). workspace·pane·surface를
+  만들거나 포커스를 바꾸지 않고, 앱을 활성화하지도 않는다.
+  경로는 sidebar-state의 focused_cwd에서만 온다. 같은 응답의 cwd는 workspace 요약이므로
+  쓰지 않는다. focused_panel이 선택된 surface와 다르면 경로를 인정하지 않는다.
+  AppleScript는 쓰지 않는다 — 사전은 있지만 객체 모델이 응답하지 않는다(V11 실측).
+  cmux가 실행 중이어야 하고, 소켓 접근 모드가 허용해야 한다(이 도구는 설정을 바꾸지 않는다).
+  비활성 panel의 경로를 읽는 공식 방법이 없어 배경 관측은 하지 않는다.
 """
 
 private enum AdapterKind: String {
     case ghostty
+    case cmux
     case herdr
 }
 
@@ -81,7 +93,7 @@ private func parse(_ arguments: [String]) -> Options? {
         case "--adapter":
             index += 1
             guard index < arguments.count, let kind = AdapterKind(rawValue: arguments[index]) else {
-                FileHandle.standardError.write(Data("--adapter requires ghostty|herdr\n".utf8))
+                FileHandle.standardError.write(Data("--adapter requires ghostty|cmux|herdr\n".utf8))
                 exit(2)
             }
             options.adapter = kind
@@ -130,16 +142,22 @@ if options.selfTest {
 }
 
 switch options.adapter {
-case .ghostty:
-    let adapter = GhosttyAdapter()
+case .ghostty, .cmux:
+    // 두 앱 모두 공식 AppleScript 사전만 쓴다. 스키마·파서·반영 코드를 공유한다.
+    let adapter: TerminalHostAdapter = options.adapter == .cmux ? CmuxAdapter() : GhosttyAdapter()
+    if options.adapter == .cmux {
+        FileHandle.standardError.write(
+            Data("warning: --adapter cmux is experimental. Read-only socket CLI (identify, sidebar-state).\n".utf8)
+        )
+    }
 
     if options.watch {
         if !options.json {
-            emit("focus-probe watch — adapter ghostty (로컬 GUI Ghostty)")
-            emit("Ghostty에서 pane/탭을 전환하거나 대상 셸에서 cd 하면 아래가 갱신된다. 종료는 Ctrl-C.")
+            emit("focus-probe watch — adapter \(adapter.appName) (로컬 GUI \(adapter.appName))")
+            emit("\(adapter.appName)에서 패널/workspace를 전환하거나 대상 셸에서 cd 하면 아래가 갱신된다. 종료는 Ctrl-C.")
         }
-        GhosttyWatchProbe(
-            adapter: adapter,
+        WatchProbe(
+            probe: GhosttyProbe(adapter: adapter),
             intervalMilliseconds: options.intervalMilliseconds,
             json: options.json
         ).run()

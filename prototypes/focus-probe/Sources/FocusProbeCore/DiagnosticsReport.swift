@@ -81,6 +81,11 @@ public enum DiagnosticsReport {
             if let protocolVersion = snapshot.protocolVersion {
                 return "connected          protocol \(protocolVersion) (expected \(snapshot.expectedProtocolVersion)) version \(snapshot.serverVersion ?? "-")"
             }
+            // 전송 수단을 그대로 밝힌다. AppleScript와 소켓을 같은 문구로 뭉치면
+            // 어느 경로로 읽었는지 진단에서 알 수 없다.
+            if info.identity.adapterID == CmuxAdapter.adapterID {
+                return "connected          cmux socket CLI (identify + sidebar-state)"
+            }
             return "connected          AppleScript (\(info.identity.hostAppID) \(snapshot.hostVersion ?? "-"))"
         case .unavailable:
             let detail = snapshot.socketPath == "-" ? "(앱 미실행 또는 조회 실패)" : snapshot.socketPath

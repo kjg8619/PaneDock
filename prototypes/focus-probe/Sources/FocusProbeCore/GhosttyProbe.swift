@@ -1,8 +1,11 @@
 import Foundation
 
-/// Ghostty 조회 → 상태 반영 → 진단 묶음 생성.
+/// AppleScript 터미널 앱 조회 → 상태 반영 → 진단 묶음 생성.
 ///
 /// CLI와 GUI가 **같은 코드**를 쓴다. UI가 별도 추적 로직을 갖지 않는다.
+///
+/// **이름은 Ghostty지만 Adapter 중립이다.** GUI(`DockModel`)가 이 타입 이름을 쓰고 있어
+/// 이름만 유지한다. Ghostty와 cmux가 같은 경로를 공유한다(`TerminalHostAdapter`).
 ///
 /// **동시성 계약:** 이 클래스는 스레드 안전하지 않다. 호출자가 **하나의 직렬 큐에 가둬서**
 /// 접근해야 한다. GUI는 `pane-dock.probe` 큐에서만 만지고 결과 값만 메인으로 넘긴다.
@@ -14,7 +17,7 @@ public final class GhosttyProbe: @unchecked Sendable {
         case changed
     }
 
-    public let adapter: GhosttyAdapter
+    public let adapter: TerminalHostAdapter
     public let resolver: FocusResolver
     public let store: ContextStore
 
@@ -24,7 +27,7 @@ public final class GhosttyProbe: @unchecked Sendable {
     private var lastTargetPaneID: String?
     private var hasObserved = false
 
-    public init(adapter: GhosttyAdapter, validator: PathValidating = FileSystemPathValidator()) {
+    public init(adapter: TerminalHostAdapter, validator: PathValidating = FileSystemPathValidator()) {
         self.adapter = adapter
         self.validator = validator
         self.resolver = FocusResolver()
@@ -43,16 +46,13 @@ public final class GhosttyProbe: @unchecked Sendable {
             let snapshot = try adapter.snapshot()
             hostVersion = snapshot.version
 
-            guard adapter.isVersionSupported(snapshot.version) else {
-                store.markConnectionLost(
-                    .incompatible,
-                    reason: "Ghostty AppleScript requires \(GhosttyAdapter.minimumVersion)+ (found \(snapshot.version ?? "-"))"
-                )
+            if let reason = adapter.unsupportedVersionReason(snapshot.version) {
+                store.markConnectionLost(.incompatible, reason: reason)
                 return .unchanged
             }
             store.noteConnection(.connected)
 
-            let result = GhosttySnapshotApplier.apply(
+            let result = TerminalHostSnapshotApplier.apply(
                 snapshot,
                 adapter: adapter,
                 store: store,
@@ -66,13 +66,17 @@ public final class GhosttyProbe: @unchecked Sendable {
             hasObserved = true
             lastTargetPaneID = result.target?.terminalID
             return outcome
-        } catch let failure as GhosttyQueryError {
+        } catch let failure as TerminalHostQueryFailure {
+            let text = failure.diagnosticText(
+                appName: adapter.appName,
+                requirement: adapter.appleScriptRequirement
+            )
             if failure.connectionStatus == .connected {
                 // 창이 없는 경우. 연결은 정상이고 대상만 없다.
                 store.noteConnection(.connected)
-                store.noteFailure(failure.diagnosticText)
+                store.noteFailure(text)
             } else {
-                store.markConnectionLost(failure.connectionStatus, reason: failure.diagnosticText)
+                store.markConnectionLost(failure.connectionStatus, reason: text)
             }
             return .unchanged
         } catch {

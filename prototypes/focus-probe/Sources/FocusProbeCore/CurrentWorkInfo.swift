@@ -10,6 +10,12 @@ import Foundation
 public enum CWDSource: String, Codable, Sendable, CaseIterable {
     /// Ghostty AppleScript `working directory`. terminal(surface)의 live pwd.
     case ghosttyWorkingDirectory = "ghostty:terminal.workingDirectory"
+    /// cmux `sidebar-state`의 `focused_cwd`. **포커스된 panel의 경로**다.
+    ///
+    /// 같은 응답의 `cwd`는 **workspace 요약**이므로 쓰지 않는다.
+    /// 두 값을 합치지 않는 이유: 요약 경로를 선택된 panel의 경로로 표시하면
+    /// 사용자가 보는 위치와 실제 pane의 위치가 달라진다.
+    case cmuxFocusedCWD = "cmux:sidebar-state.focused_cwd"
     case paneCWD = "herdr:pane.cwd"
     case foregroundCWD = "herdr:pane.foreground_cwd"
 }

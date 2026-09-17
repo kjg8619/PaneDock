@@ -28,6 +28,18 @@ public final class FocusResolver {
         return generation
     }
 
+    /// 대상이 사라졌을 때 호출한다(예: cmux에서 터미널이 아닌 패널로 포커스가 옮겨간 경우).
+    ///
+    /// 세대를 올려 **이전 대상에 대한 늦은 응답이 현재 대상으로 되살아나지 않게** 한다.
+    /// 대상이 없던 상태에서 다시 호출해도 세대는 그대로다.
+    @discardableResult
+    public func clearTarget() -> UInt64 {
+        guard targetPaneID != nil else { return generation }
+        targetPaneID = nil
+        generation += 1
+        return generation
+    }
+
     /// 응답이 현재 포커스에 대한 것인지 판정한다.
     public func accepts(generation observationGeneration: UInt64, paneID: String) -> Bool {
         observationGeneration == generation && paneID == targetPaneID

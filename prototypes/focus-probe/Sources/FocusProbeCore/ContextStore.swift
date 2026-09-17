@@ -145,4 +145,16 @@ public final class ContextStore {
         resolver.invalidateForReconnect()
         noteConnection(.connected)
     }
+
+    /// 포커스는 확인됐지만 **그 대상의 정보를 만들 수 없을 때**(예: 터미널이 아닌 패널).
+    ///
+    /// 이전 대상을 현재 대상처럼 남기지 않는다. 이전 값은 `previous`로만 옮기고,
+    /// 표시 묶음은 "확인 중"(`unresolved`)으로 되돌린다. 경로를 추측으로 채우지 않는다.
+    /// `lastFailure`에 사유가 있으면 화면의 detail 줄에 그대로 드러난다.
+    public func markTargetUnknown() {
+        guard let existing = current else { return }
+        previous = existing
+        resolver.clearTarget()
+        current = factory.unresolvedWorkInfo(generation: resolver.generation, connection: connection)
+    }
 }
