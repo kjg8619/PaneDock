@@ -323,7 +323,16 @@ struct DockView: View {
     }
 
     /// 소스·짧은 상태. 상세 정보는 상세 보기로 보낸다.
+    ///
+    /// **아이콘 중심 모드에서 마우스를 올린 항목은 이름을 여기에 띄운다.**
+    /// 라벨을 숨긴 항목을 확인할 수 있는 수단이다(툴팁과 함께 제공).
     private var secondaryLine: String {
+        if !model.effectiveAppearance.labelMode.showsItemLabels,
+           case .item(let index) = model.hoveredItem,
+           model.resolution.allItems.indices.contains(index) {
+            let item = model.resolution.allItems[index]
+            return "\(item.kind.label) · \(item.name)"
+        }
         var parts: [String] = []
         if let host = model.state.hostAppID { parts.append(host) }
         if let folder = model.state.fullPath.map(URL.init(fileURLWithPath:)) {
