@@ -2949,6 +2949,112 @@ V16.1의 `a0fbb8de32011c1b`는 **V16.7·V16.8 이전** 값이다(그 뒤 커밋 
 **이탈 판단 방식:** 0.2초 주기로 `panel.frame.contains(NSEvent.mouseLocation)`만 본다.
 창이 숨겨져 있으면 기준값을 버려(`wasMouseInside = nil`) **숨긴 Dock을 마우스 움직임으로 다시 띄우지 않는다.**
 
+### V17.9 기록 정정 — V17.4의 추적 이벤트 서술 (근거 없음)
+
+V17.4에 "마우스 추적이 동작함: `mouse=entered`/`mouse=exited` 이벤트 발생 ✓"라고 적었다.
+그러나 그 시점의 실행 기록에는 **그 이벤트가 남지 않았다**(같은 세션의 출력이 `이벤트: []`였다).
+V17.5~V17.6의 "이벤트를 받지 못한다"가 실제 상태였고, V17.4의 한 줄은 **근거 없는 서술**이다.
+
+| 항목 | 사실 |
+| --- | --- |
+| 어느 빌드였나 | `@objc` 추가 **전** 빌드(추적 영역 방식). 그 실행에서 추적 이벤트는 로그에 없었다 |
+| 무엇을 봤나 | 차단 사유 로그(`reason=mouse-inside`)와 창 프레임뿐이다 — **이벤트 수신의 근거가 아니다** |
+| 실제로 이벤트가 남은 때 | **폴링 방식으로 교체한 뒤**(`136af55`) — `mouse=exited`가 로그에 남는다 |
+| 정정 | V17.4의 그 줄은 **미확인으로 되돌린다**. 기존 줄은 지우지 않고 이 절에서 정정한다 |
+
+### V17.10 실제 입력 → 창 변화까지 (V17.8 완결, 2026-09-18)
+
+**실행본:** HEAD `136af55` · 번들 `e32b2379dd9ba1f6`(소스와 일치) · 자체 검사 **139/139**.
+자동 접기 + 아이콘 중심 + 크게(92pt) + 임시 설정·임시 카탈로그.
+
+#### 트리거 경로 — 단계별로 전부 도달했다
+
+```
+mouse=exited
+collapse result=collapsing
+collapse state=collapsed
+layout want=168x30 frame=1054x92 origin=(300,150) details=false panelAppearance=nil
+layout result=resized frame=168x30 origin=(300,150)
+```
+
+| 단계 | 관측 |
+| --- | --- |
+| 이탈 감지 | `mouse=exited` (0.2초 주기 위치 확인) |
+| 차단 조건 검사 | 차단 없음 → `collapse result=collapsing` (마우스 위·상세 열림이면 `reason=…`만 남고 접지 않는다) |
+| 타이머 예약 → 실행 | 이탈 후 **0.92초**에 실행(기준 1초) |
+| 접힘 상태 적용 | `collapse state=collapsed` |
+| **실제 창 프레임** | `1054x92` → **`168x30`**, 기준 위치 `(300,150)` 유지 · 캡처 `V178-collapsed.png` |
+
+**최소 크기 제한:** `panel.minSize`가 작게 모드 높이(64)였고 손잡이(30)보다 컸다 → 손잡이 기준으로 낮췄다(잠재 클램프 제거).
+낮추기 전에도 실제 프레임은 `168x30`이었다(비활성 패널에서 `setFrame`이 minSize에 막히지 않음).
+
+#### 손잡이 재호출
+
+| 확인 | 결과 |
+| --- | --- |
+| 마우스를 손잡이에 올림 | **`1054x92`로 펼쳐짐**, `collapse state=expanded` · 캡처 `V178-expanded.png` |
+| 호출 세션·포커스 | **`invoke` 이벤트 없음** ✓ (키보드 선택 세션을 시작하지 않는다) |
+| 항목 위로 이동 | 이동 중 **`collapse` 이벤트 없음** ✓ (펼쳐진 뒤 다시 접히지 않는다) |
+| 3회 반복 | 하단 좌표 **832 / 832 / 832 / 832 / 832 / 832** — 누적 이동 없음 ✓ |
+| 저장 위치 | 임시 설정의 `windowOrigin (300,150)` 그대로 ✓ (프로그램 변경을 사용자 위치로 저장하지 않음) |
+
+#### 클릭 영역
+
+접힌 뒤 **옛 바가 있던 빈 영역**(접힌 창 밖)을 클릭 → 도크 이벤트 **없음** ✓, 창은 `168x30` 유지 ✓.
+보이지 않는 큰 클릭 영역이 남지 않는다(창 자체가 168x30으로 줄어든다).
+
+#### 이번에 확보하지 못한 것 (완료로 기록하지 않음)
+
+| 항목 | 상태 |
+| --- | --- |
+| 항목 선택 → 실행 | 이번 클릭이 칩에 닿지 않아 `activate` 로그를 얻지 못했다(실행 경로 자체는 V15·V16에서 확인한 그대로) |
+| 명시적 숨김 → hover/타이머가 다시 띄우지 않음 | 숨기기 버튼 좌표가 빗나가 **숨김이 일어나지 않았다**(그 사이 자동 접힘만 일어남) — 미확인 |
+| 메뉴/단축키 호출 복구 | 합성 단축키가 앱에 도달하지 않는다. **사람의 실제 ⌃⌥⌘D 입력 1회**가 필요 |
+| 아이콘 중심 키보드 선택·실행 | 위와 같은 이유로 미확인(V16.9 잔여) |
+| 상세 보기·편집창·메뉴 중 접기 차단 | 상세 보기는 확인(`reason=details-open`), 편집창·메뉴는 이번 실행에서 만들지 않았다 |
+| 접힌 동안 프로젝트 변경 → 펼칠 때 대상 일치 | `--fake toggle`로 조회는 계속 갱신됨을 확인했으나 **대상이 바뀌는 조건을 만들지 못해 약한 근거**뿐이다 |
+
+### V17.11 키보드 호출 경로 (사용자 확인, 2026-09-18)
+
+**증상(사용자 보고):** Dock에 포커스가 잡혀 있는데 **Tab·Enter·Esc가 먹지 않는다.**
+
+**원인(코드 결함, 확인):** 키 모니터가 `panel.isKeyWindow == true`일 때만 키를 처리했는데,
+패널에 `becomesKeyOnlyIfNeeded = true`가 걸려 있어 **`makeKeyAndOrderFront`가 무시되고 패널이 키 윈도가 되지 않았다.**
+→ 모든 키가 `guard`에서 되돌아갔다.
+
+**수정(2곳):**
+
+```swift
+panel.becomesKeyOnlyIfNeeded = false   // 명시적 호출(단축키·메뉴)에서 실제로 키 윈도가 된다
+guard self.panel?.isVisible == true, self.editorWindow?.isVisible != true else { return event }
+```
+
+키 모니터 조건을 `isKeyWindow` → **"우리 패널이 보이고 편집창이 아닐 때"** 로 바꿨다(편집창의 Tab·Enter를 빼앗지 않게).
+**hover로 펼치는 경로는 `makeKey`를 부르지 않으므로 입력 포커스를 빼앗지 않는 원칙은 그대로다.**
+
+**확인(사용자, 새 빌드 `c6cbdfdb13068ee0`):** 접힘 → **⌃⌥⌘D** 펼침 → **Tab** 선택 이동 → **Enter** 실행 → **Esc** 닫기 — **모두 동작함**을 사용자가 확인했다.
+
+**로그(임시 설정·임시 카탈로그):**
+
+```
+collapse state=collapsed
+collapse result=blocked reason=already-collapsed
+collapse state=expanded
+invoke frozenFrontmost=true focus=item:0 target=/tmp
+focus=item:1
+collapse result=blocked reason=keyboard-session
+focus=item:2
+focus=item:3
+focus=openFolder
+focus=copyPath
+focus=lock
+focus=more
+activate control=more source=keyboard
+collapse result=blocked reason=keyboard-session
+```
+
+**부수 정리:** 진단용 `--invoke` 플래그는 추가했다가 **되돌렸다**(빌드를 깨뜨렸고 본질이 아니었다).
+
 ### V17.7 보존 확인
 
 | 규칙 | 상태 |

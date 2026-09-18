@@ -358,15 +358,18 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         panel.title = options.isFake ? "[FAKE] PaneDock" : "PaneDock"
         panel.isFloatingPanel = true
         panel.level = .floating
-        panel.becomesKeyOnlyIfNeeded = true
+        // 명시적 호출에서 키보드 조작(Tab/Enter/Esc)을 받으려면 **키 윈도가 되어야 한다**.
+        // hover로 펼치는 경로는 makeKey를 부르지 않으므로 입력 포커스를 빼앗지 않는다.
+        panel.becomesKeyOnlyIfNeeded = false
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         // 색상 모드는 **창을 만들 때도** 적용한다(레이아웃이 일어나야 적용되면 시작 화면이 시스템 색으로 남는다).
         panel.appearance = Self.panelAppearance(for: model.effectiveAppearance.colorMode)
-        // 최소 크기는 **가장 작은 외형**을 기준으로 한다(작게 모드가 클램프되지 않게).
+        // 최소 크기는 **가장 작은 상태(호출 손잡이)** 를 기준으로 한다.
+        // 자동 접기가 최소 크기 제한에 막히지 않게 하고, 작게 모드도 클램프되지 않게 한다.
         panel.minSize = NSSize(
-            width: DockBarLayout.minimumBarWidth,
-            height: DockSizeSetting.small.barHeight
+            width: DockBarLayout.handleWidth,
+            height: DockBarLayout.handleHeight
         )
         // 배경 드래그를 끈다. 바의 전용 드래그 영역만 창을 옮긴다(버튼과 충돌하지 않는다).
         panel.isMovableByWindowBackground = false
@@ -651,7 +654,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, self.panel?.isKeyWindow == true else { return event }
+            guard let self, self.panel?.isVisible == true, self.editorWindow?.isVisible != true else { return event }
             return self.handleKey(event) ? nil : event
         }
     }
