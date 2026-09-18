@@ -23,6 +23,11 @@ public final class DockModeController {
 
     public private(set) var applied: DockAppliedState = .none
     public private(set) var isBusy = false
+    /// Custom 세션 동안 **계속 들고 있는 잠금**. 이 프로세스가 살아 있는 한 다른 인스턴스는 세션을 되돌릴 수 없다.
+    /// 프로세스가 죽으면 OS가 풀어 주므로 다음 실행에서 복구할 수 있다.
+    private var sessionHandle: DockLockHandle?
+    /// 이 인스턴스가 지금 Custom 세션을 소유하고 있는가.
+    public var ownsCustomSession: Bool { sessionHandle != nil || applied.isCustom }
     /// 잠금을 이어받았을 때 남긴 설명(화면·명령줄에서 안내).
     public private(set) var lastLockNote: String?
 
@@ -68,7 +73,11 @@ public final class DockModeController {
 
         let acquired = try acquireLock(operationID: operationID, purpose: "apply", moment: moment)
         notes.append(contentsOf: acquired.notes)
-        defer { releaseLock(acquired.handle, notes: &notes) }
+        // 실패 경로에서만 잠금을 푼다. **성공하면 세션 잠금으로 계속 들고 있는다**(아래 참고).
+        var keepSessionLock = false
+        defer {
+            if !keepSessionLock { releaseLock(acquired.handle, notes: &notes) }
+        }
 
         // 0) 바꿀 것이 0개여도 **기존 기록을 먼저 확인**한다.
         //    미완료·손상 기록이 있으면 그 파일이 사용자의 복구 수단이므로 새 작업을 시작하지 않는다.
@@ -159,8 +168,40 @@ public final class DockModeController {
         // 4) 적용 → 5) 확인
         var touched: [DockPreferenceKey] = []
         var appliedKeys: [String] = []
+        var restartPending = false
         do {
             for change in pending {
+                if !restartPending {
+                    // **첫 값 쓰기 전에** "재시작이 필요하다"를 기록한다. 이 시점 이후 어디서 중단돼도
+                    // 다음 실행이 반영(재시작) 단계를 건너뛰지 않는다.
+                    restartPending = true
+                    if !pending.isEmpty {
+                        switch recovery.update(
+                            DockRecoveryRecord(
+                                operationID: operationID,
+                                mode: record.mode,
+                                appliedAt: record.appliedAt,
+                                updatedAt: now(),
+                                suppression: record.suppression,
+                                entries: record.entries,
+                                ownerPID: record.ownerPID,
+                                bootID: record.bootID,
+                                restartPending: true
+                            )
+                        ) {
+                        case .written:
+                            log("dockmode apply progress=restart-pending")
+                        case .refusedPendingRestore(let keys):
+                            notes.append("진행 기록 실패(다른 작업): \(keys.joined(separator: ","))")
+                        case .refusedUnreadable(let reason):
+                            notes.append("진행 기록 실패(읽을 수 없음): \(reason)")
+                        case .failed(let reason):
+                            notes.append("진행 기록 실패: \(reason)")
+                        case .noPath:
+                            notes.append("진행 기록 실패: 경로 없음")
+                        }
+                    }
+                }
                 // **쓰기 시도 전에** 되돌릴 목록에 넣는다. 값이 바뀐 뒤 오류를 던지는 구현에서도
                 // 그 키가 되돌리기에서 빠지지 않는다.
                 touched.append(change.key)
@@ -176,20 +217,43 @@ public final class DockModeController {
                 appliedKeys.append(change.key.label)
             }
             try system.restartDock()
+            restartPending = false
         } catch {
             let rollback = rollback(touched: touched, record: record)
             notes.append(contentsOf: rollback.notes)
             if rollback.failed.isEmpty {
                 // 값 확인까지 끝난 되돌리기만 성공으로 본다.
-                if !pending.isEmpty {
-                    let clear = recovery.clear(operationID: operationID)
-                    if !clear.isClean {
-                        let reason = clear.failureReason ?? "-"
-                        notes.append("복구 기록 정리 실패: \(reason)")
-                        log("dockmode apply cleanup=failed reason=\(reason)")
-                    }
+                // **적용과 같은 완료 기준**: 반영(재시작)까지 확인돼야 끝난 것으로 본다.
+                var reflected = false
+                do {
+                    try system.restartDock()
+                    reflected = true
+                } catch {
+                    notes.append("되돌림 반영 재시작 실패: \(Self.describe(error))")
+                    log("dockmode apply rollback-restart=failed")
                 }
-                log("dockmode apply result=rolledback keys=\(rollback.verified.count)")
+                if reflected {
+                    if !pending.isEmpty {
+                        let clear = recovery.clear(operationID: operationID)
+                        if !clear.isClean {
+                            let reason = clear.failureReason ?? "-"
+                            notes.append("복구 기록 정리 실패: \(reason)")
+                            log("dockmode apply cleanup=failed reason=\(reason)")
+                        }
+                    }
+                    log("dockmode apply result=rolledback keys=\(rollback.verified.count) restart=ok")
+                } else {
+                    // 값은 돌아갔지만 반영이 안 됐다 — **기록을 남겨 다음 실행이 재시작을 이어받는다.**
+                    _ = writeProgress(
+                        record: record,
+                        entries: [],
+                        restartPending: true,
+                        locked: acquired.handle,
+                        info: acquired.info,
+                        notes: &notes
+                    )
+                    log("dockmode apply result=rolledback restart=pending")
+                }
                 throw DockModeError.applyFailed(step: Self.stepName(error), reason: Self.describe(error))
             }
             // 되돌리지 못한 키가 있다 — **기록을 남긴다**(그 키들만).
@@ -206,7 +270,9 @@ public final class DockModeController {
                     return copy
                 },
                 ownerPID: record.ownerPID,
-                bootID: record.bootID
+                bootID: record.bootID,
+                // 되돌림도 **같은 완료 기준**을 쓴다: 값이 돌아갔더라도 재시작이 반영돼야 끝난 것이다.
+                restartPending: restartPending
             )
             switch recovery.update(updated) {
             case .written:
@@ -229,7 +295,24 @@ public final class DockModeController {
         }
 
         applied = .custom(appliedAt: moment, suppression: suppressionApproved)
-        log("dockmode apply result=ok keys=\(appliedKeys.count) op=\(operationID.prefix(8))")
+        // 적용이 끝났으니 '재시작 대기'를 해제한다.
+        _ = recovery.update(
+            DockRecoveryRecord(
+                operationID: operationID,
+                mode: record.mode,
+                appliedAt: record.appliedAt,
+                updatedAt: now(),
+                suppression: record.suppression,
+                entries: record.entries,
+                ownerPID: record.ownerPID,
+                bootID: record.bootID,
+                restartPending: false
+            )
+        )
+        // **세션 잠금을 계속 들고 있는다** — 다른 인스턴스·복구 CLI가 이 세션을 임시로 되돌리지 못하게.
+        keepSessionLock = true
+        sessionHandle = acquired.handle
+        log("dockmode apply result=ok keys=\(appliedKeys.count) op=\(operationID.prefix(8)) session-lock=held")
         return DockModeOutcome(
             applied: applied,
             changedKeys: appliedKeys,
@@ -255,9 +338,19 @@ public final class DockModeController {
         var notes: [String] = []
 
         // 잠금을 **먼저** 잡고, 그 안에서 기록을 읽고 판정하고 바꾼다(다른 인스턴스의 세션을 건드리지 않는다).
-        let acquired = try acquireLock(operationID: operationID, purpose: "restore", moment: moment)
+        // 우리가 Custom 세션을 소유하고 있으면 그 잠금을 **그대로 쓴다**(같은 프로세스에서 두 번 잡으면 충돌한다).
+        let acquired = try acquireLock(
+            operationID: operationID,
+            purpose: sessionHandle != nil ? "session-release" : "restore",
+            moment: moment,
+            reusing: sessionHandle
+        )
         notes.append(contentsOf: acquired.notes)
-        defer { releaseLock(acquired.handle, notes: &notes) }
+        // 완전히 끝났을 때만 세션 잠금을 놓는다(부분·실패는 우리가 계속 책임진다).
+        var keepSessionLock = sessionHandle != nil
+        defer {
+            if !keepSessionLock { releaseLock(acquired.handle, notes: &notes) }
+        }
         let lockInfo = acquired.info
 
         let loaded = recovery.loadResult()
@@ -281,6 +374,7 @@ public final class DockModeController {
             remaining.append(updated)
         }
 
+        var restartPendingNow = record.restartPending
         for entry in record.entries {
             let key = DockPreferenceKey(domain: entry.domain, name: entry.name)
             let appliedValue = entry.applied.asValue
@@ -312,6 +406,18 @@ public final class DockModeController {
             }
 
             var writeError: String?
+            if !restartPendingNow {
+                // **첫 값 쓰기 전에** 반영(재시작)이 필요하다고 기록한다 — 중단돼도 다음 실행이 이어받는다.
+                restartPendingNow = true
+                _ = writeProgress(
+                    record: record,
+                    entries: record.entries,
+                    restartPending: true,
+                    locked: acquired.handle,
+                    info: lockInfo,
+                    notes: &notes
+                )
+            }
             do {
                 if let original = entry.original {
                     try system.set(original.asValue, for: key)
@@ -357,8 +463,8 @@ public final class DockModeController {
         // 되돌린 키가 있거나 지난번 재시작이 남아 있으면 Dock을 한 번 다시 시작한다.
         let restoredCount = results.filter { $0.disposition == .restored }.count
         var restartPerformed = false
-        var restartPending = record.restartPending
-        if restoredCount > 0 || record.restartPending {
+        var restartPending = restartPendingNow
+        if restoredCount > 0 || restartPending {
             do {
                 try system.restartDock()
                 restartPerformed = true
@@ -396,6 +502,12 @@ public final class DockModeController {
                 log("dockmode restore cleanup=failed reason=\(reason)")
             } else {
                 log("dockmode restore result=complete restored=\(restoredCount)")
+            }
+            if kind == .complete {
+                // 세션이 끝났다: 잠금을 놓아 다른 인스턴스가 다음 작업을 할 수 있게 한다.
+                keepSessionLock = false
+                sessionHandle = nil
+                applied = .none
             }
         } else {
             let updated = DockRecoveryRecord(
@@ -497,7 +609,8 @@ public final class DockModeController {
     private func acquireLock(
         operationID: String,
         purpose: String,
-        moment: Date
+        moment: Date,
+        reusing existing: DockLockHandle? = nil
     ) throws -> (notes: [String], handle: DockLockHandle?, info: DockLockInfo) {
         let info = DockLockInfo(
             ownerPID: pid,
@@ -507,6 +620,12 @@ public final class DockModeController {
             recordedAt: moment
         )
         var notes: [String] = []
+        // 우리가 이미 세션 잠금을 들고 있으면 그것을 그대로 쓴다(내용만 갱신).
+        if let existing {
+            _ = existing.update(info)
+            lastLockNote = nil
+            return (notes, existing, info)
+        }
         let result = lock.attempt(info)
         switch result.kind {
         case .acquired:
@@ -541,6 +660,45 @@ public final class DockModeController {
         if !DockModeLock.isAlive(handle.operationID.isEmpty ? -1 : pid) {
             notes.append("잠금을 푼 뒤 프로세스 상태를 확인하지 못했습니다")
         }
+    }
+
+    /// 진행 상태를 기록한다(중단 대비). 실패는 **삼키지 않고** notes에 남긴다.
+    @discardableResult
+    private func writeProgress(
+        record: DockRecoveryRecord,
+        entries: [DockRecoveryRecord.Entry],
+        restartPending: Bool,
+        locked handle: DockLockHandle?,
+        info: DockLockInfo,
+        notes: inout [String]
+    ) -> Bool {
+        _ = handle?.update(info)
+        let updated = DockRecoveryRecord(
+            operationID: record.operationID,
+            mode: record.mode,
+            appliedAt: record.appliedAt,
+            updatedAt: now(),
+            suppression: record.suppression,
+            entries: entries,
+            ownerPID: record.ownerPID,
+            bootID: record.bootID,
+            restartPending: restartPending
+        )
+        switch recovery.update(updated) {
+        case .written:
+            log("dockmode progress=written restartPending=\(restartPending) entries=\(entries.count)")
+            return true
+        case .refusedPendingRestore(let keys):
+            notes.append("진행 기록 실패(다른 작업): \(keys.joined(separator: ","))")
+        case .refusedUnreadable(let reason):
+            notes.append("진행 기록 실패(읽을 수 없음): \(reason)")
+        case .failed(let reason):
+            notes.append("진행 기록 실패: \(reason)")
+        case .noPath:
+            notes.append("진행 기록 실패: 경로 없음")
+        }
+        log("dockmode progress=failed restartPending=\(restartPending)")
+        return false
     }
 
     // MARK: - 되돌리기

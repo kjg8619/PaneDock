@@ -26,6 +26,7 @@ focus-probe — PaneDock 검증용 진단 프로토타입
   --once        현재 대상 pane을 한 번 읽어 진단을 출력한다 (기본)
   --watch       변경을 따라가며 진단을 갱신한다
   --self-test   연동 없이 결정적 검사를 실행한다
+  --hold-lock <path> <ms>  (검사용) 그 경로에 배타 잠금을 잡고 잠시 유지한다
 
 옵션:
   --adapter <name>  ghostty(기본, 정상 경로) | cmux(실험) | herdr(실험, 지원 범위 밖)
@@ -84,6 +85,43 @@ private func parse(_ arguments: [String]) -> Options? {
             options.watch = true
         case "--self-test":
             options.selfTest = true
+        case "--hold-lock":
+            // 검사 전용: **다른 프로세스**가 잠금을 잡고 있는 상황을 실제로 만든다.
+            index += 1
+            guard index < arguments.count else {
+                FileHandle.standardError.write(Data("--hold-lock requires a path\n".utf8))
+                exit(2)
+            }
+            let path = arguments[index]
+            index += 1
+            let duration = index < arguments.count ? (Int(arguments[index]) ?? 2000) : 2000
+            let lock = DockModeLock(url: URL(fileURLWithPath: path))
+            let attempt = lock.attempt(
+                DockLockInfo(
+                    ownerPID: ProcessInfo.processInfo.processIdentifier,
+                    operationID: "cli-holder",
+                    purpose: "session",
+                    bootID: "cli",
+                    recordedAt: Date()
+                )
+            )
+            switch attempt.kind {
+            case .acquired:
+                print("hold-lock: acquired pid=\(ProcessInfo.processInfo.processIdentifier)")
+            case .heldByOther:
+                print("hold-lock: refused(heldByOther)")
+                exit(3)
+            case .failed:
+                print("hold-lock: failed \(attempt.reason ?? "-")")
+                exit(3)
+            case .noPath:
+                print("hold-lock: noPath")
+                exit(3)
+            }
+            fflush(stdout)
+            Thread.sleep(forTimeInterval: Double(duration) / 1000.0)
+            attempt.handle?.release()
+            exit(0)
         case "--json":
             options.json = true
         case "--caller":

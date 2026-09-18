@@ -275,7 +275,6 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         guard let controller = dockModeController else { return nil }
         do {
             let outcome = try controller.restoreToMacDock()
-            dockAppliedState = .none
             model?.appendEvent(
                 "dockmode restore reason=\(reason) kind=\(outcome.kind.rawValue) "
                     + "restored=\(outcome.count(.restored)) already=\(outcome.count(.alreadyOriginal)) "
@@ -285,19 +284,41 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             if !outcome.notes.isEmpty {
                 model?.appendEvent("dockmode restore notes=\(outcome.notes.joined(separator: " | "))")
             }
-            // Custom에서 나왔으니 **커스텀 패널과 입력 세션을 정리**한다.
-            endCustomSession(reason: reason)
+            applyRestoreOutcome(outcome, reason: reason)
             return outcome
         } catch let error as DockModeError {
-            dockAppliedState = .none
+            // 실패도 **정상 Mac Dock 복귀가 아니다**: 세션 상태를 유지하고 안내를 남긴다.
             model?.setActionMessage(error.message)
             model?.appendEvent("dockmode restore reason=\(reason) result=failed reason=\(error.message)")
-            endCustomSession(reason: reason)
+            model?.appendEvent("dockmode restore incomplete kind=error — 세션 유지(복구 안내 유지)")
             return nil
         } catch {
             model?.appendEvent("dockmode restore reason=\(reason) result=failed")
-            endCustomSession(reason: reason)
             return nil
+        }
+    }
+
+    /// 복원 결과를 화면·상태에 반영한다.
+    ///
+    /// - **완전 복원**만 정상 복귀로 본다: 세션 상태를 지우고 커스텀 화면·입력 세션을 정리한다.
+    /// - **부분·실패**는 세션을 유지하고 패널을 닫지 않는다(복구 안내·재시도 접근 유지).
+    private func applyRestoreOutcome(_ outcome: DockRestoreOutcome, reason: String) {
+        switch outcome.kind {
+        case .complete:
+            dockAppliedState = .none
+            endCustomSession(reason: reason)
+        case .nothingToDo:
+            // 되돌릴 것이 없었다 = 세션도 없다. 창 상태는 건드리지 않는다.
+            dockAppliedState = dockModeController?.ownsCustomSession == true ? dockAppliedState : .none
+        case .partial, .failed:
+            model?.appendEvent(
+                "dockmode restore incomplete kind=\(outcome.kind.rawValue) "
+                    + "userChanged=\(outcome.count(.userChanged)) removed=\(outcome.count(.keyRemoved)) "
+                    + "failed=\(outcome.count(.failed)) — 세션 유지"
+            )
+            if let applied = dockModeController?.applied, applied.isCustom {
+                dockAppliedState = applied
+            }
         }
     }
 
@@ -684,7 +705,8 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if let outcome = restoreSystemDock(reason: "quit") {
             // 복원 자체는 restoreSystemDock이 로그에 남긴다(여기서는 결과만 한 줄 덧붙인다).
             model?.appendEvent(
-                "dockmode quit-restore kind=\(outcome.kind.rawValue) left=\(outcome.recordLeft)"
+                "dockmode quit-restore kind=\(outcome.kind.rawValue) left=\(outcome.recordLeft) "
+                    + "(부분·실패는 다음 실행이 이어받는다)"
             )
         }
     }
@@ -1309,10 +1331,22 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         // 복원이 끝나지 않았으면 '적용 안 됨'이 아니라 **미완료**로 보여준다(정상 복귀와 구분).
         let pendingCount = recovery.record?.pendingKeyLabels.count ?? 0
         let statusTitle: String = {
-            if dockAppliedState.isCustom { return "적용 상태: \(dockAppliedState.label)" }
             switch recovery {
             case .record(let record) where record.hasPendingWork:
-                return "적용 상태: 복원 미완료(남은 항목 \(record.pendingKeyLabels.count))"
+                // **정상 복귀가 아니다**: 남은 이유를 나눠 보여준다.
+                var parts: [String] = []
+                let userChanged = record.entries.filter { $0.skipReason == DockRestoreDisposition.userChanged.rawValue }.count
+                let removed = record.entries.filter { $0.skipReason == DockRestoreDisposition.keyRemoved.rawValue }.count
+                let failed = record.entries.filter { $0.skipReason == DockRestoreDisposition.failed.rawValue }.count
+                let other = record.entries.count - userChanged - removed - failed
+                if userChanged > 0 { parts.append("사용자 변경 \(userChanged)") }
+                if removed > 0 { parts.append("사용자가 지운 키 \(removed)") }
+                if failed > 0 { parts.append("복원 실패 \(failed)") }
+                if other > 0 { parts.append("남은 키 \(other)") }
+                if record.restartPending { parts.append("재시작 대기") }
+                let detail = parts.isEmpty ? "" : "(\(parts.joined(separator: " · ")))"
+                let session = dockAppliedState.isCustom ? " · Custom 사용 중" : ""
+                return "적용 상태: 복원 미완료\(detail)\(session)"
             case .unreadable:
                 return "적용 상태: 복구 기록을 읽을 수 없음"
             case .none, .noPath, .record:
