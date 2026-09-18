@@ -10,8 +10,49 @@ import Foundation
 // 추적 로직은 FocusProbeCore를 그대로 쓴다(CLI 진단 도구와 같은 코드). 복제하지 않는다.
 // CLI의 사람이 읽는 출력 문자열을 파싱하지 않는다. 여기서는 값(DockState)만 다룬다.
 
+// Dock 복구는 GUI를 띄우지 않는다(비정상 종료 뒤에도 쓸 수 있는 수단).
+func renderDockRestoreResult(options: LaunchOptions) -> String {
+    let support = FileManager.default
+        .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+        .first?
+        .appendingPathComponent("PaneDock", isDirectory: true)
+    let store = DockRecoveryStore(url: support?.appendingPathComponent("dock-recovery.json"))
+    let controller = DockModeController(
+        system: SystemDockControl(),
+        recovery: store,
+        lock: DockModeLock(url: support?.appendingPathComponent("dock-mode.lock"))
+    )
+    switch controller.recoveryState() {
+    case .unreadable(let reason):
+        // 손상된 기록을 '없음'으로 뭉개지 않는다(복구 수단이 조용히 사라지면 안 된다).
+        return "dock restore: unreadable record (\(reason)) — " + (store.url?.path ?? "-") + " 파일을 지우지 않았습니다"
+    case .noPath:
+        return "dock restore: 복구 기록 경로가 없습니다(앱 지원 폴더를 만들 수 없음)"
+    case .none, .record:
+        break
+    }
+    if let record = controller.detectStaleRecord() {
+        do {
+            let outcome = try controller.restoreToMacDock()
+            return "dock restore: mode=\(record.mode) restored=\(outcome.changedKeys.count) "
+                + "skipped=\(outcome.skippedByUserChange.count) left=\(outcome.recoveryRecordLeft)"
+        } catch let error as DockModeError {
+            return "dock restore: failed reason=\(error.message)"
+        } catch {
+            return "dock restore: failed"
+        }
+    }
+    return "dock restore: nothing to restore (복구 기록 없음)"
+}
+
 guard let options = parseLaunchOptions(Array(CommandLine.arguments.dropFirst())) else {
     print(usageText)
+    exit(0)
+}
+
+// GUI 없이 실행하는 Dock 복구. **다시 Custom 모드로 들어가지 않는다.**
+if options.restoreDock {
+    print(renderDockRestoreResult(options: options))
     exit(0)
 }
 

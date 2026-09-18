@@ -42,6 +42,219 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private var keyMonitor: Any?
     private var pendingPositionSave: DispatchWorkItem?
     private var startupNotice = ""
+    /// 사용 모드 전환(적용·복원·감지)을 한 곳에서 관리한다.
+    private var dockModeController: DockModeController?
+    /// 화면에 표시할 **실제 적용 상태**(선택값과 구분한다).
+    private var dockAppliedState: DockAppliedState = .none
+    /// Custom 모드에서 하단 가장자리에 고정할 때 쓰는 기준(자유 좌표는 따로 보존한다).
+    private var customBottomAnchorY: CGFloat?
+
+    // MARK: - 사용 모드 (Mac Dock / Custom Dock)
+
+    /// 모드 컨트롤러를 만들고, 저장된 선택·동의에 따라 시작 시 상태를 맞춘다.
+    ///
+    /// - 저장된 `dockMode`가 없으면 **동의로 간주하지 않는다**(Mac Dock으로 시작).
+    /// - 이전 실행이 비정상 종료로 남긴 복구 기록이 있으면 **먼저 복원**하고, 감지 사실을 안내한다.
+    private func installDockMode(store: SettingsStore, model: DockModel) {
+        let support = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("PaneDock", isDirectory: true)
+        let isFake = options.isFake
+        let recovery = DockRecoveryStore(url: isFake ? nil : support?.appendingPathComponent("dock-recovery.json"))
+        let lock = DockModeLock(url: isFake ? nil : support?.appendingPathComponent("dock-mode.lock"))
+        let controller = DockModeController(
+            system: SystemDockControl { [weak self] line in self?.model?.appendEvent(line) },
+            recovery: recovery,
+            lock: lock,
+            log: { [weak self] line in self?.model?.appendEvent(line) }
+        )
+        dockModeController = controller
+
+        // 이전 실행이 남긴 미복원 기록 감지(자동 복원이 아니라 감지 + 안내).
+        switch controller.recoveryState() {
+        case .record(let stale):
+            model.appendEvent("dockmode stale detected keys=\(stale.entries.count)")
+            startupNotice += (startupNotice.isEmpty ? "" : "\n")
+                + "이전 실행이 Dock 설정을 되돌리지 못했습니다. 메뉴 › 사용 모드 › ‘기본 Dock으로 복원’을 실행해 주세요."
+        case .unreadable(let reason):
+            model.appendEvent("dockmode recovery unreadable reason=\(reason)")
+            startupNotice += (startupNotice.isEmpty ? "" : "\n")
+                + "Dock 복구 기록을 읽을 수 없습니다(\(reason)). 설정이 Custom으로 남아 있으면 직접 확인해 주세요."
+        case .none, .noPath:
+            break
+        }
+
+        // 승인된 검증용 플래그(임시 설정 파일에서만 쓴다): 선택·동의·억제 승인을 파일에 반영한다.
+        if let launchMode = options.dockModeAtLaunch {
+            store.update { settings in
+                settings.dockMode = launchMode
+                if launchMode == .custom {
+                    settings.customDockConsent = ISO8601DateFormatter().string(from: Date())
+                    settings.dockSuppressionApproved = options.dockSuppressionApproved
+                }
+            }
+            model.appendEvent("dockmode launch flag=\(launchMode.rawValue) suppression=\(options.dockSuppressionApproved)")
+        }
+
+        let saved = store.settings.dockMode
+        if isFake || saved == nil {
+            // 선택한 적이 없으면 Mac Dock으로 시작한다(동의 없음).
+            dockAppliedState = .none
+            if saved == nil { model.appendEvent("dockmode selected=none applied=none") }
+            return
+        }
+        if saved == .custom, store.settings.customDockConsent != nil {
+            // 저장된 모드와 동의를 사용한다. 억제 설정은 **별도 승인**이 있을 때만.
+            do {
+                let outcome = try controller.applyCustom(
+                    consent: true,
+                    suppressionApproved: store.settings.dockSuppressionApproved,
+                    prepareScreen: { [weak self] in self?.prepareCustomScreen() }
+                )
+                dockAppliedState = outcome.applied
+                model.appendEvent("dockmode startup apply=ok keys=\(outcome.changedKeys.count)")
+            } catch let error as DockModeError {
+                dockAppliedState = .none
+                startupNotice += (startupNotice.isEmpty ? "" : "\n") + "Custom 모드를 적용하지 못했습니다: \(error.message)"
+                model.appendEvent("dockmode startup apply=failed reason=\(error.message)")
+            } catch {
+                dockAppliedState = .none
+            }
+            return
+        }
+        dockAppliedState = .none
+    }
+
+    /// 커스텀 화면 준비 — 실패하면 적용 전체가 되돌아간다.
+    private func prepareCustomScreen() {
+        // 화면 준비: 접힘을 풀고 창을 올린다(활성화는 하지 않는다 — 다른 앱 포커스를 빼앗지 않는다).
+        model?.setCollapsed(false)
+        panel?.orderFrontRegardless()
+    }
+
+    /// 모드 선택(선택만으로는 아무것도 바꾸지 않는다).
+    @MainActor @objc private func selectDockModeAction(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let mode = DockMode(rawValue: raw) else { return }
+        guard mode.isImplemented else {
+            model?.appendEvent("dockmode select=\(mode.rawValue) result=unsupported")
+            return
+        }
+        settings?.update { $0.dockMode = mode }
+        model?.appendEvent("dockmode select=\(mode.rawValue) applied=\(dockAppliedState.isCustom ? "custom" : "none")")
+        rebuildStatusMenu()
+    }
+
+    /// 적용 — 사용자가 명시적으로 눌렀을 때만 시스템 설정을 바꾼다.
+    @MainActor @objc private func applyDockModeAction() {
+        guard let model, let controller = dockModeController, let store = settings else { return }
+        guard (store.settings.dockMode ?? .macDock) != .macDock else {
+            model.appendEvent("dockmode apply result=skipped selected=macDock")
+            return
+        }
+        // 첫 적용에는 변경 항목·복원 방법을 설명하고 동의를 받는다.
+        // 재등장 억제(문서화되지 않은 설정)는 **같은 대화상자에서 별도로** 승인받는다.
+        let needsConsent = store.settings.customDockConsent == nil
+        var suppression = store.settings.dockSuppressionApproved
+        if needsConsent {
+            guard let decision = confirmCustomDockConsent(suppressionSelected: suppression) else {
+                model.appendEvent("dockmode apply result=declined")
+                return
+            }
+            suppression = decision
+        }
+        do {
+            let outcome = try controller.applyCustom(
+                consent: true,
+                suppressionApproved: suppression,
+                prepareScreen: { [weak self] in self?.prepareCustomScreen() }
+            )
+            dockAppliedState = outcome.applied
+            // 동의는 **실제로 적용된 뒤에** 기록한다(실패한 시도로 동의를 남기지 않는다).
+            store.update { settings in
+                if settings.customDockConsent == nil {
+                    settings.customDockConsent = ISO8601DateFormatter().string(from: Date())
+                }
+                settings.dockSuppressionApproved = suppression
+            }
+            model.setActionMessage("Custom Dock을 적용했습니다 — 바꾼 설정 \(outcome.changedKeys.count)개(종료·해제 시 복원)")
+            model.appendEvent("dockmode apply result=ok keys=\(outcome.changedKeys.joined(separator: ",")) suppressed=\(suppression)")
+        } catch let error as DockModeError {
+            dockAppliedState = .none
+            model.setActionMessage(error.message)
+            model.appendEvent("dockmode apply result=failed reason=\(error.message)")
+        } catch {
+            dockAppliedState = .none
+        }
+        applyPanelSize()
+        rebuildStatusMenu()
+    }
+
+    /// 복원 — 모드 해제와 정상 종료가 **같은 경로**를 쓴다(추후 Custom → Both도 재사용).
+    @discardableResult
+    private func restoreSystemDock(reason: String) -> Bool {
+        guard let controller = dockModeController else { return false }
+        do {
+            let outcome = try controller.restoreToMacDock()
+            dockAppliedState = .none
+            model?.appendEvent("dockmode restore reason=\(reason) keys=\(outcome.changedKeys.count) skipped=\(outcome.skippedByUserChange.count) left=\(outcome.recoveryRecordLeft)")
+            return true
+        } catch let error as DockModeError {
+            model?.appendEvent("dockmode restore reason=\(reason) result=failed reason=\(error.message)")
+            return false
+        } catch {
+            model?.appendEvent("dockmode restore reason=\(reason) result=failed")
+            return false
+        }
+    }
+
+    @MainActor @objc private func restoreDockModeAction() {
+        if restoreSystemDock(reason: "menu") {
+            model?.setActionMessage("기본 Dock 설정을 복원했습니다.")
+        } else {
+            model?.setActionMessage("복원할 Dock 설정이 없거나 복원에 실패했습니다(상세 보기의 기록 확인).")
+        }
+        applyPanelSize()
+        rebuildStatusMenu()
+    }
+
+    /// 첫 Custom 적용 동의 대화상자 — **바꿀 항목과 복원 방법**을 먼저 설명한다.
+    ///
+    /// 재등장 억제는 문서화되지 않은 설정이므로 **체크박스로 따로** 승인받는다(기본 꺼짐).
+    /// 반환: `nil` = 사용자가 취소했다(아무 것도 바꾸지 않는다). 그 밖에는 억제 승인 여부.
+    private func confirmCustomDockConsent(suppressionSelected: Bool) -> Bool? {
+        let alert = NSAlert()
+        alert.messageText = "Custom Dock을 적용할까요?"
+        alert.informativeText = [
+            "PaneDock이 기본 macOS Dock을 숨기고 화면 하단을 씁니다.",
+            "",
+            "바꾸는 설정(원래 값을 기록한 뒤, 해제·종료 시 그대로 되돌립니다):",
+            "• com.apple.dock autohide = true (기본 Dock 자동 숨김)",
+            "• 설정 반영을 위해 Dock을 한 번 다시 시작합니다.",
+            "• 원래 없던 키는 삭제하고, 실행 중 직접 바꾼 값은 덮어쓰지 않습니다.",
+            "",
+            "되돌리기: 메뉴 › 사용 모드 › ‘기본 Dock으로 복원’ (앱 종료 시에도 자동 복원)",
+        ].joined(separator: "\n")
+
+        // 별도 승인 항목: 하단 접근 시 재등장 억제(문서화되지 않은 설정).
+        let checkbox = NSButton(checkboxWithTitle: "하단에 닿아도 Dock이 다시 나오지 않게 한다 (문서화되지 않은 설정)", target: nil, action: nil)
+        checkbox.state = suppressionSelected ? .on : .off
+        checkbox.font = .systemFont(ofSize: 11)
+        let note = NSTextField(wrappingLabelWithString: "• autohide-delay·autohide-time-modifier 값을 바꿉니다. 되돌리면 삭제합니다.\n• 체크하지 않으면 자동 숨김만 적용되며, 하단에 닿으면 Dock이 다시 나타날 수 있습니다.")
+        note.font = .systemFont(ofSize: 10)
+        note.textColor = .secondaryLabelColor
+        let stack = NSStackView(views: [checkbox, note])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        stack.frame = NSRect(x: 0, y: 0, width: 380, height: 56)
+        alert.accessoryView = stack
+
+        alert.addButton(withTitle: "적용")
+        alert.addButton(withTitle: "취소")
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return checkbox.state == .on
+    }
 
     nonisolated init(options: LaunchOptions) {
         self.options = options
@@ -109,6 +322,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         .joined(separator: "\n")
         model.setSettingsNotice(startupNotice.isEmpty ? nil : startupNotice)
         self.model = model
+        installDockMode(store: store, model: model)
 
         // 저장된 외형을 반영하고 시작한다(없던 설정이면 기본 외형).
         model.applyAppearance(store.settings.appearance)
@@ -194,9 +408,18 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
         if options.hidden {
             panel.orderOut(nil)
-        } else {
-            // 시작할 때는 활성화하지 않는다. 창만 올린다.
+        } else if dockAppliedState.isCustom || options.previewCustom {
+            // Custom 모드: 하단 주 Dock으로 보여준다(활성화는 하지 않는다).
             panel.orderFrontRegardless()
+            if options.previewCustom, !dockAppliedState.isCustom {
+                // 미리보기는 **적용이 아니다**: 시스템 Dock 설정은 그대로다.
+                model.setActionMessage("미리보기 — Custom은 아직 적용되지 않았습니다(기본 Dock 설정 그대로).")
+                model.appendEvent("panel preview mode=custom applied=none")
+            }
+        } else {
+            // Mac Dock 모드(또는 선택 안 함): 기본 Dock을 그대로 두고 **커스텀 화면을 띄우지 않는다**.
+            panel.orderOut(nil)
+            model.appendEvent("panel hidden mode=macDock (메뉴 › 사용 모드에서 Custom 선택·적용)")
         }
 
         persistCorrectedOriginIfNeeded()
@@ -292,6 +515,12 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         false
     }
 
+    /// 정상 종료는 **모드 해제와 같은 복원 경로**를 쓴다.
+    func applicationWillTerminate(_ notification: Notification) {
+        guard dockAppliedState.isCustom else { return }
+        _ = restoreSystemDock(reason: "quit")
+    }
+
     // MARK: - 설정
 
     private func makeSettingsStore() -> SettingsStore {
@@ -383,6 +612,19 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         )
     }
 
+    /// Custom 모드에서 창을 **하단 가장자리**에 고정한다. 자유 좌표(사용자가 옮긴 위치)는 건드리지 않는다.
+    private func anchorToBottomIfCustom(panel: NSPanel) {
+        guard dockAppliedState.isCustom else { return }
+        let frame = ScreenGeometry.fallbackFrame
+        let size = panel.frame.size
+        let origin = NSPoint(x: max(frame.minX + 12, frame.midX - size.width / 2), y: frame.minY)
+        guard abs(panel.frame.origin.y - origin.y) > 0.5 || abs(panel.frame.origin.x - origin.x) > 0.5 else { return }
+        isApplyingLayout = true
+        panel.setFrameOrigin(origin)
+        isApplyingLayout = false
+        model?.appendEvent("dockmode anchor=bottom origin=(\(Int(origin.x)),\(Int(origin.y)))")
+    }
+
     private func makePanel(model: DockModel) -> NSPanel {
         let size = panelSize(for: model)
         let panel = NSPanel(
@@ -426,6 +668,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             size: size
         )
         panel.setFrame(NSRect(origin: origin, size: size), display: false)
+        anchorToBottomIfCustom(panel: panel)
         return panel
     }
 
@@ -463,6 +706,8 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 + "origin=(\(Int(panel.frame.origin.x)),\(Int(panel.frame.origin.y)))"
         )
         isApplyingLayout = false
+        // Custom 모드에서는 크기·상세 보기·접기가 바뀌어도 **하단 기준 위치를 유지**한다.
+        anchorToBottomIfCustom(panel: panel)
         // 펼침/접힘 자체도 레이아웃 변경이므로, 여기서 조건을 다시 보되 이미 접혀 있으면 그대로 둔다.
         scheduleCollapseCheck()
     }
@@ -653,6 +898,19 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     /// 사용자가 명시적으로 호출했다. 이때만 활성화하고 키보드 포커스를 준다.
     private func showPanel() {
+        // 커스텀 화면은 **Custom이 적용된 동안에만** 보인다. 그 밖에는 띄우지 않고 메뉴로 안내한다.
+        guard dockAppliedState.isCustom || options.previewCustom else {
+            let selected = settings?.settings.dockMode
+            model?.appendEvent("invoke blocked applied=none selected=\(selected?.rawValue ?? "none")")
+            if selected == .custom {
+                model?.setActionMessage("Custom 모드를 아직 적용하지 않았습니다 — 메뉴 › 사용 모드 › ‘Custom Dock 적용’.")
+            } else {
+                model?.setActionMessage("Mac Dock 모드입니다 — 메뉴 › 사용 모드에서 Custom Dock을 선택·적용하세요.")
+            }
+            // 상태 메뉴를 열어 설정·모드 전환으로 바로 갈 수 있게 한다.
+            statusItem?.button?.performClick(nil)
+            return
+        }
         guard let panel else { return }
         // 명시적 호출은 **숨김을 풀고 펼친다**(접힌 상태에서도 기존 키보드 조작을 쓸 수 있게).
         isUserHidden = false
@@ -775,6 +1033,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let menu = NSMenu()
 
         add(to: menu, title: "Dock 호출/닫기", action: #selector(togglePanelAction), key: "")
+        modeSubmenu(into: menu)
         add(to: menu, title: "잠금/해제", action: #selector(toggleLockAction), key: "")
         add(to: menu, title: "창 위치 초기화", action: #selector(resetPositionAction), key: "")
         add(to: menu, title: "프로젝트 설정 다시 읽기", action: #selector(reloadCatalogAction), key: "")
@@ -809,6 +1068,53 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         statusItem.menu = menu
     }
 
+    /// 사용 모드 하위 메뉴 — **선택값과 실제 적용 상태를 구분해** 보여준다.
+    private func modeSubmenu(into menu: NSMenu) {
+        let selected = settings?.settings.dockMode
+        let title = "사용 모드: \(selected?.label ?? "선택 안 함") · \(dockAppliedState.isCustom ? "적용됨" : "미적용")"
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        // 자동 활성화를 끈다: action이 있는 항목도 **적용 상태에 따라** 켜고 끈다
+        // (Mac Dock을 고른 상태에서 '적용'이 눌리면 안 된다).
+        submenu.autoenablesItems = false
+
+        for mode in DockMode.allCases {
+            let entry = NSMenuItem(title: mode.label, action: #selector(selectDockModeAction(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = mode.rawValue
+            entry.state = (mode == selected) ? .on : .off
+            if !mode.isImplemented {
+                // 미구현 모드는 **작동하는 선택지로 제공하지 않는다**.
+                entry.isEnabled = false
+                entry.title = "\(mode.label) — 미구현"
+            }
+            submenu.addItem(entry)
+        }
+        submenu.addItem(.separator())
+        let status = NSMenuItem(title: "적용 상태: \(dockAppliedState.label)", action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        submenu.addItem(status)
+        let consent = NSMenuItem(
+            title: settings?.settings.customDockConsent == nil ? "Custom 동의: 없음" : "Custom 동의: 있음",
+            action: nil,
+            keyEquivalent: ""
+        )
+        consent.isEnabled = false
+        submenu.addItem(consent)
+        submenu.addItem(.separator())
+        let apply = NSMenuItem(title: "Custom Dock 적용", action: #selector(applyDockModeAction), keyEquivalent: "")
+        apply.target = self
+        apply.isEnabled = (selected ?? .macDock) != .macDock && !dockAppliedState.isCustom
+        submenu.addItem(apply)
+        let restore = NSMenuItem(title: "기본 Dock으로 복원", action: #selector(restoreDockModeAction), keyEquivalent: "")
+        restore.target = self
+        restore.isEnabled = dockAppliedState.isCustom
+        submenu.addItem(restore)
+
+        item.submenu = submenu
+        menu.addItem(item)
+    }
+
     private func add(to menu: NSMenu, title: String, action: Selector, key: String) {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.target = self
@@ -816,6 +1122,17 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     @MainActor @objc private func togglePanelAction() {
+        // 창을 띄우지 않는 상태에서는 메뉴 호출도 같은 규칙으로 안내한다.
+        guard dockAppliedState.isCustom else {
+            let selected = settings?.settings.dockMode
+            model?.appendEvent("menu invoke blocked applied=none selected=\(selected?.rawValue ?? "none")")
+            model?.setActionMessage(
+                selected == .custom
+                    ? "Custom 모드를 아직 적용하지 않았습니다 — 메뉴 › 사용 모드 › ‘Custom Dock 적용’."
+                    : "Mac Dock 모드입니다 — 메뉴 › 사용 모드에서 Custom Dock을 선택·적용하세요."
+            )
+            return
+        }
         togglePanel()
     }
 

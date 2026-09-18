@@ -606,6 +606,7 @@ public enum SelfTest {
         results.append(contentsOf: widgetLayoutChecks())
         results.append(contentsOf: widgetDisplayChecks())
         results.append(contentsOf: buildIdentityChecks())
+        results.append(contentsOf: dockModeChecks())
         results.append(contentsOf: focusCardChecks())
         return results
     }
@@ -1432,7 +1433,365 @@ public enum SelfTest {
         return results
     }
 
-    /// 타이머가 **갱신 횟수가 아니라 시각**으로 남은 시간을 정하는지 고정한다.
+    // MARK: - 사용 모드 전환 (V20.1)
+
+    /// 실제 시스템 Dock을 건드리지 않는 대체 구현. **검사는 이 구현만 쓴다.**
+    private final class StubDockSystem: DockSystemControl {
+        var values: [DockPreferenceKey: DockPreferenceValue]
+        var failOnSet: DockPreferenceKey?
+        var failOnRestart = false
+        private(set) var restartCount = 0
+        private(set) var writes: [String] = []
+
+        init(values: [DockPreferenceKey: DockPreferenceValue] = [:]) {
+            self.values = values
+        }
+
+        func snapshot(_ keys: [DockPreferenceKey]) -> DockPreferenceSnapshot {
+            DockPreferenceSnapshot(entries: keys.map { DockPreferenceSnapshot.Entry(key: $0, value: values[$0]) })
+        }
+
+        func currentValue(for key: DockPreferenceKey) -> DockPreferenceValue? { values[key] }
+
+        func set(_ value: DockPreferenceValue, for key: DockPreferenceKey) throws {
+            if failOnSet == key { throw DockModeError.applyFailed(step: "set", reason: "주입된 실패") }
+            values[key] = value
+            writes.append("set \(key.name)=\(value.text)")
+        }
+
+        func remove(_ key: DockPreferenceKey) throws {
+            values.removeValue(forKey: key)
+            writes.append("remove \(key.name)")
+        }
+
+        func restartDock() throws {
+            if failOnRestart { throw DockModeError.applyFailed(step: "restart", reason: "주입된 실패") }
+            restartCount += 1
+        }
+    }
+
+    private static func makeDockPlan(domain: String = "test.panedock.dock") -> DockModePlan {
+        DockModePlan(
+            hideKeys: [DockChange(DockPreferenceKey(domain: domain, name: "autohide"), .bool(true))],
+            suppressionKeys: [
+                DockChange(DockPreferenceKey(domain: domain, name: "autohide-delay"), .double(1000)),
+                DockChange(DockPreferenceKey(domain: domain, name: "autohide-time-modifier"), .double(0)),
+            ]
+        )
+    }
+
+    private static func temporaryRecoveryURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("pane-dock-recovery-\(UUID().uuidString)")
+            .appendingPathComponent("dock-recovery.json")
+    }
+
+    private static func dockModeChecks() -> [CheckResult] {
+        var results: [CheckResult] = []
+        let plan = makeDockPlan()
+        let hideKey = DockPreferenceKey(domain: "test.panedock.dock", name: "autohide")
+
+        // 1) 동의 없이는 아무것도 바꾸지 않는다(설정에 mode가 없으면 동의로 간주하지 않는다).
+        do {
+            let system = StubDockSystem(values: [hideKey: .bool(false)])
+            let url = temporaryRecoveryURL()
+            let controller = DockModeController(system: system, recovery: DockRecoveryStore(url: url), plan: plan)
+            var refused = false
+            do {
+                _ = try controller.applyCustom(consent: false, suppressionApproved: false, prepareScreen: {})
+            } catch let error as DockModeError {
+                refused = error == .notConsented
+            } catch { }
+            results.append(check(
+                "모드: 동의 없이는 시스템 설정을 바꾸지 않는다",
+                refused && system.writes.isEmpty && system.values[hideKey] == .bool(false)
+                    && system.restartCount == 0 && DockRecoveryStore(url: url).load() == nil,
+                "거부=\(refused) 쓰기=\(system.writes.count)"
+            ))
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 2) 적용 성공: 원래 값(없던 키 포함)을 기록하고 필요한 키만 바꾼다.
+        do {
+            let system = StubDockSystem(values: [hideKey: .bool(false)])
+            let url = temporaryRecoveryURL()
+            let store = DockRecoveryStore(url: url)
+            let controller = DockModeController(system: system, recovery: store, plan: plan)
+            let outcome = try? controller.applyCustom(consent: true, suppressionApproved: false, prepareScreen: {})
+            let record = store.load()
+            results.append(check(
+                "모드: Custom 적용은 원래 값·존재 여부를 기록하고 필요한 키만 바꾼다",
+                outcome?.applied.isCustom == true
+                    && system.values[hideKey] == .bool(true)
+                    && record?.entries.count == 1
+                    && record?.entries.first?.original == .bool(false)
+                    && record?.entries.first?.applied == .bool(true)
+                    && system.restartCount == 1,
+                "기록=\(record?.entries.count ?? -1)개 원래=\(record?.entries.first?.original?.text ?? "-") 적용=\(system.values[hideKey]?.text ?? "-")"
+            ))
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 3) 억제 설정은 **승인했을 때만** 쓴다(문서화되지 않은 값).
+        do {
+            let system = StubDockSystem(values: [hideKey: .bool(false)])
+            let url = temporaryRecoveryURL()
+            let controller = DockModeController(system: system, recovery: DockRecoveryStore(url: url), plan: plan)
+            _ = try? controller.applyCustom(consent: true, suppressionApproved: true, prepareScreen: {})
+            let delayKey = DockPreferenceKey(domain: "test.panedock.dock", name: "autohide-delay")
+            results.append(check(
+                "모드: 재등장 억제 설정은 승인했을 때만 적용한다",
+                system.values[delayKey] == .double(1000)
+                    && system.values[DockPreferenceKey(domain: "test.panedock.dock", name: "autohide-time-modifier")] == .double(0),
+                "억제키=\(system.values[delayKey]?.text ?? "-")"
+            ))
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 4) 화면 준비 실패 → 아무것도 바꾸지 않는다(기록도 지운다).
+        do {
+            let system = StubDockSystem(values: [hideKey: .bool(false)])
+            let url = temporaryRecoveryURL()
+            let store = DockRecoveryStore(url: url)
+            let controller = DockModeController(system: system, recovery: store, plan: plan)
+            var failed = false
+            do {
+                _ = try controller.applyCustom(consent: true, suppressionApproved: false, prepareScreen: { throw DockModeError.busy })
+            } catch let error as DockModeError {
+                if case .applyFailed(let step, _) = error { failed = step == "커스텀 화면 준비" }
+            } catch { }
+            results.append(check(
+                "모드: 화면 준비 실패는 시스템 설정을 바꾸지 않고 기록도 남기지 않는다",
+                failed && system.writes.isEmpty && system.values[hideKey] == .bool(false) && store.load() == nil,
+                "실패=\(failed) 쓰기=\(system.writes.count) 기록=\(store.load() == nil ? "없음" : "남음")"
+            ))
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 5) 설정 적용 중 실패 → 이미 바꾼 키를 되돌린다.
+        do {
+            let delayKey = DockPreferenceKey(domain: "test.panedock.dock", name: "autohide-delay")
+            let system = StubDockSystem(values: [hideKey: .bool(false)])
+            system.failOnSet = delayKey
+            let url = temporaryRecoveryURL()
+            let store = DockRecoveryStore(url: url)
+            let controller = DockModeController(system: system, recovery: store, plan: plan)
+            var rolledBack = false
+            do {
+                _ = try controller.applyCustom(consent: true, suppressionApproved: true, prepareScreen: {})
+            } catch let error as DockModeError {
+                if case .applyFailed = error { rolledBack = true }
+            } catch { }
+            results.append(check(
+                "모드: 적용 실패 시 이미 바꾼 키를 되돌린다",
+                rolledBack && system.values[hideKey] == .bool(false) && store.load() == nil,
+                "되돌림=\(system.values[hideKey]?.text ?? "-") 기록=\(store.load() == nil ? "정리됨" : "남음")"
+            ))
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 6) 복구 기록을 쓸 수 없으면 시스템 설정을 바꾸지 않는다.
+        do {
+            let system = StubDockSystem(values: [hideKey: .bool(false)])
+            let controller = DockModeController(system: system, recovery: DockRecoveryStore(url: nil), plan: plan)
+            var refused = false
+            do {
+                _ = try controller.applyCustom(consent: true, suppressionApproved: false, prepareScreen: {})
+            } catch let error as DockModeError {
+                if case .recoveryRecordUnavailable = error { refused = true }
+            } catch { }
+            results.append(check(
+                "모드: 복구 정보를 기록하지 못하면 시스템 설정을 바꾸지 않는다",
+                refused && system.writes.isEmpty && system.values[hideKey] == .bool(false),
+                "거부=\(refused) 쓰기=\(system.writes.count)"
+            ))
+        }
+
+        // 7) 복원: 원래 값·자료형 복원, 없던 키 삭제, 반복해도 안전.
+        do {
+            let delayKey = DockPreferenceKey(domain: "test.panedock.dock", name: "autohide-delay")
+            let system = StubDockSystem(values: [hideKey: .bool(false)])
+            let url = temporaryRecoveryURL()
+            let store = DockRecoveryStore(url: url)
+            let controller = DockModeController(system: system, recovery: store, plan: plan)
+            _ = try? controller.applyCustom(consent: true, suppressionApproved: true, prepareScreen: {})
+            let first = try? controller.restoreToMacDock()
+            let afterFirst = system.values
+            let second = try? controller.restoreToMacDock()
+            results.append(check(
+                "모드: 복원은 원래 값만 되돌리고 없던 키를 지우며 반복해도 안전하다",
+                afterFirst[hideKey] == .bool(false)
+                    && afterFirst[delayKey] == nil
+                    && store.load() == nil
+                    && second?.recoveryRecordLeft == false
+                    && system.values[hideKey] == .bool(false),
+                "복원=\(first?.changedKeys.count ?? -1)키 삭제확인=\(afterFirst[delayKey] == nil) 반복=\(second?.notes.first ?? "-")"
+            ))
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 8) 사용자가 실행 중 직접 바꾼 값은 조용히 덮어쓰지 않는다(기록은 남긴다).
+        do {
+            let system = StubDockSystem(values: [hideKey: .bool(false)])
+            let url = temporaryRecoveryURL()
+            let store = DockRecoveryStore(url: url)
+            let controller = DockModeController(system: system, recovery: store, plan: plan)
+            _ = try? controller.applyCustom(consent: true, suppressionApproved: false, prepareScreen: {})
+            // 사용자가 실행 중 시스템 설정에서 직접 껐다.
+            system.values[hideKey] = .bool(false)
+            let outcome = try? controller.restoreToMacDock()
+            results.append(check(
+                "모드: 사용자가 실행 중 바꾼 값은 덮어쓰지 않고 알린다",
+                outcome?.skippedByUserChange == [hideKey.label]
+                    && system.values[hideKey] == .bool(false)
+                    && store.load() != nil,
+                "건너뜀=\(outcome?.skippedByUserChange.joined(separator: ",") ?? "-") 기록남음=\(store.load() != nil)"
+            ))
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 9) 미복원 기록이 있으면 새 원본으로 덮어쓰지 않는다(비정상 종료 뒤 보호).
+        do {
+            let url = temporaryRecoveryURL()
+            let store = DockRecoveryStore(url: url)
+            let record = DockRecoveryRecord(
+                mode: DockMode.custom.rawValue,
+                appliedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                suppression: false,
+                entries: [
+                    DockRecoveryRecord.Entry(
+                        domain: "test.panedock.dock", name: "autohide",
+                        original: .bool(false), applied: .bool(true), skippedByUserChange: false
+                    )
+                ],
+                ownerPID: 111
+            )
+            let saved = store.save(record)
+            let secondSave = store.save(DockRecoveryRecord(
+                mode: DockMode.custom.rawValue,
+                appliedAt: Date(timeIntervalSince1970: 1_700_000_500),
+                suppression: false,
+                entries: [],
+                ownerPID: 222
+            ))
+            results.append(check(
+                "모드: 미복원 기록이 있으면 새 원본으로 덮어쓰지 않는다",
+                saved && !secondSave && store.load()?.ownerPID == 111,
+                "첫 저장=\(saved) 두번째=\(secondSave) 주인=\(store.load()?.ownerPID ?? -1)"
+            ))
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 10) 중복 요청 방지: 잠금이 있으면 다른 인스턴스가 적용하지 못한다.
+        do {
+            let system = StubDockSystem(values: [hideKey: .bool(false)])
+            let url = temporaryRecoveryURL()
+            let lockURL = url.deletingLastPathComponent().appendingPathComponent("dock-mode.lock")
+            let first = DockModeController(
+                system: system,
+                recovery: DockRecoveryStore(url: url),
+                lock: DockModeLock(url: lockURL),
+                plan: plan,
+                pid: 4242
+            )
+            // 다른 인스턴스(다른 pid)가 잠금을 잡고 있는 상태.
+            _ = DockModeLock(url: lockURL).acquire(ownerPID: 9999)
+            var blocked = false
+            do {
+                _ = try first.applyCustom(consent: true, suppressionApproved: false, prepareScreen: {})
+            } catch let error as DockModeError {
+                blocked = error == .otherInstanceActive
+            } catch { }
+            results.append(check(
+                "모드: 다른 인스턴스가 적용 중이면 중복 적용을 막는다",
+                blocked && system.writes.isEmpty,
+                "차단=\(blocked) 쓰기=\(system.writes.count)"
+            ))
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 11) 비정상 종료 감지: 기록이 남아 있으면 다음 실행에서 감지한다(자동 복원은 하지 않는다).
+        do {
+            let system = StubDockSystem(values: [hideKey: .bool(false)])
+            let url = temporaryRecoveryURL()
+            let store = DockRecoveryStore(url: url)
+            let applied = DockModeController(system: system, recovery: store, plan: plan)
+            _ = try? applied.applyCustom(consent: true, suppressionApproved: false, prepareScreen: {})
+            // 새 프로세스(재실행) — 기록만 보고 감지한다.
+            let restarted = DockModeController(system: system, recovery: store, plan: plan, pid: 777)
+            let detected = restarted.detectStaleRecord()
+            results.append(check(
+                "모드: 비정상 종료 뒤 다음 실행에서 복구 상태를 감지한다(자동 복원 아님)",
+                detected?.mode == DockMode.custom.rawValue
+                    && detected?.entries.count == 1
+                    && restarted.applied == .none
+                    && system.values[hideKey] == .bool(true),
+                "감지=\(detected != nil) 적용상태=\(restarted.applied.label)"
+            ))
+            // 검사에서 만든 기록은 복원으로 정리한다(실제 시스템이 아니라 대체 구현이다).
+            _ = try? restarted.restoreToMacDock()
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 12) Both는 이번에 적용할 수 없다(미구현을 작동하는 선택지로 제공하지 않는다).
+        results.append(check(
+            "모드: Both는 미구현으로 표시되고 적용 대상이 아니다",
+            !DockMode.both.isImplemented
+                && DockMode.macDock.isImplemented
+                && DockMode.custom.isImplemented
+                && DockMode.allCases.count == 3
+                && DockModeError.unsupportedMode(.both).message.contains("V20.2"),
+            "both=\(DockMode.both.isImplemented) 목록=\(DockMode.allCases.map(\.rawValue).joined(separator: ","))"
+        ))
+
+        // 13) 복구 기록 파일: 왕복 저장이 되고, 손상된 기록은 '없음'으로 뭉개지 않고 보존한다.
+        do {
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("panedock-selftest-\(UUID().uuidString)", isDirectory: true)
+            let url = dir.appendingPathComponent("dock-recovery.json")
+            let store = DockRecoveryStore(url: url)
+            let record = DockRecoveryRecord(
+                mode: "custom",
+                appliedAt: Date(timeIntervalSince1970: 1_756_000_000),
+                suppression: false,
+                entries: [
+                    .init(
+                        domain: "test.panedock.dock",
+                        name: "autohide",
+                        original: .bool(false),
+                        applied: .bool(true),
+                        skippedByUserChange: false
+                    )
+                ],
+                ownerPID: 42
+            )
+            let saved = store.save(record)
+            let roundTrip = store.load() == record
+            try? Data("not json".utf8).write(to: url)
+            let unreadable = store.loadResult()
+            let fileKept = FileManager.default.fileExists(atPath: url.path)
+            let stub = StubDockSystem(values: [:])
+            let controller = DockModeController(system: stub, recovery: store, lock: DockModeLock(url: nil))
+            var thrown: DockModeError?
+            do {
+                _ = try controller.restoreToMacDock()
+            } catch let error as DockModeError {
+                thrown = error
+            } catch {
+                // 다른 오류는 실패로 본다(아래 비교에서 걸린다).
+            }
+            try? FileManager.default.removeItem(at: dir)
+            results.append(check(
+                "복구 기록: 저장·복원 왕복이 되고, 손상된 기록은 '없음'이 아니라 '읽을 수 없음'으로 보고한다",
+                saved && roundTrip && unreadable == .unreadable(reason: "형식이 맞지 않습니다")
+                    && fileKept && thrown == .restoreRecordUnreadable("형식이 맞지 않습니다") && stub.writes.isEmpty,
+                "왕복=\(roundTrip) 손상=\(unreadable) 보존=\(fileKept) 쓰기=\(stub.writes.count) 오류=\(thrown?.message ?? "-")"
+            ))
+        }
+
+        return results
+    }
+
     private static func focusCardChecks() -> [CheckResult] {
         var results: [CheckResult] = []
         let start = Date(timeIntervalSince1970: 1_800_000_000)

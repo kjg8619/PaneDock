@@ -669,6 +669,11 @@ final class DockModel: ObservableObject {
         rebuildState()
     }
 
+    /// 사용자에게 보여줄 결과 문구를 넣는다(모드 적용·복원 결과 등).
+    func setActionMessage(_ message: String) {
+        actionMessage = message
+    }
+
     /// 설정 안내 문구를 넣는다(설정 파일 손상·미래 버전 등).
     func setSettingsNotice(_ notice: String?) {
         settingsNotice = notice

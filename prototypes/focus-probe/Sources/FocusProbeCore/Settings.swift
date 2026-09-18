@@ -50,6 +50,10 @@ public struct PaneDockSettings: Codable, Equatable, Sendable {
         windowOrigin = (try? container.decodeIfPresent(StoredOrigin.self, forKey: .windowOrigin)) ?? nil
         hotKey = ((try? container.decodeIfPresent(HotKeyChoice.self, forKey: .hotKey)) ?? nil) ?? .controlOptionCommandD
         hotKeyEnabled = ((try? container.decodeIfPresent(Bool.self, forKey: .hotKeyEnabled)) ?? nil) ?? true
+        // `dockMode`가 없는 기존 설정은 **동의한 것으로 간주하지 않는다**(nil 유지).
+        dockMode = (try? container.decodeIfPresent(DockMode.self, forKey: .dockMode)) ?? nil
+        customDockConsent = (try? container.decodeIfPresent(String.self, forKey: .customDockConsent)) ?? nil
+        dockSuppressionApproved = ((try? container.decodeIfPresent(Bool.self, forKey: .dockSuppressionApproved)) ?? nil) ?? false
     }
 
 
@@ -61,11 +65,20 @@ public struct PaneDockSettings: Codable, Equatable, Sendable {
     public var appearance: DockAppearance
     /// 저장된 Dock 배치(순서·영역 너비·카드). 없으면 승인된 기본 배치로 읽는다.
     public var layout: DockLayout
+    /// 사용 모드 **선택값**. nil이면 아직 고른 적이 없다(동의로 간주하지 않는다).
+    public var dockMode: DockMode?
+    /// Custom 모드 최초 적용 동의 시각(ISO8601). nil이면 동의 없음.
+    public var customDockConsent: String?
+    /// 재등장 억제(문서화되지 않은 설정) 사용 동의 — **별도 승인**이다.
+    public var dockSuppressionApproved: Bool
 
     public init(
         schemaVersion: Int = PaneDockSettings.currentSchemaVersion,
         appearance: DockAppearance = .default,
         layout: DockLayout = .default,
+        dockMode: DockMode? = nil,
+        customDockConsent: String? = nil,
+        dockSuppressionApproved: Bool = false,
         windowOrigin: StoredOrigin? = nil,
         hotKey: HotKeyChoice = .controlOptionCommandD,
         hotKeyEnabled: Bool = true
@@ -73,6 +86,9 @@ public struct PaneDockSettings: Codable, Equatable, Sendable {
         self.schemaVersion = schemaVersion
         self.appearance = appearance
         self.layout = layout
+        self.dockMode = dockMode
+        self.customDockConsent = customDockConsent
+        self.dockSuppressionApproved = dockSuppressionApproved
         self.windowOrigin = windowOrigin
         self.hotKey = hotKey
         self.hotKeyEnabled = hotKeyEnabled

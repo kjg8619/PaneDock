@@ -35,6 +35,15 @@ struct LaunchOptions {
     var timerSecondsOverride: Int?
     /// 진단용: 시작 후 이 시간(ms) 뒤에 첫 집중 타이머를 **시작**한다(입력 없이 완료 상태까지 관측하기 위한 것).
     var timerAutostartAfterMilliseconds: Int?
+    /// (검증용) 적용 전에 커스텀 화면을 **미리** 보여준다. 설정·시스템은 **바꾸지 않는다**.
+    var previewCustom = false
+    /// GUI 없이 실행하는 **Dock 복구**: 남아 있는 복구 기록으로 기본 Dock 설정을 되돌리고 종료한다.
+    /// **다시 Custom 모드로 들어가지 않는다.**
+    var restoreDock = false
+    /// 승인된 검증용: 시작할 때 이 모드를 **적용**한다(설정 파일의 동의가 있어야 한다).
+    var dockModeAtLaunch: DockMode?
+    /// 승인된 검증용: 재등장 억제 설정(문서화되지 않은 값) 사용을 승인한 것으로 본다.
+    var dockSuppressionApproved = false
     /// 진단용: 시작 후 이 시간(ms) 뒤에 **키보드 경로**(초점 이동 → 활성화)를 순서대로 실행한다.
     /// macOS가 합성 키로 앱을 활성화하지 못하게 하므로, 키가 들어왔을 때 타는 같은 함수를 부른다.
     var keyboardSelfTestAfterMilliseconds: Int?
@@ -77,6 +86,10 @@ PaneDock — 포커스된 터미널 pane을 따라가는 최소 Dock
   --timer-seconds <n>  (진단용) 집중 타이머 기본 시간(초). 완료 상태 확인용
   --timer-autostart <ms>  (진단용) 시작 후 이 시간 뒤에 첫 타이머를 시작한다
   --key-selftest <ms>  (진단용) 시작 후 이 시간 뒤에 키보드 경로(초점 이동→활성화)를 실행한다
+  --preview-custom  (검증용) Custom 적용 전에 커스텀 화면을 미리 보여준다(설정 변경 없음)
+  --restore-dock   남아 있는 복구 기록으로 기본 Dock 설정을 되돌리고 종료한다(GUI 없이, Custom 재진입 없음)
+  --dock-mode <macDock|custom>  (승인된 검증용) 시작 시 그 모드를 적용한다
+  --dock-suppression           (승인된 검증용) 재등장 억제 설정 사용을 승인한 것으로 본다
   --help            이 도움말
 
 추적 소스:
@@ -217,6 +230,19 @@ func parseLaunchOptions(_ arguments: [String]) -> LaunchOptions? {
                 exit(2)
             }
             options.timerAutostartAfterMilliseconds = value
+        case "--preview-custom":
+            options.previewCustom = true
+        case "--restore-dock":
+            options.restoreDock = true
+        case "--dock-mode":
+            index += 1
+            guard index < arguments.count, let mode = DockMode(rawValue: arguments[index]) else {
+                FileHandle.standardError.write(Data("--dock-mode requires macDock|custom\n".utf8))
+                exit(2)
+            }
+            options.dockModeAtLaunch = mode
+        case "--dock-suppression":
+            options.dockSuppressionApproved = true
         case "--key-selftest":
             index += 1
             guard index < arguments.count, let value = Int(arguments[index]), value > 0 else {

@@ -3577,3 +3577,99 @@ menu=close source=keyboard                            (Esc가 **메뉴만** 닫�
   V10 규칙 7("어떤 경우에도 사용자 설정 원본을 자동 수정·복구하지 않는다")에 따라
   **이제 파일을 전혀 건드리지 않는다.** V9의 관측 기록은 보존하고 여기에 변경 사실을 남긴다.
   `settings.json`(손상 시 백업 보존)은 V8에서 승인된 정책이라 그대로 두었다. 통일 여부는 미결정이다.
+
+## V20.1. 2026-09-18 — 사용 모드(Mac Dock / Custom Dock) 기반
+
+이 절은 **실제로 실행한 것만** 적는다. Custom 적용(시스템 Dock 설정 변경)은 **사용자 승인 전이므로
+실행하지 않았고**, 그 상태에서만 확인할 수 있는 화면은 성공으로 적지 않는다.
+
+### V20.1.1 구현
+
+| 파일 | 내용 |
+| --- | --- |
+| `DockMode.swift` (코어, 신규) | `DockMode`(macDock/custom/both) · `DockPreferenceKey`/`Value`/`Snapshot` · `DockSystemControl` 경계 · `DockModePlan`(공식 키와 **문서화되지 않은 억제 키를 구분**) · `DockAppliedState` |
+| `DockModeController.swift` (코어, 신규) | 적용 순서(원본 확인 → 복구 기록 → 화면 준비 → 설정 → 확인) · 실패 시 되돌리기 · 복원(바꾼 키만, 없던 키는 삭제) · **미복원 기록 보호** · 인스턴스 잠금 · 감지 |
+| `SystemDockControl.swift` (앱, 신규) | 실제 `com.apple.dock` 읽기·쓰기(`CFPreferences`) · `killall Dock` 1회 · 원래 없던 키는 `remove` |
+| `AppDelegate` | 사용 모드 하위 메뉴(선택과 적용 상태를 구분) · 첫 적용 동의 대화상자(변경 항목·영향·복원 방법 + 억제 별도 체크박스) · 호출 게이트 · Custom 하단 고정 · 종료 시 복원 |
+| `LaunchOptions`/`main` | `--restore-dock`(GUI 없는 복구, **Custom 재진입 없음**) · `--dock-mode`/`--dock-suppression`(승인된 검증용) |
+| `Settings` | `dockMode`(nil = 선택한 적 없음) · `customDockConsent`(적용 **성공 뒤** 기록) · `dockSuppressionApproved` |
+| `scope-decisions.md` | D2 기록: 세 모드 · Mac Dock 기본 · Both는 V20.2 · 재등장 억제는 별도 승인 |
+
+### V20.1.2 자체 검사 — 새 13건 포함 **197/197**
+
+```
+PASS 모드: 동의 없이는 시스템 설정을 바꾸지 않는다 — 거부=true 쓰기=0
+PASS 모드: Custom 적용은 원래 값·존재 여부를 기록하고 필요한 키만 바꾼다 — 기록=1개 원래=false 적용=true
+PASS 모드: 재등장 억제 설정은 승인했을 때만 적용한다 — 억제키=1000.0
+PASS 모드: 화면 준비 실패는 시스템 설정을 바꾸지 않고 기록도 남기지 않는다 — 실패=true 쓰기=0 기록=없음
+PASS 모드: 적용 실패 시 이미 바꾼 키를 되돌린다 — 되돌림=false 기록=정리됨
+PASS 모드: 복구 정보를 기록하지 못하면 시스템 설정을 바꾸지 않는다 — 거부=true 쓰기=0
+PASS 모드: 복원은 원래 값만 되돌리고 없던 키를 지우며 반복해도 안전하다 — 복원=3키 삭제확인=true 반복=복구 기록이 없습니다(이미 복원됨)
+PASS 모드: 사용자가 실행 중 바꾼 값은 덮어쓰지 않고 알린다 — 건너뜀=test.panedock.dock:autohide 기록남음=true
+PASS 모드: 미복원 기록이 있으면 새 원본으로 덮어쓰지 않는다 — 첫 저장=true 두번째=false 주인=111
+PASS 모드: 다른 인스턴스가 적용 중이면 중복 적용을 막는다 — 차단=true 쓰기=0
+PASS 모드: 비정상 종료 뒤 다음 실행에서 복구 상태를 감지한다(자동 복원 아님) — 감지=true 적용상태=적용 안 됨(기본 Dock 사용)
+PASS 모드: Both는 미구현으로 표시되고 적용 대상이 아니다 — both=false 목록=macDock,custom,both
+PASS 복구 기록: 저장·복원 왕복이 되고, 손상된 기록은 '없음'이 아니라 '읽을 수 없음'으로 보고한다
+```
+
+### V20.1.3 GUI 관측 (Mac Dock 기본 모드, 시스템 변경 없음)
+
+임시 설정 `/tmp/v18c/settings-macdock.json` · `--fake steady` · 실제 창·실제 메뉴 막대.
+
+| 관측 | 결과 | 캡처 |
+| --- | --- | --- |
+| 시작 시 커스텀 화면 | **띄우지 않음**(`panel hidden mode=macDock`) — 기본 Dock은 그대로 보인다 | `/tmp/v18c/macdock-small.png` |
+| 호출 단축키(⌃⌥⌘D) | 커스텀 화면 대신 **상태 메뉴가 열린다**(`invoke blocked applied=none selected=custom`) | `/tmp/v18c/sub5-wide2.png` |
+| 사용 모드 하위 메뉴 | `Mac Dock` · `Custom Dock` · `Both (V20.2) — 미구현`(비활성) · `적용 상태: 적용 안 됨(기본 Dock 사용)` · `Custom 동의: 없음` | `/tmp/v18c/sub6-wide2.png` |
+| 선택과 적용의 구분 | `Custom Dock` 선택 → 체크 표시 + 제목 `사용 모드: Custom Dock · 미적용`, **적용** 메뉴가 그때 켜지고 **복원**은 꺼져 있다(자동 활성화 끔) | 위와 같음 |
+| 첫 적용 동의 대화상자 | 바꿀 키(`autohide=true`)·Dock 1회 재시작·되돌리기 경로를 먼저 제시, 억제는 **별도 체크박스**(기본 꺼짐) | `/tmp/v18c/consent2-crop2.png` |
+| 취소 | `dockmode apply result=declined`, **`com.apple.dock` 내용 md5 동일**, 동의 기록 없음 | — |
+
+이 모드에서 사용자가 할 수 있는 것: 모드 선택, 적용(동의 후), 복원, 복구 기록 확인. 커스텀 화면은
+**적용 중에만** 보이므로 적용 전에는 화면이 뜨지 않는다.
+
+### V20.1.4 GUI 없는 복구 (`--restore-dock`)
+
+| 상황 | 결과 |
+| --- | --- |
+| 기록 없음 | `dock restore: nothing to restore (복구 기록 없음)` |
+| 손상된 기록 | `dock restore: unreadable record (형식이 맞지 않습니다) — <경로> 파일을 지우지 않았습니다` + 파일 **보존 확인** |
+| 정상 기록(테스트 도메인 `test.panedock.restorecheck`) | `mode=custom restored=1 skipped=0 left=false` → 키가 원래 값(false)으로 복원, **복원 확인 후 기록 삭제** |
+| Custom 재진입 | 없음(명령은 복원만 한다) |
+| `com.apple.dock` | 세 경우 모두 **내용 md5 동일**(한 번도 쓰지 않았다) |
+
+주의: 정상 기록 복구는 경로상 **Dock을 1회 재시작**한다(설정 변경은 없음). 이때 실제 `killall Dock`이 한 번 실행됐다.
+
+### V20.1.5 발견해서 고친 것
+
+- 서브메뉴의 `autoenablesItems`가 켜져 있어 `적용`/`복원`이 상태와 무관하게 **누를 수 있게** 보였다 → 끄고 상태에 따라 켜고 끈다.
+- 적용 실패 뒤에도 **동의 기록이 남았다** → 동의는 적용 성공 뒤에만 기록한다.
+- 복구 기록이 손상되면 `load()`가 nil을 돌려 **'기록 없음'으로 뭉개졌다**(복구 수단이 조용히 사라짐) → `DockRecoveryLoad`로 없음/읽음/읽을 수 없음을 구분하고, 손상 시 파일을 지우지 않고 알린다.
+- 되돌린 키가 없어도 Dock을 재시작했다 → 되돌린 키가 있을 때만 재시작한다.
+
+### V20.1.6 승인 대기 (실행하지 않음)
+
+| 항목 | 내용 |
+| --- | --- |
+| 바꿀 설정 | `com.apple.dock` `autohide` = `true` (현재 `false`) — 나머지 키는 건드리지 않음 |
+| 선택 항목(별도 승인) | `autohide-delay`·`autohide-time-modifier`(문서화되지 않은 키, 원래 없으면 되돌릴 때 삭제) |
+| 함께 일어나는 일 | 설정 반영을 위해 **Dock 1회 재시작** |
+| 복원 | 메뉴 › 사용 모드 › ‘기본 Dock으로 복원’, 앱 정상 종료 시 자동, `--restore-dock`(GUI 없이) |
+| 승인 후 확인할 것 | 실제 Dock이 숨겨진 상태의 **승인된 V18 화면**(프로젝트 A/B 항목 수를 다르게 두고 전체 폭·영역 폭·공통 위치·타이머 유지), 키보드·표시 목록 일치 |
+
+### V20.1.7 미리보기에서의 A/B·타이머 확인 (적용 아님)
+
+`--preview-custom`(검증용, 설정 변경 없음) + `--fake toggle`(3회 조회마다 `/tmp` ↔ 홈 전환).
+
+| 확인 | 관측 |
+| --- | --- |
+| 전체 Dock 너비 | 프로젝트 2개(p-a)·6개(p-b) 모두 `bar=1140` (창 1140×104) |
+| 프로젝트 영역 너비 | 두 경우 모두 `area=360` |
+| 공통 앱·카드 위치 | `list=[c:c1,c:c2,c:c3, ...]` 앞부분이 동일 — 공통 타일·시계·타이머가 움직이지 않는다 |
+| 항목 수가 바뀔 때 | p-a: `shown=5 hidden=0` · p-b: `shown=5 hidden=4` — 넘침은 `더보기`로만, 조용히 자르지 않는다 |
+| 표시 목록 = 키보드 목록 | 두 경우 모두 로그의 `list=`가 `shown=`과 일치(코어 검사도 동일 값으로 고정) |
+| 실행 중 타이머 | `action=start source=mouse remaining=25:00 running=true` 1건 뒤 **25:00 → 24:52 → 24:38**로 계속 감소, 프로젝트 A↔B 전환 동안 유지(`card=focus-1` 조작은 1건뿐 = 전환으로 초기화되지 않음) |
+| 시계 | 실제 시각·날짜 표시(17:01 / 9월 18일 금요일) |
+
+이 화면은 **미리보기**다(제목·안내 문구에 미적용 명시). 실제 Custom 적용 상태에서의 같은 확인은 승인 후에 한다.
