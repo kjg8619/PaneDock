@@ -20,8 +20,6 @@ public final class DockModeController {
     private let now: () -> Date
     private let pid: Int32
     private let bootID: String
-    private let lease: TimeInterval
-    private let isProcessAlive: (Int32) -> Bool
 
     public private(set) var applied: DockAppliedState = .none
     public private(set) var isBusy = false
@@ -35,8 +33,6 @@ public final class DockModeController {
         plan: DockModePlan = .systemDefault,
         pid: Int32 = ProcessInfo.processInfo.processIdentifier,
         bootID: String = DockBootID.current(),
-        lease: TimeInterval = 600,
-        isProcessAlive: @escaping (Int32) -> Bool = DockModeLock.isAlive,
         now: @escaping () -> Date = Date.init,
         log: @escaping (String) -> Void = { _ in }
     ) {
@@ -46,8 +42,6 @@ public final class DockModeController {
         self.plan = plan
         self.pid = pid
         self.bootID = bootID
-        self.lease = lease
-        self.isProcessAlive = isProcessAlive
         self.now = now
         self.log = log
     }
@@ -72,8 +66,22 @@ public final class DockModeController {
         let operationID = UUID().uuidString
         var notes: [String] = []
 
-        notes.append(contentsOf: try acquireLock(operationID: operationID, purpose: "apply", moment: moment))
-        defer { releaseLock(operationID: operationID, notes: &notes) }
+        let acquired = try acquireLock(operationID: operationID, purpose: "apply", moment: moment)
+        notes.append(contentsOf: acquired.notes)
+        defer { releaseLock(acquired.handle, notes: &notes) }
+
+        // 0) 바꿀 것이 0개여도 **기존 기록을 먼저 확인**한다.
+        //    미완료·손상 기록이 있으면 그 파일이 사용자의 복구 수단이므로 새 작업을 시작하지 않는다.
+        switch recovery.loadResult() {
+        case .unreadable(let reason):
+            log("dockmode apply result=refused reason=record-unreadable")
+            throw DockModeError.recoveryRecordPending("복구 기록을 읽을 수 없습니다(\(reason)) — 원본을 지우지 않았습니다")
+        case .record(let existing) where existing.hasPendingWork:
+            log("dockmode apply result=refused reason=record-pending keys=\(existing.entries.count)")
+            throw DockModeError.recoveryRecordPending(existing.pendingKeyLabels.joined(separator: ","))
+        case .none, .noPath, .record:
+            break
+        }
 
         let changes = plan.changes(includeSuppression: suppressionApproved)
         let snapshot = system.snapshot(changes.map(\.key))
@@ -157,7 +165,7 @@ public final class DockModeController {
                 // 그 키가 되돌리기에서 빠지지 않는다.
                 touched.append(change.key)
                 try system.set(change.value, for: change.key)
-                _ = lock.refresh(operationID: operationID, now: now())
+                _ = acquired.handle?.update(acquired.info)
                 let current = system.currentValue(for: change.key)
                 guard let current, current.matches(change.value) else {
                     throw DockModeError.applyFailed(
@@ -242,6 +250,16 @@ public final class DockModeController {
         isBusy = true
         defer { isBusy = false }
 
+        let moment = now()
+        let operationID = UUID().uuidString
+        var notes: [String] = []
+
+        // 잠금을 **먼저** 잡고, 그 안에서 기록을 읽고 판정하고 바꾼다(다른 인스턴스의 세션을 건드리지 않는다).
+        let acquired = try acquireLock(operationID: operationID, purpose: "restore", moment: moment)
+        notes.append(contentsOf: acquired.notes)
+        defer { releaseLock(acquired.handle, notes: &notes) }
+        let lockInfo = acquired.info
+
         let loaded = recovery.loadResult()
         if case .unreadable(let reason) = loaded {
             applied = .none
@@ -251,12 +269,6 @@ public final class DockModeController {
             applied = .none
             return DockRestoreOutcome(kind: .nothingToDo, notes: [loaded.summary])
         }
-
-        let moment = now()
-        let operationID = UUID().uuidString
-        var notes: [String] = []
-        notes.append(contentsOf: try acquireLock(operationID: operationID, purpose: "restore", moment: moment))
-        defer { releaseLock(operationID: operationID, notes: &notes) }
 
         var results: [DockRestoreEntryResult] = []
         var remaining: [DockRecoveryRecord.Entry] = []
@@ -274,10 +286,8 @@ public final class DockModeController {
             let appliedValue = entry.applied.asValue
             let current = system.currentValue(for: key)
 
-            if entry.skippedByUserChange {
-                keep(entry, .userChanged, "이전 복원에서 사용자 변경으로 표시됨")
-                continue
-            }
+            // 이전에 '사용자 변경'으로 남긴 항목도 **지금 값을 다시 본다**.
+            // (되돌리지 않은 이유가 사라졌으면 처리하고, 아니면 그대로 남긴다.)
             if current == nil, entry.original == nil {
                 // 우리가 만들었던 키가 없고 원래도 없던 키 — 되돌릴 것이 없다.
                 results.append(DockRestoreEntryResult(key: entry.keyLabel, disposition: .alreadyOriginal, detail: "원래도 없던 키"))
@@ -288,7 +298,10 @@ public final class DockModeController {
                 continue
             }
             if let current, !current.matches(appliedValue) {
-                keep(entry, .userChanged, "현재 \(current.text) ≠ 적용값 \(appliedValue.text)")
+                let note = entry.skippedByUserChange
+                    ? "이전에 사용자 변경으로 남긴 항목 — 지금 값 \(current.text) ≠ 적용값 \(appliedValue.text)"
+                    : "현재 \(current.text) ≠ 적용값 \(appliedValue.text)"
+                keep(entry, .userChanged, note)
                 log("dockmode restore skip=\(key.label) (사용자 변경)")
                 continue
             }
@@ -311,7 +324,7 @@ public final class DockModeController {
                 writeError = Self.describe(error)
                 log("dockmode restore write-error=\(key.label)")
             }
-            _ = lock.refresh(operationID: operationID, now: now())
+            _ = acquired.handle?.update(lockInfo)
 
             let check = system.currentValue(for: key)
             let expected = entry.original?.asValue
@@ -372,7 +385,7 @@ public final class DockModeController {
             kind = .partial
         }
 
-        var recordStillOnDisk = !remaining.isEmpty
+        var recordStillOnDisk = !remaining.isEmpty || restartPending
         if remaining.isEmpty, !restartPending {
             // **복원 확인 뒤에만** 지운다. 지우지 못하면 그대로 알린다.
             let clear = recovery.clear(operationID: record.operationID)
@@ -399,6 +412,7 @@ public final class DockModeController {
             switch recovery.update(updated) {
             case .written:
                 log("dockmode restore result=partial restored=\(restoredCount) left=\(remaining.count) restartPending=\(restartPending)")
+                recordStillOnDisk = recovery.loadResult().record != nil
             case .refusedPendingRestore(let keys):
                 notes.append("기록 갱신 거부(다른 작업의 미복원 기록): \(keys.joined(separator: ","))")
                 kind = .partial
@@ -443,14 +457,48 @@ public final class DockModeController {
         return record
     }
 
+    /// 사용자가 바꾼 항목을 **명시적으로** 기록에서 정리한다(시스템 값은 건드리지 않는다).
+    ///
+    /// 다른 인스턴스가 작업 중이면 잠금 때문에 거부된다.
+    public func forgetUserChanged(operationID: String) -> DockRecoveryWrite {
+        let moment = now()
+        let attempt = lock.attempt(
+            DockLockInfo(
+                ownerPID: pid,
+                operationID: UUID().uuidString,
+                purpose: "forget",
+                bootID: bootID,
+                recordedAt: moment
+            )
+        )
+        switch attempt.kind {
+        case .heldByOther:
+            log("dockmode forget result=refused (다른 인스턴스 작업 중)")
+            return .refusedPendingRestore(["다른 인스턴스가 작업 중"])
+        case .failed:
+            log("dockmode forget result=refused (잠금 실패)")
+            return .failed(attempt.reason ?? "잠금을 잡지 못했습니다")
+        case .acquired, .noPath:
+            break
+        }
+        defer { attempt.handle?.release() }
+        let result = recovery.forgetUserChanged(operationID: operationID)
+        if result == .written { log("dockmode forget result=ok") }
+        return result
+    }
+
     /// 지금 잠금을 누가 잡고 있는가(화면 안내용).
     public func lockOwner() -> DockLockInfo? { lock.current() }
 
     // MARK: - 잠금
 
-    /// 잠금을 잡는다. 살아 있는 다른 인스턴스의 잠금은 **지우지 않고** 오류로 알린다.
-    /// 반환값은 안내 문구(이어받았을 때 원본 보존 경로 등).
-    private func acquireLock(operationID: String, purpose: String, moment: Date) throws -> [String] {
+    /// 잠금을 잡는다. **배타성은 `flock`이 만든다** — 살아 있는 다른 프로세스의 잠금은 빼앗지 않는다.
+    /// 반환값은 (안내 문구, 손잡이). 손잡이가 살아 있는 동안 잠금이 유지된다.
+    private func acquireLock(
+        operationID: String,
+        purpose: String,
+        moment: Date
+    ) throws -> (notes: [String], handle: DockLockHandle?, info: DockLockInfo) {
         let info = DockLockInfo(
             ownerPID: pid,
             operationID: operationID,
@@ -459,36 +507,39 @@ public final class DockModeController {
             recordedAt: moment
         )
         var notes: [String] = []
-        switch lock.acquire(info, lease: lease, isProcessAlive: isProcessAlive) {
-        case .acquired, .noPath:
+        let result = lock.attempt(info)
+        switch result.kind {
+        case .acquired:
             lastLockNote = nil
-        case .heldByOther(let other):
-            let note = "다른 인스턴스(pid=\(other.ownerPID))가 \(other.purpose) 중"
+            if let previous = result.previousOwner {
+                // 비정상 종료로 남은 흔적. 잠금은 OS가 이미 풀어 준 상태다.
+                let note = "이전 잠금 흔적(pid=\(previous.ownerPID), \(previous.purpose))을 이어받았습니다"
+                    + (previous.bootID == bootID ? "" : " — 다른 부팅 세션")
+                    + (result.preservedPath.map { " — 사본: \($0)" } ?? "")
+                lastLockNote = note
+                notes.append(note)
+                log("dockmode lock=leftover pid=\(previous.ownerPID)")
+            }
+            return (notes, result.handle, info)
+        case .noPath:
+            lastLockNote = nil
+            return (notes, nil, info)
+        case .heldByOther:
+            let holder = result.previousOwner
+            let note = holder.map { "다른 인스턴스(pid=\($0.ownerPID))가 \($0.purpose) 중" } ?? "다른 인스턴스가 작업 중"
             lastLockNote = note
-            log("dockmode lock=held-by-other pid=\(other.ownerPID)")
+            log("dockmode lock=held-by-other pid=\(holder?.ownerPID ?? -1)")
             throw DockModeError.otherInstanceActive(note)
-        case .tookOverStale(let other, let preserved):
-            let note = "이전 잠금(pid=\(other.ownerPID), \(other.purpose))을 이어받았습니다"
-                + (preserved.map { " — 원본 보존: \($0)" } ?? "")
-            lastLockNote = note
-            notes.append(note)
-            log("dockmode lock=took-over pid=\(other.ownerPID)")
-        case .unavailable(let reason):
-            throw DockModeError.lockUnavailable(reason)
+        case .failed:
+            throw DockModeError.lockUnavailable(result.reason ?? "잠금을 잡지 못했습니다")
         }
-        return notes
     }
 
-    private func releaseLock(operationID: String, notes: inout [String]) {
-        switch lock.release(operationID: operationID) {
-        case .removed, .absent, .noPath:
-            break
-        case .notOwner:
-            // 다른 작업이 잡고 있다 — 지우지 않는다(그 작업의 소유권이다).
-            log("dockmode lock=release-skipped (다른 작업 소유)")
-        case .failed(let reason):
-            notes.append("잠금 해제 실패: \(reason)")
-            log("dockmode lock=release-failed reason=\(reason)")
+    private func releaseLock(_ handle: DockLockHandle?, notes: inout [String]) {
+        guard let handle else { return }
+        handle.release()
+        if !DockModeLock.isAlive(handle.operationID.isEmpty ? -1 : pid) {
+            notes.append("잠금을 푼 뒤 프로세스 상태를 확인하지 못했습니다")
         }
     }
 

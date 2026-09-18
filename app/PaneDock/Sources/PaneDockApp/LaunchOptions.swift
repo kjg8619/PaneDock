@@ -45,6 +45,8 @@ struct LaunchOptions {
     var dockProbe = false
     /// `--dock-probe`에 함께 준 키(`domain:key` 또는 `key` → `com.apple.dock`).
     var dockProbeKeys: [String] = []
+    /// GUI 없이 실행하는 **사용자 변경 항목 정리**(시스템 값은 건드리지 않는다).
+    var forgetUserChanged = false
     /// GUI 없이 실행하는 **Dock 복구**: 남아 있는 복구 기록으로 기본 Dock 설정을 되돌리고 종료한다.
     /// **다시 Custom 모드로 들어가지 않는다.**
     var restoreDock = false
@@ -97,6 +99,7 @@ PaneDock — 포커스된 터미널 pane을 따라가는 최소 Dock
   --dock-probe [domain:key ...]  (읽기 전용) 적용 계획 키의 값·자료형을 바꾸지 않고 확인한다
   --no-dock-restart  (검증용) Dock을 다시 시작하지 않는다(운영 Dock에 영향 없이 복구 경로 확인)
   --preview-custom  (검증용) Custom 적용 전에 커스텀 화면을 미리 보여준다(설정 변경 없음)
+  --forget-user-changed  사용자 변경·키 삭제로 남긴 항목을 기록에서 정리한다(시스템 값은 그대로)
   --restore-dock   남아 있는 복구 기록으로 기본 Dock 설정을 되돌리고 종료한다(GUI 없이, Custom 재진입 없음)
   --dock-mode <macDock|custom>  (승인된 검증용) 시작 시 그 모드를 적용한다
   --dock-suppression           (승인된 검증용) 재등장 억제 설정 사용을 승인한 것으로 본다
@@ -247,6 +250,8 @@ func parseLaunchOptions(_ arguments: [String]) -> LaunchOptions? {
                 exit(2)
             }
             options.timerAutostartAfterMilliseconds = value
+        case "--forget-user-changed":
+            options.forgetUserChanged = true
         case "--dock-probe":
             options.dockProbe = true
             // 함께 준 키도 읽는다(값·자료형 확인용). 다음 옵션(`--`)이 나오면 멈춘다.

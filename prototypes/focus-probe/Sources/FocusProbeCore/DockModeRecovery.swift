@@ -65,6 +65,22 @@ public struct DockRecoveryRecord: Codable, Equatable, Sendable {
         }
 
         public var keyLabel: String { "\(domain):\(name)" }
+
+        private enum CodingKeys: String, CodingKey {
+            case domain, name, original, applied, skippedByUserChange, skipReason
+        }
+
+        /// 디코더: **필수**(domain·name·applied)와 **선택**(원래 값·사용자 변경 표시·사유)을 구분한다.
+        /// 이전 형식에는 선택 필드가 없다 — 없으면 기본값으로 읽고, 필수가 없으면 오류로 올린다.
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            domain = try container.decode(String.self, forKey: .domain)
+            name = try container.decode(String.self, forKey: .name)
+            applied = try container.decode(StoredValue.self, forKey: .applied)
+            original = try container.decodeIfPresent(StoredValue.self, forKey: .original)
+            skippedByUserChange = (try? container.decode(Bool.self, forKey: .skippedByUserChange)) ?? false
+            skipReason = try container.decodeIfPresent(String.self, forKey: .skipReason)
+        }
     }
 
     /// 저장용 값 표현(자료형을 함께 남긴다).
@@ -152,14 +168,17 @@ public struct DockRecoveryRecord: Codable, Equatable, Sendable {
         case operationID, mode, appliedAt, updatedAt, suppression, entries, ownerPID, bootID, restartPending
     }
 
-    /// 관대한 디코더: 이전 형식(`operationID`·`updatedAt`·`bootID` 없음)도 읽는다.
+    /// 디코더: **이전 형식의 선택 필드 누락**은 기본값으로 읽고,
+    /// **필수 복구 정보(모드·시각·항목 목록)의 손상**은 오류로 올린다(빈 배열로 대체하지 않는다).
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        // 필수 — 없거나 형식이 깨지면 이 기록은 신뢰할 수 없다(복구 수단을 잃지 않도록 '읽을 수 없음'으로 간다).
         mode = try container.decode(String.self, forKey: .mode)
         appliedAt = try container.decode(Date.self, forKey: .appliedAt)
+        entries = try container.decode([Entry].self, forKey: .entries)
+        // 선택 — 이전 형식에 없던 필드. 기본값으로 읽는다.
         updatedAt = (try? container.decode(Date.self, forKey: .updatedAt)) ?? appliedAt
         suppression = (try? container.decode(Bool.self, forKey: .suppression)) ?? false
-        entries = (try? container.decode([Entry].self, forKey: .entries)) ?? []
         ownerPID = (try? container.decode(Int32.self, forKey: .ownerPID)) ?? 0
         bootID = (try? container.decode(String.self, forKey: .bootID)) ?? ""
         // 없던 필드는 **빈 작업 ID**로 둔다(새 작업으로 오인해 덮어쓰지 않도록 `create`가 거부한다).
@@ -167,10 +186,16 @@ public struct DockRecoveryRecord: Codable, Equatable, Sendable {
         restartPending = (try? container.decode(Bool.self, forKey: .restartPending)) ?? false
     }
 
-    /// 아직 복원하지 않은 키가 있는가.
-    public var hasUnrestoredKeys: Bool { !entries.isEmpty }
+    /// 아직 끝나지 않은 복구 작업이 있는가.
+    ///
+    /// **항목 0개 + `restartPending`도 미완료다**(값은 되돌렸지만 Dock 재시작이 남아 있다).
+    public var hasPendingWork: Bool { !entries.isEmpty || restartPending }
 
-    public var unrestoredKeyLabels: [String] { entries.map(\.keyLabel) }
+    public var pendingKeyLabels: [String] {
+        var labels = entries.map(\.keyLabel)
+        if restartPending { labels.append("Dock 재시작 대기") }
+        return labels
+    }
 }
 
 /// 복구 기록 읽기 결과. **손상을 '기록 없음'으로 뭉개지 않는다**(복구 수단이 조용히 사라지면 안 된다).
@@ -188,10 +213,17 @@ public enum DockRecoveryLoad: Equatable, Sendable {
 
     public var summary: String {
         switch self {
-        case .none: return "복구 기록 없음"
-        case .record(let record): return "미복원 기록 \(record.entries.count)키"
-        case .unreadable(let reason): return "복구 기록을 읽을 수 없음(\(reason))"
-        case .noPath: return "복구 기록 경로 없음"
+        case .none:
+            return "복구 기록 없음"
+        case .record(let record):
+            var parts: [String] = []
+            if record.entries.count > 0 { parts.append("미복원 \(record.entries.count)키") }
+            if record.restartPending { parts.append("재시작 대기") }
+            return parts.isEmpty ? "남은 항목 없음" : "미완료 기록(" + parts.joined(separator: " · ") + ")"
+        case .unreadable(let reason):
+            return "복구 기록을 읽을 수 없음(\(reason))"
+        case .noPath:
+            return "복구 기록 경로 없음"
         }
     }
 }
@@ -275,8 +307,8 @@ public struct DockRecoveryStore: Sendable {
         switch loadResult() {
         case .unreadable(let reason):
             return .refusedUnreadable(reason)
-        case .record(let existing) where existing.hasUnrestoredKeys:
-            return .refusedPendingRestore(existing.unrestoredKeyLabels)
+        case .record(let existing) where existing.hasPendingWork:
+            return .refusedPendingRestore(existing.pendingKeyLabels)
         case .none, .noPath, .record:
             return write(record)
         }
@@ -290,7 +322,7 @@ public struct DockRecoveryStore: Sendable {
             return .refusedUnreadable(reason)
         case .record(let existing):
             if existing.operationID != record.operationID {
-                return .refusedPendingRestore(existing.unrestoredKeyLabels)
+                return .refusedPendingRestore(existing.pendingKeyLabels)
             }
             return write(record)
         case .none, .noPath:
@@ -320,6 +352,52 @@ public struct DockRecoveryStore: Sendable {
             }
         case .noPath:
             return .noPath
+        }
+    }
+
+    /// 사용자 변경·키 삭제로 남겨 둔 항목을 **사용자가 명시적으로** 정리한다.
+    ///
+    /// 시스템 값은 건드리지 않는다(그 키는 사용자의 것이다). 기록에서만 뺀다.
+    /// 남는 항목이 없고 재시작 대기도 없으면 파일을 지운다.
+    public func forgetUserChanged(operationID: String) -> DockRecoveryWrite {
+        switch loadResult() {
+        case .unreadable(let reason):
+            return .refusedUnreadable(reason)
+        case .none:
+            return .written
+        case .noPath:
+            return .noPath
+        case .record(let existing):
+            guard existing.operationID == operationID else {
+                return .refusedPendingRestore(existing.pendingKeyLabels)
+            }
+            let kept = existing.entries.filter { entry in
+                let reason = entry.skipReason
+                return !(reason == DockRestoreDisposition.userChanged.rawValue
+                    || reason == DockRestoreDisposition.keyRemoved.rawValue)
+            }
+            if kept.isEmpty, !existing.restartPending {
+                guard let url else { return .noPath }
+                do {
+                    try FileManager.default.removeItem(at: url)
+                    return .written
+                } catch {
+                    return .failed((error as NSError).localizedDescription)
+                }
+            }
+            return write(
+                DockRecoveryRecord(
+                    operationID: existing.operationID,
+                    mode: existing.mode,
+                    appliedAt: existing.appliedAt,
+                    updatedAt: Date(),
+                    suppression: existing.suppression,
+                    entries: kept,
+                    ownerPID: existing.ownerPID,
+                    bootID: existing.bootID,
+                    restartPending: existing.restartPending
+                )
+            )
         }
     }
 
@@ -363,30 +441,67 @@ public struct DockLockInfo: Codable, Equatable, Sendable {
     }
 }
 
-public enum DockLockResult: Equatable, Sendable {
-    case acquired
-    /// 살아 있는 다른 인스턴스가 잡고 있다 — **지우지 않는다**.
-    case heldByOther(DockLockInfo)
-    /// 증거가 있는 stale 잠금을 이어받았다(원본은 사본으로 보존).
-    case tookOverStale(DockLockInfo, preservedPath: String?)
-    case unavailable(String)
-    /// 경로가 없다 — 잠금 없이 진행한다(검사용).
-    case noPath
+/// 잠금 시도 결과.
+public struct DockLockAttempt: Sendable {
+    public enum Kind: Equatable, Sendable {
+        case acquired
+        /// 살아 있는 다른 프로세스가 잡고 있다 — **빼앗지 않는다**(시간이 지나도 마찬가지).
+        case heldByOther
+        case failed
+        /// 잠금 경로가 없다(검사용) — 잠금 없이 진행한다는 뜻.
+        case noPath
+    }
+
+    public var kind: Kind
+    /// 잡았을 때의 손잡이. 이 객체가 살아 있는 동안 잠금이 유지된다(닫으면 풀린다).
+    public var handle: DockLockHandle?
+    /// 남아 있던 이전 소유자 정보(비정상 종료 흔적).
+    public var previousOwner: DockLockInfo?
+    /// 그 흔적을 남긴 사본 경로.
+    public var preservedPath: String?
+    public var reason: String?
+
+    public static let noPath = DockLockAttempt(kind: .noPath)
 }
 
-public enum DockLockRelease: Equatable, Sendable {
-    case removed
-    case absent
-    /// 다른 작업이 잡고 있어 지우지 않았다.
-    case notOwner
-    case failed(String)
-    case noPath
+/// 잡은 잠금. **파일 서술자에 걸린 배타 잠금**(`flock`)이므로 프로세스가 죽으면 OS가 풀어 준다.
+public final class DockLockHandle: @unchecked Sendable {
+    public let url: URL
+    public let operationID: String
+    private let fd: Int32
+    private var released = false
+
+    init(url: URL, operationID: String, fd: Int32) {
+        self.url = url
+        self.operationID = operationID
+        self.fd = fd
+    }
+
+    /// 같은 잠금을 유지한 채 **내용(정보)만** 갱신한다(긴 작업이 스스로 오래된 것처럼 보이지 않게).
+    @discardableResult
+    public func update(_ info: DockLockInfo) -> Bool {
+        guard !released else { return false }
+        return DockModeLock.write(info, to: fd)
+    }
+
+    public func release() {
+        guard !released else { return }
+        released = true
+        // 내용을 비워 "정상적으로 풀렸다"를 남긴다 — 남아 있는 내용은 비정상 종료 흔적으로 본다.
+        _ = DockModeLock.write(nil, to: fd)
+        flock(fd, LOCK_UN)
+        close(fd)
+    }
+
+    deinit { release() }
 }
 
 /// 중복 인스턴스가 서로 설정을 바꾸지 못하게 하는 잠금.
 ///
-/// **stale 판정은 증거로만 한다**: 파일 존재만으로는 아무것도 단정하지 않고,
-/// 살아 있는 소유자의 잠금은 절대 지우지 않는다. 이어받을 때는 원본을 사본으로 남긴다.
+/// **배타성은 `flock`이 만든다.** 파일 존재나 atomic 쓰기만으로는 두 프로세스가 동시에 잡을 수 있다.
+/// - 다른 프로세스가 잡고 있으면 **실패**한다(시간이 지나도 빼앗지 않는다).
+/// - 프로세스가 죽으면 OS가 잠금을 풀어 주므로, 비정상 종료가 복구를 막지 않는다.
+/// - 남아 있는 내용은 **정보**일 뿐이고, 이어받을 때는 사본으로 남긴다.
 public struct DockModeLock: Sendable {
     public var url: URL?
 
@@ -394,102 +509,94 @@ public struct DockModeLock: Sendable {
         self.url = url
     }
 
+    /// 지금 파일에 적힌 소유자 정보(참고용 · 잠금 판정이 아니다).
     public func current() -> DockLockInfo? {
-        guard let url, let data = try? Data(contentsOf: url) else { return nil }
+        guard let url else { return nil }
+        return DockModeLock.readInfo(at: url)
+    }
+
+    public func attempt(_ info: DockLockInfo) -> DockLockAttempt {
+        guard let url else { return .noPath }
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        } catch {
+            return DockLockAttempt(kind: .failed, reason: "잠금 폴더를 만들지 못했습니다(\(error.localizedDescription))")
+        }
+        let fd = open(url.path, O_CREAT | O_RDWR, 0o600)
+        guard fd >= 0 else {
+            return DockLockAttempt(kind: .failed, reason: "잠금 파일을 열지 못했습니다(\(Self.errnoText()))")
+        }
+        // **배타 잠금 시도.** 다른 프로세스가 잡고 있으면 여기서 실패한다.
+        if flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            let holder = DockModeLock.readInfo(at: url)
+            close(fd)
+            return DockLockAttempt(kind: .heldByOther, previousOwner: holder)
+        }
+
+        // 잠금을 잡았다. 남아 있는 내용이 있으면 **비정상 종료 흔적**으로 보고 사본을 남긴다.
+        var previous: DockLockInfo?
+        var preserved: String?
+        if let leftover = DockModeLock.readInfo(at: url), leftover.operationID != info.operationID {
+            previous = leftover
+            preserved = DockModeLock.preserveCopy(of: url, stamp: info.recordedAt)
+        }
+        guard DockModeLock.write(info, to: fd) else {
+            flock(fd, LOCK_UN)
+            close(fd)
+            return DockLockAttempt(kind: .failed, reason: "잠금 정보를 쓰지 못했습니다")
+        }
+        return DockLockAttempt(
+            kind: .acquired,
+            handle: DockLockHandle(url: url, operationID: info.operationID, fd: fd),
+            previousOwner: previous,
+            preservedPath: preserved
+        )
+    }
+
+    static func write(_ info: DockLockInfo?, to fd: Int32) -> Bool {
+        let data: Data
+        if let info {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            guard let encoded = try? encoder.encode(info) else { return false }
+            data = encoded
+        } else {
+            data = Data()
+        }
+        // 내용 전체를 갈아 끼운다(잠금은 fd에 걸려 있으므로 내용 교체는 안전하다).
+        guard ftruncate(fd, 0) == 0, lseek(fd, 0, SEEK_SET) >= 0 else { return false }
+        let written = data.withUnsafeBytes { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Darwin.write(fd, base, buffer.count)
+        }
+        return written == data.count
+    }
+
+    static func readInfo(at url: URL) -> DockLockInfo? {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try? decoder.decode(DockLockInfo.self, from: data)
     }
 
-    /// stale 근거를 모은다. 셋 중 하나라도 해당하면 stale이고, 그 이유를 함께 돌려준다.
-    public func stalenessReason(
-        _ info: DockLockInfo,
-        now: Date,
-        lease: TimeInterval,
-        bootID: String,
-        isProcessAlive: Bool
-    ) -> String? {
-        if !info.bootID.isEmpty, info.bootID != bootID {
-            return "다른 부팅 세션의 잠금"
-        }
-        if !isProcessAlive {
-            return "소유 프로세스(\(info.ownerPID))가 없음"
-        }
-        let age = now.timeIntervalSince(info.recordedAt)
-        if age > lease {
-            return "작업 시각이 \(Int(age))초 지남(리스 \(Int(lease))초 초과)"
-        }
-        return nil
-    }
-
-    public func acquire(
-        _ info: DockLockInfo,
-        lease: TimeInterval = 600,
-        isProcessAlive: (Int32) -> Bool = DockModeLock.isAlive
-    ) -> DockLockResult {
-        guard let url else { return .noPath }
+    private static func preserveCopy(of url: URL, stamp: Date) -> String? {
+        let text = ISO8601DateFormatter().string(from: stamp).replacingOccurrences(of: ":", with: "")
+        let backup = url.deletingLastPathComponent().appendingPathComponent("\(url.lastPathComponent).stale-\(text)")
+        guard let data = try? Data(contentsOf: url) else { return nil }
         do {
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: backup, options: .atomic)
+            return backup.path
         } catch {
-            return .unavailable((error as NSError).localizedDescription)
-        }
-
-        var preserved: String?
-        if let existing = current() {
-            // 같은 작업의 재진입은 그대로 진행한다(리스만 갱신).
-            if existing.operationID == info.operationID {
-                return write(info) ? .acquired : .unavailable("잠금을 갱신하지 못했습니다")
-            }
-            let alive = isProcessAlive(existing.ownerPID)
-            guard let reason = stalenessReason(existing, now: info.recordedAt, lease: lease, bootID: info.bootID, isProcessAlive: alive) else {
-                return .heldByOther(existing)
-            }
-            // 이어받는다. 원본은 **지우지 않고 사본으로 남긴다**(무엇이 있었는지 확인 가능).
-            let stamp = ISO8601DateFormatter().string(from: info.recordedAt).replacingOccurrences(of: ":", with: "")
-            let backup = url.deletingLastPathComponent().appendingPathComponent("\(url.lastPathComponent).stale-\(stamp)")
-            if let data = try? Data(contentsOf: url) {
-                try? data.write(to: backup, options: .atomic)
-                preserved = backup.path
-            }
-            guard write(info) else { return .unavailable("stale 잠금을 이어받지 못했습니다") }
-            return .tookOverStale(existing, preservedPath: preserved == nil ? nil : "\(preserved!) (\(reason))")
-        }
-
-        guard write(info) else { return .unavailable("잠금 파일을 만들지 못했습니다") }
-        return .acquired
-    }
-
-    /// 같은 작업의 리스를 갱신한다(긴 적용·복원이 스스로 stale이 되지 않게).
-    @discardableResult
-    public func refresh(operationID: String, now: Date) -> Bool {
-        guard var info = current(), info.operationID == operationID else { return false }
-        info.recordedAt = now
-        return write(info)
-    }
-
-    /// 같은 작업의 잠금만 푼다.
-    public func release(operationID: String) -> DockLockRelease {
-        guard let url else { return .noPath }
-        guard let info = current() else { return .absent }
-        guard info.operationID == operationID else { return .notOwner }
-        do {
-            try FileManager.default.removeItem(at: url)
-            return .removed
-        } catch {
-            return .failed((error as NSError).localizedDescription)
+            return nil
         }
     }
 
-    private func write(_ info: DockLockInfo) -> Bool {
-        guard let url else { return false }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(info) else { return false }
-        return (try? data.write(to: url, options: .atomic)) != nil
+    private static func errnoText() -> String {
+        String(cString: strerror(errno))
     }
 
-    /// 프로세스 생존 확인(PID 재사용은 부팅 세션·리스로 함께 판단한다).
+    /// 프로세스 생존 확인(안내 문구용).
     public static func isAlive(_ pid: Int32) -> Bool {
         guard pid > 0 else { return false }
         if kill(pid, 0) == 0 { return true }

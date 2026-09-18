@@ -18,6 +18,21 @@ enum ScreenGeometry {
             ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
     }
 
+    /// 패널이 놓인 화면(없으면 주 화면).
+    static func targetScreen(for panelFrame: CGRect) -> NSScreen? {
+        NSScreen.screens.first { $0.frame.intersects(panelFrame) } ?? NSScreen.main ?? NSScreen.screens.first
+    }
+
+    /// Custom의 기준 위치: **대상 화면의 실제 아래 가장자리**.
+    ///
+    /// `visibleFrame`은 기본 Dock·메뉴 막대 영역을 **제외한** 값이라, 기본 Dock을 숨기고 쓰는
+    /// Custom에서는 화면 아래에 빈 띠가 남는다. Custom의 기준은 화면 프레임의 아래 끝이다.
+    static func bottomAnchorOrigin(for size: CGSize, panelFrame: CGRect) -> CGPoint {
+        let screen = targetScreen(for: panelFrame)
+        let frame = screen?.frame ?? fallbackFrame
+        return CGPoint(x: max(frame.minX + 12, frame.midX - size.width / 2), y: frame.minY)
+    }
+
     /// 저장된 좌표(없으면 기본 위치)를 지금 화면에 보이는 위치로 확정한다.
     static func resolve(origin: CGPoint?, size: CGSize) -> CGPoint {
         guard let origin else {

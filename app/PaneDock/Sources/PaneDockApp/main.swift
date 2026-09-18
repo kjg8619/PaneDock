@@ -80,6 +80,49 @@ guard let options = parseLaunchOptions(Array(CommandLine.arguments.dropFirst()))
 }
 
 // GUI 없이 실행하는 Dock 복구. **다시 Custom 모드로 들어가지 않는다.**
+// 사용자 변경 항목 정리(시스템 값은 건드리지 않는다). 종료 코드: 0 = 정리됨, 3 = 실패.
+func runForgetUserChanged(options: LaunchOptions) -> (line: String, code: Int32) {
+    let support = FileManager.default
+        .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+        .first?
+        .appendingPathComponent("PaneDock", isDirectory: true)
+    let store = DockRecoveryStore(url: support?.appendingPathComponent("dock-recovery.json"))
+    let controller = DockModeController(
+        system: SystemDockControl(allowRestart: false),
+        recovery: store,
+        lock: DockModeLock(url: support?.appendingPathComponent("dock-mode.lock"))
+    )
+    switch controller.recoveryState() {
+    case .none:
+        return ("dock forget: nothing to do (복구 기록 없음)", 0)
+    case .noPath:
+        return ("dock forget: failed reason=no-path", 3)
+    case .unreadable(let reason):
+        return ("dock forget: failed reason=unreadable-record(\(reason)) — 파일을 지우지 않았습니다", 3)
+    case .record(let record):
+        let result = controller.forgetUserChanged(operationID: record.operationID)
+        switch result {
+        case .written:
+            let left = store.load()?.pendingKeyLabels ?? []
+            return ("dock forget: ok left=\(left.count) \(left.joined(separator: ","))", 0)
+        case .refusedPendingRestore(let keys):
+            return ("dock forget: failed reason=refused(\(keys.joined(separator: ",")))", 3)
+        case .refusedUnreadable(let reason):
+            return ("dock forget: failed reason=unreadable(\(reason))", 3)
+        case .failed(let reason):
+            return ("dock forget: failed reason=\(reason)", 3)
+        case .noPath:
+            return ("dock forget: failed reason=no-path", 3)
+        }
+    }
+}
+
+if options.forgetUserChanged {
+    let result = runForgetUserChanged(options: options)
+    print(result.line)
+    exit(result.code)
+}
+
 if options.dockProbe {
     print(renderDockProbe(extraKeys: options.dockProbeKeys))
     exit(0)

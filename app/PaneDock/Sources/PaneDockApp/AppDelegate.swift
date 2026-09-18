@@ -53,11 +53,11 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     // MARK: - 사용 모드 (Mac Dock / Custom Dock)
 
-    /// 모드 컨트롤러를 만들고, 저장된 선택·동의에 따라 시작 시 상태를 맞춘다.
+    /// **컨트롤러만** 만든다. 저장된 모드 적용은 화면·메뉴가 준비된 뒤 `applySavedModeAtStartup`이 한다.
     ///
-    /// - 저장된 `dockMode`가 없으면 **동의로 간주하지 않는다**(Mac Dock으로 시작).
-    /// - 이전 실행이 비정상 종료로 남긴 복구 기록이 있으면 **먼저 복원**하고, 감지 사실을 안내한다.
-    private func installDockMode(store: SettingsStore, model: DockModel) {
+    /// 초기화 시점에는 창도 메뉴도 없으므로, 여기서 시스템 설정을 건드리면 "준비 전에 숨기지 않는다"는
+    /// 규칙을 지킬 수 없다.
+    private func installDockModeController(store: SettingsStore, model: DockModel) {
         let support = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first?
@@ -65,7 +65,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let isFake = options.isFake
         let recovery = DockRecoveryStore(url: isFake ? nil : support?.appendingPathComponent("dock-recovery.json"))
         let lock = DockModeLock(url: isFake ? nil : support?.appendingPathComponent("dock-mode.lock"))
-        let controller = DockModeController(
+        dockModeController = DockModeController(
             system: SystemDockControl(allowRestart: !options.noDockRestart) { [weak self] line in
                 self?.model?.appendEvent(line)
             },
@@ -73,23 +73,12 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             lock: lock,
             log: { [weak self] line in self?.model?.appendEvent(line) }
         )
-        dockModeController = controller
+        model.appendEvent("dockmode controller=ready recovery=\(recovery.loadResult().summary)")
+    }
 
-        // 이전 실행이 남긴 미복원 기록 감지(자동 복원이 아니라 감지 + 안내).
-        // 현재 Custom이 아니어도 **복구에 접근할 수 있게** 안내한다(메뉴 항목은 항상 열려 있다).
-        switch controller.recoveryState() {
-        case .record(let stale):
-            model.appendEvent("dockmode stale detected keys=\(stale.entries.count)")
-            startupNotice += (startupNotice.isEmpty ? "" : "\n")
-                + "이전 실행이 Dock 설정을 되돌리지 못했습니다(미복원 \(stale.entries.count)키). "
-                + "메뉴 › 사용 모드 › ‘기본 Dock으로 복원’을 실행해 주세요."
-        case .unreadable(let reason):
-            model.appendEvent("dockmode recovery unreadable reason=\(reason)")
-            startupNotice += (startupNotice.isEmpty ? "" : "\n")
-                + "Dock 복구 기록을 읽을 수 없습니다(\(reason)). 설정이 Custom으로 남아 있으면 직접 확인해 주세요."
-        case .none, .noPath:
-            break
-        }
+    /// 저장된 모드·동의·복구 상태를 **결정 함수**로 판정하고 그대로 실행한다(창·메뉴 준비 뒤 호출).
+    private func applySavedModeAtStartup(store: SettingsStore, model: DockModel) {
+        guard let controller = dockModeController else { return }
 
         // 승인된 검증용 플래그(임시 설정 파일에서만 쓴다): 선택·동의·억제 승인을 파일에 반영한다.
         if let launchMode = options.dockModeAtLaunch {
@@ -103,44 +92,67 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             model.appendEvent("dockmode launch flag=\(launchMode.rawValue) suppression=\(options.dockSuppressionApproved)")
         }
 
-        let saved = store.settings.dockMode
-        if isFake || saved == nil {
-            // 선택한 적이 없으면 Mac Dock으로 시작한다(동의 없음).
-            dockAppliedState = .none
-            if saved == nil { model.appendEvent("dockmode selected=none applied=none") }
-            return
-        }
-        if saved == .custom, store.settings.customDockConsent != nil {
-            // 지난 실행에서 시스템 단계가 실패했다면 **자동으로 다시 적용하지 않는다**(같은 실패 반복 방지).
-            // 사용자가 메뉴에서 직접 적용하거나 복원할 수 있다.
-            if let failedAt = store.settings.dockLastApplyFailedAt {
-                dockAppliedState = .none
-                model.appendEvent("dockmode startup apply=skipped lastFailure=\(failedAt)")
-                startupNotice += (startupNotice.isEmpty ? "" : "\n")
-                    + "지난번 Custom 적용이 실패해 이번 실행에서는 자동 적용하지 않았습니다. 메뉴 › 사용 모드에서 직접 적용하거나 복원해 주세요."
-                return
-            }
-            // 저장된 모드와 동의를 사용한다. 억제 설정은 **별도 승인**이 있을 때만.
+        let decision = DockStartupPolicy.decide(
+            selectedMode: store.settings.dockMode,
+            consent: store.settings.customDockConsent,
+            suppressionApproved: store.settings.dockSuppressionApproved,
+            lastApplyFailedAt: store.settings.dockLastApplyFailedAt,
+            recovery: controller.recoveryState()
+        )
+        model.appendEvent("dockmode startup decision=\(decisionName(decision)) reason=\(decision.reason)")
+
+        switch decision {
+        case .applyCustom(let suppression):
             do {
                 let outcome = try controller.applyCustom(
                     consent: true,
-                    suppressionApproved: store.settings.dockSuppressionApproved,
+                    suppressionApproved: suppression,
                     prepareScreen: { [weak self] in try self?.prepareCustomScreen() }
                 )
                 dockAppliedState = outcome.applied
                 store.update { $0.dockLastApplyFailedAt = nil }
-                model.appendEvent("dockmode startup apply=ok keys=\(outcome.changedKeys.count) lock=\(outcome.lockNote ?? "-")")
+                model.appendEvent("dockmode startup apply=ok keys=\(outcome.changedKeys.count)")
             } catch let error as DockModeError {
                 dockAppliedState = .none
                 markApplyFailure(error)
-                startupNotice += (startupNotice.isEmpty ? "" : "\n") + "Custom 모드를 적용하지 못했습니다: \(error.message)"
+                appendStartupNotice("Custom 모드를 적용하지 못했습니다: \(error.message)")
                 model.appendEvent("dockmode startup apply=failed reason=\(error.message)")
             } catch {
                 dockAppliedState = .none
             }
-            return
+        case .recoverFirst(let reason):
+            // 복구가 먼저다: 그 위에 새 적용을 겹치지 않는다. 복구는 사용자가 메뉴/명령으로 실행한다.
+            dockAppliedState = .none
+            appendStartupNotice("\(reason) — 메뉴 › 사용 모드 › ‘기본 Dock으로 복원’으로 먼저 정리해 주세요.")
+            model.appendEvent("dockmode startup recovery-first reason=\(reason)")
+        case .skipAfterFailure(let reason):
+            dockAppliedState = .none
+            appendStartupNotice("\(reason) 메뉴 › 사용 모드에서 직접 적용하거나 복원해 주세요.")
+            model.appendEvent("dockmode startup apply=skipped reason=\(reason)")
+        case .unsupported(let reason):
+            dockAppliedState = .none
+            appendStartupNotice(reason)
+            model.appendEvent("dockmode startup unsupported reason=\(reason)")
+        case .macDock(let reason):
+            dockAppliedState = .none
+            model.appendEvent("dockmode startup mac-dock reason=\(reason)")
         }
-        dockAppliedState = .none
+    }
+
+    private func decisionName(_ decision: DockStartupDecision) -> String {
+        switch decision {
+        case .macDock: return "macDock"
+        case .applyCustom: return "applyCustom"
+        case .recoverFirst: return "recoverFirst"
+        case .skipAfterFailure: return "skipAfterFailure"
+        case .unsupported: return "unsupported"
+        }
+    }
+
+    /// 시작 안내 문구를 덧붙인다(설정 안내와 같은 자리에 보인다).
+    private func appendStartupNotice(_ text: String) {
+        startupNotice = startupNotice.isEmpty ? text : startupNotice + "\n" + text
+        model?.setSettingsNotice(startupNotice.isEmpty ? nil : startupNotice)
     }
 
     /// 커스텀 화면 준비. **준비가 끝난 것을 확인하고 돌아와야** 코어가 시스템 설정을 쓴다.
@@ -168,7 +180,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         model.appendEvent(
             "dockmode prepare=ready:\(ready) visible=\(panel.isVisible) "
                 + "origin=(\(Int(panel.frame.origin.x)),\(Int(panel.frame.origin.y))) "
-                + "screenBottom=\(Int(ScreenGeometry.fallbackFrame.minY))"
+                + "screenBottom=\(Int(ScreenGeometry.bottomAnchorOrigin(for: panel.frame.size, panelFrame: panel.frame).y))"
         )
         guard ready else {
             throw DockScreenError.notReady("패널이 하단에 보이지 않습니다")
@@ -176,7 +188,8 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     private func isAtBottomEdge(_ panel: NSPanel) -> Bool {
-        abs(panel.frame.origin.y - ScreenGeometry.fallbackFrame.minY) <= 1.0
+        let expected = ScreenGeometry.bottomAnchorOrigin(for: panel.frame.size, panelFrame: panel.frame)
+        return abs(panel.frame.origin.y - expected.y) <= 1.0
     }
 
     /// 모드 선택(선택만으로는 아무것도 바꾸지 않는다).
@@ -299,6 +312,30 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         model?.appendEvent("dockmode session=ended reason=\(reason)")
     }
 
+    /// 사용자가 바꾼 항목을 **명시적으로** 기록에서 정리한다(시스템 값은 그대로 둔다).
+    @MainActor @objc private func forgetUserChangedAction() {
+        guard let controller = dockModeController else { return }
+        guard let record = controller.recoveryState().record else {
+            model?.setActionMessage("정리할 기록이 없습니다.")
+            rebuildStatusMenu()
+            return
+        }
+        switch controller.forgetUserChanged(operationID: record.operationID) {
+        case .written:
+            model?.setActionMessage("사용자가 바꾼 항목을 기록에서 정리했습니다(시스템 값은 그대로).")
+            model?.appendEvent("dockmode forget-user-changed result=ok")
+        case .refusedPendingRestore(let keys):
+            model?.setActionMessage("정리하지 못했습니다: \(keys.joined(separator: ","))")
+        case .refusedUnreadable(let reason):
+            model?.setActionMessage("정리하지 못했습니다: \(reason)")
+        case .failed(let reason):
+            model?.setActionMessage("정리하지 못했습니다: \(reason)")
+        case .noPath:
+            model?.setActionMessage("복구 기록 경로가 없습니다.")
+        }
+        rebuildStatusMenu()
+    }
+
     @MainActor @objc private func restoreDockModeAction() {
         if let outcome = restoreSystemDock(reason: "menu") {
             var message = outcome.userMessage
@@ -415,7 +452,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         .joined(separator: "\n")
         model.setSettingsNotice(startupNotice.isEmpty ? nil : startupNotice)
         self.model = model
-        installDockMode(store: store, model: model)
+        installDockModeController(store: store, model: model)
 
         // 저장된 외형을 반영하고 시작한다(없던 설정이면 기본 외형).
         model.applyAppearance(store.settings.appearance)
@@ -498,6 +535,15 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         installStatusItem(model: model)
         installHotKey(model: model)
         model.start(intervalMilliseconds: options.intervalMilliseconds)
+
+        // **창·메뉴가 준비된 뒤**에 저장된 모드를 적용한다(준비 전에 시스템 설정을 쓰지 않는다).
+        // 준비 완료를 로그로 남긴다 — 순서를 눈이 아니라 기록으로 확인할 수 있게.
+        model.appendEvent(
+            "dockmode ready panel=built(\(panel.frame.width)x\(panel.frame.height)) "
+                + "menu=\(statusItem != nil ? "installed" : "missing")"
+        )
+        applySavedModeAtStartup(store: store, model: model)
+        rebuildStatusMenu()
 
         if options.hidden {
             panel.orderOut(nil)
@@ -627,9 +673,14 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     /// 정상 종료는 **모드 해제와 같은 복원 경로**를 쓴다.
     func applicationWillTerminate(_ notification: Notification) {
-        // Custom을 쓴 적이 있거나 미복원 기록이 남아 있으면 정상 종료에서 복원한다.
-        let hasRecord = dockModeController?.recoveryState().record != nil
-        guard dockAppliedState.isCustom || hasRecord else { return }
+        // **우리가 적용한 Custom 세션만** 정상 종료에서 되돌린다.
+        // 기록이 남아 있어도 다른 인스턴스가 쓰는 세션이면 건드리지 않는다(그 인스턴스의 소유다).
+        guard dockAppliedState.isCustom else {
+            if let state = dockModeController?.recoveryState(), state.record != nil {
+                model?.appendEvent("dockmode quit-restore skipped (다른 인스턴스 세션일 수 있음)")
+            }
+            return
+        }
         if let outcome = restoreSystemDock(reason: "quit") {
             // 복원 자체는 restoreSystemDock이 로그에 남긴다(여기서는 결과만 한 줄 덧붙인다).
             model?.appendEvent(
@@ -748,9 +799,9 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private func anchorToBottom(panel: NSPanel, force: Bool = false) -> Bool {
         // 적용 중이거나 미리보기일 때, 또는 준비 단계에서 강제로(진입 시).
         guard dockAppliedState.isCustom || options.previewCustom || force else { return false }
-        let frame = ScreenGeometry.fallbackFrame
         let size = panel.frame.size
-        let origin = NSPoint(x: max(frame.minX + 12, frame.midX - size.width / 2), y: frame.minY)
+        // **대상 화면의 실제 아래 가장자리** 기준(기본 Dock 영역을 제외한 visibleFrame이 아니다).
+        let origin = ScreenGeometry.bottomAnchorOrigin(for: size, panelFrame: panel.frame)
         let sameSpot = abs(panel.frame.origin.y - origin.y) <= 0.5 && abs(panel.frame.origin.x - origin.x) <= 0.5
         if !sameSpot {
             isApplyingLayout = true
@@ -1253,9 +1304,30 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             submenu.addItem(entry)
         }
         submenu.addItem(.separator())
-        let status = NSMenuItem(title: "적용 상태: \(dockAppliedState.label)", action: nil, keyEquivalent: "")
+        // 복구 기록 상태 — **Custom이 아니어도** 여기서 보이고 복원으로 갈 수 있다.
+        let recovery = dockModeController?.recoveryState() ?? .noPath
+        // 복원이 끝나지 않았으면 '적용 안 됨'이 아니라 **미완료**로 보여준다(정상 복귀와 구분).
+        let pendingCount = recovery.record?.pendingKeyLabels.count ?? 0
+        let statusTitle: String = {
+            if dockAppliedState.isCustom { return "적용 상태: \(dockAppliedState.label)" }
+            switch recovery {
+            case .record(let record) where record.hasPendingWork:
+                return "적용 상태: 복원 미완료(남은 항목 \(record.pendingKeyLabels.count))"
+            case .unreadable:
+                return "적용 상태: 복구 기록을 읽을 수 없음"
+            case .none, .noPath, .record:
+                return "적용 상태: \(dockAppliedState.label)"
+            }
+        }()
+        let status = NSMenuItem(title: statusTitle, action: nil, keyEquivalent: "")
         status.isEnabled = false
         submenu.addItem(status)
+        if pendingCount > 0, !dockAppliedState.isCustom {
+            // 다시 시도할 수 있다는 것을 메뉴에서 바로 보이게 한다.
+            let retry = NSMenuItem(title: "복원 재시도 가능(남은 항목 \(pendingCount))", action: nil, keyEquivalent: "")
+            retry.isEnabled = false
+            submenu.addItem(retry)
+        }
         let consent = NSMenuItem(
             title: settings?.settings.customDockConsent == nil ? "Custom 동의: 없음" : "Custom 동의: 있음",
             action: nil,
@@ -1264,8 +1336,6 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         consent.isEnabled = false
         submenu.addItem(consent)
 
-        // 복구 기록 상태 — **Custom이 아니어도** 여기서 보이고 복원으로 갈 수 있다.
-        let recovery = dockModeController?.recoveryState() ?? .noPath
         let recoveryItem = NSMenuItem(title: "복구 기록: \(recovery.summary)", action: nil, keyEquivalent: "")
         recoveryItem.isEnabled = false
         submenu.addItem(recoveryItem)
@@ -1300,6 +1370,19 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         restore.target = self
         restore.isEnabled = restorable
         submenu.addItem(restore)
+        // 사용자가 바꾼 항목은 **자동으로 지우지 않는다.** 정리하려면 이 항목을 쓴다(시스템 값은 건드리지 않는다).
+        let userChanged = recovery.record?.entries.filter { $0.skipReason == DockRestoreDisposition.userChanged.rawValue
+            || $0.skipReason == DockRestoreDisposition.keyRemoved.rawValue } ?? []
+        if !userChanged.isEmpty {
+            let forget = NSMenuItem(
+                title: "사용자가 바꾼 항목 \(userChanged.count)개 기록에서 정리",
+                action: #selector(forgetUserChangedAction),
+                keyEquivalent: ""
+            )
+            forget.target = self
+            forget.isEnabled = true
+            submenu.addItem(forget)
+        }
 
         item.submenu = submenu
         menu.addItem(item)

@@ -1518,26 +1518,26 @@ public enum SelfTest {
             .appendingPathComponent("dock-recovery.json")
     }
 
-    /// 적용·복원 한 벌. 경로는 임시 파일이고, 잠금 생존 판정·재시작은 대체 구현이 맡는다.
+    /// 적용·복원 한 벌. 경로는 임시 파일이고, 재시작은 대체 구현이 맡는다.
+    /// 잠금 배타성은 실제 `flock`이 만들므로 잠금 검사도 임시 파일에서 그대로 확인한다.
     private static func makeDockHarness(
         values: [DockPreferenceKey: DockPreferenceValue] = [:],
         lockURL: URL? = nil,
-        alive: @escaping (Int32) -> Bool = { _ in false }
-    ) -> (system: StubDockSystem, store: DockRecoveryStore, url: URL, controller: DockModeController) {
+        pid: Int32 = 4242
+    ) -> (system: StubDockSystem, store: DockRecoveryStore, url: URL, lock: DockModeLock, controller: DockModeController) {
         let system = StubDockSystem(values: values)
         let url = temporaryRecoveryURL()
         let store = DockRecoveryStore(url: url)
+        let lock = DockModeLock(url: lockURL)
         let controller = DockModeController(
             system: system,
             recovery: store,
-            lock: DockModeLock(url: lockURL),
+            lock: lock,
             plan: makeDockPlan(),
-            pid: 4242,
-            bootID: "boot-test",
-            lease: 600,
-            isProcessAlive: alive
+            pid: pid,
+            bootID: "boot-test"
         )
-        return (system, store, url, controller)
+        return (system, store, url, lock, controller)
     }
 
     private static func cleanupDockHarness(_ url: URL) {
@@ -2047,75 +2047,118 @@ public enum SelfTest {
             cleanupDockHarness(harness.url)
         }
 
-        // 24) 살아 있는 다른 인스턴스의 잠금은 **지우지 않고** 거부한다.
+        // 24) 잠금 배타성: 같은 파일에 두 번(서로 다른 fd) 잡으면 **하나만** 성공한다.
+        //     atomic 쓰기만으로는 두 프로세스가 동시에 잡을 수 있다 — 그 실패를 여기서 고정한다.
         do {
             let lockURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("panedock-lock-\(UUID().uuidString)")
                 .appendingPathComponent("dock-mode.lock")
-            let harness = makeDockHarness(values: [hideKey: .bool(false)], lockURL: lockURL, alive: { _ in true })
-            let held = DockLockInfo(
-                ownerPID: 9999,
-                operationID: "live-other",
-                purpose: "apply",
-                bootID: "boot-test",
-                recordedAt: Date()
-            )
             let lock = DockModeLock(url: lockURL)
-            _ = lock.acquire(held, lease: 600, isProcessAlive: { _ in true })
-            var refused = false
-            do {
-                _ = try harness.controller.applyCustom(consent: true, suppressionApproved: false, prepareScreen: {})
-            } catch let error as DockModeError {
-                if case .otherInstanceActive = error { refused = true }
-            } catch { }
-            let owner = lock.current()
+            let first = DockLockInfo(ownerPID: 1, operationID: "op-a", purpose: "apply", bootID: "boot-test", recordedAt: Date())
+            let second = DockLockInfo(ownerPID: 2, operationID: "op-b", purpose: "apply", bootID: "boot-test", recordedAt: Date())
+            let attemptA = lock.attempt(first)
+            let attemptB = lock.attempt(second)
+            let content = lock.current()
+            // A가 풀면 그때 B가 잡을 수 있다.
+            attemptA.handle?.release()
+            let attemptB2 = lock.attempt(second)
+            attemptB2.handle?.release()
             results.append(check(
-                "모드: 살아 있는 다른 인스턴스의 잠금은 지우지 않고 작업을 거부한다",
-                refused && owner?.operationID == "live-other" && owner?.ownerPID == 9999
-                    && harness.system.writes.isEmpty,
-                "거부=\(refused) 잠금주인=\(owner?.operationID ?? "-")/\(owner?.ownerPID ?? -1)"
+                "잠금: 같은 파일에 동시에 하나만 잡힌다(두 번째는 거부)",
+                attemptA.kind == .acquired
+                    && attemptB.kind == .heldByOther
+                    && content?.operationID == "op-a"
+                    && attemptB2.kind == .acquired,
+                "A=\(attemptA.kind) B=\(attemptB.kind) 내용=\(content?.operationID ?? "-") 풀린뒤B=\(attemptB2.kind)"
             ))
             try? FileManager.default.removeItem(at: lockURL.deletingLastPathComponent())
         }
 
-        // 25) 죽은 프로세스·지난 리스의 잠금은 **근거를 남기고** 이어받는다(복구가 잠금에 막히지 않는다).
+        // 25) 살아 있는 소유자의 잠금은 **시간이 지나도** 빼앗지 않는다(기록된 시각이 아주 오래여도 마찬가지).
         do {
             let lockURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("panedock-lock-\(UUID().uuidString)")
                 .appendingPathComponent("dock-mode.lock")
             let lock = DockModeLock(url: lockURL)
-            let dead = DockLockInfo(ownerPID: 9999, operationID: "crashed", purpose: "apply", bootID: "boot-test", recordedAt: Date())
-            _ = lock.acquire(dead, lease: 600, isProcessAlive: { _ in true })
-            // 프로세스가 죽은 경우
-            let takenOver = lock.acquire(
-                DockLockInfo(ownerPID: 4242, operationID: "recovery", purpose: "restore", bootID: "boot-test", recordedAt: Date()),
-                lease: 600,
-                isProcessAlive: { _ in false }
+            let old = DockLockInfo(
+                ownerPID: 9999,
+                operationID: "long-lived",
+                purpose: "apply",
+                bootID: "boot-test",
+                recordedAt: Date(timeIntervalSince1970: 1_000_000)
+            )
+            let held = lock.attempt(old)
+            let mine = lock.attempt(
+                DockLockInfo(ownerPID: 4242, operationID: "mine", purpose: "restore", bootID: "boot-test", recordedAt: Date())
+            )
+            results.append(check(
+                "잠금: 살아 있는 소유자의 잠금은 시간이 지나도 빼앗지 않는다",
+                held.kind == .acquired && mine.kind == .heldByOther && lock.current()?.operationID == "long-lived",
+                "잡음=\(held.kind) 재시도=\(mine.kind) 주인=\(lock.current()?.operationID ?? "-")"
+            ))
+            held.handle?.release()
+            try? FileManager.default.removeItem(at: lockURL.deletingLastPathComponent())
+        }
+
+        // 25b) 프로세스가 죽어 남은 흔적(잠금은 OS가 풀어 준 상태)은 이어받고 **사본을 남긴다**.
+        do {
+            let lockURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("panedock-lock-\(UUID().uuidString)")
+                .appendingPathComponent("dock-mode.lock")
+            let lock = DockModeLock(url: lockURL)
+            // 비정상 종료 흔적: 내용만 쓰고 잠금은 잡지 않은 상태를 만든다.
+            try? FileManager.default.createDirectory(at: lockURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let crashed = DockLockInfo(ownerPID: 9999, operationID: "crashed", purpose: "apply", bootID: "boot-test", recordedAt: Date())
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            try? encoder.encode(crashed).write(to: lockURL)
+            let attempt = lock.attempt(
+                DockLockInfo(ownerPID: 4242, operationID: "recovery", purpose: "restore", bootID: "boot-test", recordedAt: Date())
             )
             let backups = (try? FileManager.default.contentsOfDirectory(atPath: lockURL.deletingLastPathComponent().path))?
                 .filter { $0.contains(".stale-") } ?? []
-            // 리스가 지난 경우(살아 있어도 오래된 잠금)
-            let staleByLease = lock.stalenessReason(
-                dead,
-                now: Date().addingTimeInterval(2_000),
-                lease: 600,
-                bootID: "boot-test",
-                isProcessAlive: true
+            results.append(check(
+                "잠금: 비정상 종료 흔적은 이어받고 원본을 사본으로 남긴다",
+                attempt.kind == .acquired
+                    && attempt.previousOwner?.operationID == "crashed"
+                    && !backups.isEmpty
+                    && lock.current()?.operationID == "recovery",
+                "이어받음=\(attempt.kind) 흔적=\(attempt.previousOwner?.operationID ?? "-") 사본=\(backups.count)개"
+            ))
+            attempt.handle?.release()
+            try? FileManager.default.removeItem(at: lockURL.deletingLastPathComponent())
+        }
+
+        // 25c) 다른 인스턴스가 세션을 잡고 있으면 **복구 실행도 거부**하고 기록을 건드리지 않는다.
+        do {
+            let lockURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("panedock-lock-\(UUID().uuidString)")
+                .appendingPathComponent("dock-mode.lock")
+            let harness = makeDockHarness(values: [hideKey: .bool(false)], lockURL: lockURL)
+            _ = try? harness.controller.applyCustom(consent: true, suppressionApproved: false, prepareScreen: {})
+            let recordBefore = harness.store.load()
+            // 다른 인스턴스가 잡고 있는 상태를 만든다(다른 fd — 실제 배타 잠금).
+            let other = DockModeLock(url: lockURL).attempt(
+                DockLockInfo(ownerPID: 7777, operationID: "other-live", purpose: "apply", bootID: "boot-test", recordedAt: Date())
             )
-            let otherBoot = lock.stalenessReason(dead, now: Date(), lease: 600, bootID: "other-boot", isProcessAlive: true)
-            let liveNow = lock.stalenessReason(dead, now: Date(), lease: 600, bootID: "boot-test", isProcessAlive: true)
-            var takenOverStale = false
-            if case .tookOverStale = takenOver { takenOverStale = true }
+            var refused = false
+            do {
+                _ = try harness.controller.restoreToMacDock()
+            } catch let error as DockModeError {
+                if case .otherInstanceActive = error { refused = true }
+            } catch { }
+            let recordAfter = harness.store.load()
             results.append(check(
-                "모드: 죽은 프로세스·지난 리스의 잠금은 근거를 남기고 이어받는다",
-                takenOverStale && !backups.isEmpty && lock.current()?.operationID == "recovery",
-                "이어받음=\(takenOverStale) 사본=\(backups.count)개 새주인=\(lock.current()?.operationID ?? "-")"
+                "잠금: 다른 인스턴스가 잡고 있으면 복구도 거부하고 기록을 그대로 둔다",
+                other.kind == .acquired
+                    && refused
+                    && recordAfter?.operationID == recordBefore?.operationID
+                    && recordAfter?.entries.count == recordBefore?.entries.count
+                    && harness.system.values[hideKey] == .bool(true),
+                "거부=\(refused) 기록전=\(recordBefore?.entries.count ?? -1) 기록후=\(recordAfter?.entries.count ?? -1)"
             ))
-            results.append(check(
-                "모드: 잠금 stale 판정은 근거로만 하고 살아 있는 최근 잠금은 건드리지 않는다",
-                staleByLease != nil && otherBoot != nil && liveNow == nil,
-                "리스초과=\(staleByLease ?? "-") 다른부팅=\(otherBoot ?? "-") 살아있음=\(liveNow ?? "stale 아님")"
-            ))
+            other.handle?.release()
+            cleanupDockHarness(harness.url)
             try? FileManager.default.removeItem(at: lockURL.deletingLastPathComponent())
         }
 
@@ -2138,6 +2181,250 @@ public enum SelfTest {
                 "감지=\(detected != nil) 적용상태=\(next.applied.label)"
             ))
             cleanupDockHarness(harness.url)
+        }
+
+        // 26b) 시작 정책: 컨트롤러 초기화와 **분리된** 결정 함수가 순서대로 판단한다.
+        do {
+            let pendingRecord = DockRecoveryRecord(
+                operationID: "op-1",
+                mode: "custom",
+                appliedAt: Date(),
+                suppression: false,
+                entries: [.init(domain: dockTestDomain, name: "autohide", original: .bool(false), applied: .bool(true))],
+                ownerPID: 1,
+                bootID: "boot-test"
+            )
+            let restartOnly = DockRecoveryRecord(
+                operationID: "op-2",
+                mode: "custom",
+                appliedAt: Date(),
+                suppression: false,
+                entries: [],
+                ownerPID: 1,
+                bootID: "boot-test",
+                restartPending: true
+            )
+            let decisions: [(String, DockStartupDecision)] = [
+                ("선택 없음", DockStartupPolicy.decide(
+                    selectedMode: nil, consent: nil, suppressionApproved: false, lastApplyFailedAt: nil, recovery: .none
+                )),
+                ("동의 없음", DockStartupPolicy.decide(
+                    selectedMode: .custom, consent: nil, suppressionApproved: false, lastApplyFailedAt: nil, recovery: .none
+                )),
+                ("적용", DockStartupPolicy.decide(
+                    selectedMode: .custom, consent: "2026-09-18T00:00:00Z", suppressionApproved: true,
+                    lastApplyFailedAt: nil, recovery: .none
+                )),
+                ("지난 실패", DockStartupPolicy.decide(
+                    selectedMode: .custom, consent: "2026-09-18T00:00:00Z", suppressionApproved: false,
+                    lastApplyFailedAt: "2026-09-18T01:00:00Z", recovery: .none
+                )),
+                ("미완료 기록", DockStartupPolicy.decide(
+                    selectedMode: .custom, consent: "2026-09-18T00:00:00Z", suppressionApproved: false,
+                    lastApplyFailedAt: nil, recovery: .record(pendingRecord)
+                )),
+                ("재시작만 남은 기록", DockStartupPolicy.decide(
+                    selectedMode: nil, consent: nil, suppressionApproved: false, lastApplyFailedAt: nil,
+                    recovery: .record(restartOnly)
+                )),
+                ("손상 기록", DockStartupPolicy.decide(
+                    selectedMode: .macDock, consent: nil, suppressionApproved: false, lastApplyFailedAt: nil,
+                    recovery: .unreadable(reason: "형식이 맞지 않습니다")
+                )),
+                ("Both", DockStartupPolicy.decide(
+                    selectedMode: .both, consent: "2026-09-18T00:00:00Z", suppressionApproved: false,
+                    lastApplyFailedAt: nil, recovery: .none
+                )),
+            ]
+            let byName = Dictionary(uniqueKeysWithValues: decisions)
+            results.append(check(
+                "시작: 저장된 모드 적용은 컨트롤러 초기화와 분리된 결정 함수가 정한다",
+                byName["선택 없음"] == .macDock("선택한 적 없음")
+                    && byName["동의 없음"] == .macDock("Custom 동의 없음")
+                    && byName["적용"] == .applyCustom(suppression: true)
+                    && byName["지난 실패"]?.appliesCustom == false
+                    && byName["미완료 기록"] == .recoverFirst("미완료 복구 기록 1건")
+                    && byName["재시작만 남은 기록"] == .recoverFirst("미완료 복구 기록 1건")
+                    && byName["손상 기록"]?.appliesCustom == false
+                    && byName["Both"]?.appliesCustom == false
+                    && { if case .unsupported = byName["Both"] ?? .macDock("") { return true } else { return false } }(),
+                "적용=\(byName["적용"]?.appliesCustom ?? false) 미완료=\(byName["미완료 기록"]?.reason ?? "-") "
+                    + "재시작만=\(byName["재시작만 남은 기록"]?.reason ?? "-") 지난실패=\(byName["지난 실패"]?.reason ?? "-")"
+            ))
+        }
+
+        // 26c) 기록 디코딩: 이전 형식의 **선택 필드 누락**은 읽고, **필수 정보 손상**은 오류로 올린다.
+        do {
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("panedock-decode-\(UUID().uuidString)", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let store = DockRecoveryStore(url: dir.appendingPathComponent("dock-recovery.json"))
+            func decode(_ json: String) -> DockRecoveryLoad {
+                try? Data(json.utf8).write(to: store.url!)
+                return store.loadResult()
+            }
+            // 필수 항목(entries)이 없음 → 읽을 수 없음(빈 배열로 대체하지 않는다).
+            let missingEntries = decode("""
+            {"mode":"custom","appliedAt":"2026-09-18T00:00:00Z"}
+            """)
+            // 항목 형식 손상(applied 없음)
+            let brokenEntry = decode("""
+            {"mode":"custom","appliedAt":"2026-09-18T00:00:00Z","entries":[{"domain":"d","name":"n"}]}
+            """)
+            // 이전 형식: 선택 필드 누락 + 원래 없던 키(original 없음)
+            let legacy = decode("""
+            {"mode":"custom","appliedAt":"2026-09-18T00:00:00Z","entries":[{"domain":"d","name":"n","applied":{"bool":{"_0":true}}}]}
+            """)
+            var legacyFlags = (operationID: "-", restart: true, original: DockRecoveryRecord.StoredValue?.none)
+            if case .record(let record) = legacy, let entry = record.entries.first {
+                legacyFlags = (record.operationID, record.restartPending, entry.original)
+            }
+            try? FileManager.default.removeItem(at: dir)
+            results.append(check(
+                "기록: 필수 정보(항목 목록) 손상은 '읽을 수 없음'으로, 이전 형식의 선택 필드 누락은 기본값으로 읽는다",
+                missingEntries == .unreadable(reason: "형식이 맞지 않습니다")
+                    && brokenEntry == .unreadable(reason: "형식이 맞지 않습니다")
+                    && legacy.record?.entries.count == 1
+                    && legacyFlags.operationID == ""
+                    && legacyFlags.restart == false
+                    && legacyFlags.original == nil,
+                "항목없음=\(missingEntries.summary) 항목손상=\(brokenEntry.summary) 이전형식=\(legacy.summary)"
+            ))
+        }
+
+        // 26d) 바꿀 설정이 0개여도 **기존 기록을 먼저 확인**한다(미완료·손상이면 거부).
+        do {
+            // (1) 이미 원하는 값 + 손상 기록 → 적용 거부
+            try? FileManager.default.createDirectory(
+                at: temporaryRecoveryURL().deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            let corruptURL = temporaryRecoveryURL()
+            let harness = makeDockHarness(values: [hideKey: .bool(true)], lockURL: nil)
+            // 이미 원하는 값인 상태에서 미완료 기록을 만들어 둔다.
+            let pending = DockRecoveryRecord(
+                operationID: "op-pending",
+                mode: "custom",
+                appliedAt: Date(),
+                suppression: false,
+                entries: [.init(domain: dockTestDomain, name: "autohide", original: .bool(false), applied: .bool(true))],
+                ownerPID: 77,
+                bootID: "boot-test"
+            )
+            _ = harness.store.create(pending)
+            var refusedPending = false
+            do {
+                // 바꿀 것이 0개인 요청(이미 원하는 값) — 그래도 기록을 먼저 본다.
+                _ = try harness.controller.applyCustom(consent: true, suppressionApproved: false, prepareScreen: {})
+            } catch let error as DockModeError {
+                if case .recoveryRecordPending = error { refusedPending = true }
+            } catch { }
+            let preserved = harness.store.load()?.operationID
+            cleanupDockHarness(harness.url)
+
+            // (2) 이미 원하는 값 + 손상 기록 → 적용 거부, 원본 보존
+            let dir = corruptURL.deletingLastPathComponent()
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let harness2 = makeDockHarness(values: [hideKey: .bool(true)])
+            try? FileManager.default.createDirectory(at: harness2.url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data("broken".utf8).write(to: harness2.url)
+            var refusedCorrupt = false
+            do {
+                _ = try harness2.controller.applyCustom(consent: true, suppressionApproved: false, prepareScreen: {})
+            } catch let error as DockModeError {
+                if case .recoveryRecordPending = error { refusedCorrupt = true }
+            } catch { }
+            cleanupDockHarness(harness2.url)
+            try? FileManager.default.removeItem(at: dir)
+            results.append(check(
+                "기록: 바꿀 설정이 0개여도 미완료·손상 기록을 먼저 확인하고 거부한다",
+                refusedPending && preserved == "op-pending" && refusedCorrupt && harness.system.writes.isEmpty,
+                "미완료거부=\(refusedPending) 보존=\(preserved ?? "-") 손상거부=\(refusedCorrupt)"
+            ))
+        }
+
+        // 26e) 항목 0개 + restartPending=true도 미완료 복구로 취급한다.
+        do {
+            let harness = makeDockHarness(values: [hideKey: .bool(false)])
+            let restartOnly = DockRecoveryRecord(
+                operationID: "op-restart",
+                mode: "custom",
+                appliedAt: Date(),
+                suppression: false,
+                entries: [],
+                ownerPID: 5,
+                bootID: "boot-test",
+                restartPending: true
+            )
+            let created = harness.store.create(restartOnly)
+            let refused = harness.store.create(
+                DockRecoveryRecord(
+                    operationID: "op-new",
+                    mode: "custom",
+                    appliedAt: Date(),
+                    suppression: false,
+                    entries: [.init(domain: dockTestDomain, name: "autohide", original: .bool(false), applied: .bool(true))],
+                    ownerPID: 6,
+                    bootID: "boot-test"
+                )
+            )
+            let restartsBefore = harness.system.restartCount
+            let outcome = try? harness.controller.restoreToMacDock()
+            results.append(check(
+                "기록: 항목 0개 + 재시작 대기도 미완료 복구로 보고 재시작을 마친 뒤에만 정리한다",
+                created == .written
+                    && refused == .refusedPendingRestore(["Dock 재시작 대기"])
+                    && restartOnly.hasPendingWork
+                    && outcome?.kind == .complete
+                    && outcome?.restartPerformed == true
+                    && harness.system.restartCount == restartsBefore + 1
+                    && harness.store.load() == nil
+                    && outcome?.recordLeft == false,
+                "생성=\(created) 새작업=\(refused) 결과=\(outcome?.kind.rawValue ?? "-") 재시작=\(outcome?.restartPerformed ?? false) 기록남음=\(outcome?.recordLeft ?? false)"
+            ))
+            cleanupDockHarness(harness.url)
+        }
+
+        // 26f) 사용자 변경으로 남긴 항목은 **상태를 다시 보고**, 명시적으로 정리할 수도 있다.
+        do {
+            let system = StubDockSystem(values: [delayKey: .double(30)])
+            let url = temporaryRecoveryURL()
+            let store = DockRecoveryStore(url: url)
+            let plan = DockModePlan(hideKeys: [DockChange(delayKey, .double(1000))], suppressionKeys: [])
+            let controller = DockModeController(
+                system: system, recovery: store, lock: DockModeLock(url: nil), plan: plan,
+                pid: 4242, bootID: "boot-test"
+            )
+            _ = try? controller.applyCustom(consent: true, suppressionApproved: false, prepareScreen: {})
+            // 사용자가 실행 중 바꿈 → 이번 복원은 건너뛴다.
+            system.values[delayKey] = .double(7)
+            let first = try? controller.restoreToMacDock()
+            let keptAfterFirst = store.load()?.entries.first?.skipReason
+            // 사용자가 **우리 적용값으로** 되돌린 경우 → 다음 복원은 그 값을 되돌린다.
+            system.values[delayKey] = .double(1000)
+            let second = try? controller.restoreToMacDock()
+            let valueAfterSecond = system.values[delayKey]
+            // 명시 정리: 다시 사용자 변경 상태를 만들고 '사용자 변경 항목 정리'를 실행한다.
+            _ = try? controller.applyCustom(consent: true, suppressionApproved: false, prepareScreen: {})
+            system.values[delayKey] = .double(9)
+            _ = try? controller.restoreToMacDock()
+            let beforeForget = store.load()?.entries.count ?? -1
+            let forgot = store.forgetUserChanged(operationID: store.load()?.operationID ?? "")
+            let afterForget = store.load()?.entries.count ?? 0
+            let valueKept = system.values[delayKey]
+            results.append(check(
+                "기록: 사용자 변경 항목은 이후 상태를 다시 보고, 명시적으로 정리할 때만 기록에서 뺀다",
+                first?.count(.userChanged) == 1
+                    && keptAfterFirst == "userChanged"
+                    && second?.kind == .complete
+                    && valueAfterSecond == .double(30)
+                    && beforeForget == 1
+                    && forgot == .written
+                    && afterForget == 0
+                    && valueKept == .double(9),
+                "1차=\(first?.kind.rawValue ?? "-") 유지=\(keptAfterFirst ?? "-") 2차=\(second?.kind.rawValue ?? "-") 2차값=\(valueAfterSecond?.text ?? "-") "
+                    + "정리전=\(beforeForget) 정리=\(forgot) 정리후=\(afterForget) 값=\(valueKept?.text ?? "-")"
+            ))
+            cleanupDockHarness(url)
         }
 
         // 27) Both는 이번에 적용할 수 없다(미구현을 작동하는 선택지로 제공하지 않는다).
