@@ -11,38 +11,67 @@ import Foundation
 // CLI의 사람이 읽는 출력 문자열을 파싱하지 않는다. 여기서는 값(DockState)만 다룬다.
 
 // Dock 복구는 GUI를 띄우지 않는다(비정상 종료 뒤에도 쓸 수 있는 수단).
-func renderDockRestoreResult(options: LaunchOptions) -> String {
+//
+// 종료 코드: 0 = 완전 복원(또는 되돌릴 것 없음) · 2 = 부분 복원 · 3 = 실패(손상·잠금·쓰기 실패).
+// 부분 복원과 실패를 0으로 돌려주지 않는다(스크립트가 구분할 수 있어야 한다).
+func runDockRestore(options: LaunchOptions) -> (line: String, code: Int32) {
     let support = FileManager.default
         .urls(for: .applicationSupportDirectory, in: .userDomainMask)
         .first?
         .appendingPathComponent("PaneDock", isDirectory: true)
-    let store = DockRecoveryStore(url: support?.appendingPathComponent("dock-recovery.json"))
+    let recoveryURL = support?.appendingPathComponent("dock-recovery.json")
+    let store = DockRecoveryStore(url: recoveryURL)
     let controller = DockModeController(
-        system: SystemDockControl(),
+        system: SystemDockControl(allowRestart: !options.noDockRestart),
         recovery: store,
         lock: DockModeLock(url: support?.appendingPathComponent("dock-mode.lock"))
     )
-    switch controller.recoveryState() {
-    case .unreadable(let reason):
+    if case .unreadable(let reason) = controller.recoveryState() {
         // 손상된 기록을 '없음'으로 뭉개지 않는다(복구 수단이 조용히 사라지면 안 된다).
-        return "dock restore: unreadable record (\(reason)) — " + (store.url?.path ?? "-") + " 파일을 지우지 않았습니다"
-    case .noPath:
-        return "dock restore: 복구 기록 경로가 없습니다(앱 지원 폴더를 만들 수 없음)"
-    case .none, .record:
-        break
+        return (
+            "dock restore: failed reason=unreadable-record(\(reason)) file=\(recoveryURL?.path ?? "-") — 파일을 지우지 않았습니다",
+            3
+        )
     }
-    if let record = controller.detectStaleRecord() {
-        do {
-            let outcome = try controller.restoreToMacDock()
-            return "dock restore: mode=\(record.mode) restored=\(outcome.changedKeys.count) "
-                + "skipped=\(outcome.skippedByUserChange.count) left=\(outcome.recoveryRecordLeft)"
-        } catch let error as DockModeError {
-            return "dock restore: failed reason=\(error.message)"
-        } catch {
-            return "dock restore: failed"
+    do {
+        let outcome = try controller.restoreToMacDock()
+        let code: Int32 = switch outcome.kind {
+        case .nothingToDo, .complete: 0
+        case .partial: 2
+        case .failed: 3
         }
+        return (outcome.summaryLine, code)
+    } catch let error as DockModeError {
+        return ("dock restore: failed reason=\(error.message)", 3)
+    } catch {
+        return ("dock restore: failed", 3)
     }
-    return "dock restore: nothing to restore (복구 기록 없음)"
+}
+
+// 읽기 전용 확인: 계획 키의 값·자료형을 **바꾸지 않고** 본다(자료형 보존 확인용).
+func renderDockProbe(extraKeys: [String]) -> String {
+    let control = SystemDockControl(allowRestart: false)
+    let plan = DockModePlan.systemDefault
+    var lines = ["dock probe: (읽기 전용, 아무것도 바꾸지 않음)"]
+    let changes = plan.hideKeys + plan.suppressionKeys
+    // 함께 준 키도 같은 방식으로 읽는다(자료형 확인용).
+    for text in extraKeys {
+        let parts = text.split(separator: ":", maxSplits: 1).map(String.init)
+        let key = parts.count == 2
+            ? DockPreferenceKey(domain: parts[0], name: parts[1])
+            : DockPreferenceKey(domain: "com.apple.dock", name: parts[0])
+        let current = control.currentValue(for: key)
+        lines.append("  \(key.label) = \(current?.text ?? "없음")/\(current?.typeName ?? "-")")
+    }
+    for change in changes {
+        let current = control.currentValue(for: change.key)
+        lines.append(
+            "  \(change.key.label) = \(current?.text ?? "없음")/\(current?.typeName ?? "-") "
+                + "목표=\(change.value.text)/\(change.value.typeName) "
+                + "이미목표=\(current.map { $0.matches(change.value) } ?? false)"
+        )
+    }
+    return lines.joined(separator: "\n")
 }
 
 guard let options = parseLaunchOptions(Array(CommandLine.arguments.dropFirst())) else {
@@ -51,9 +80,15 @@ guard let options = parseLaunchOptions(Array(CommandLine.arguments.dropFirst()))
 }
 
 // GUI 없이 실행하는 Dock 복구. **다시 Custom 모드로 들어가지 않는다.**
-if options.restoreDock {
-    print(renderDockRestoreResult(options: options))
+if options.dockProbe {
+    print(renderDockProbe(extraKeys: options.dockProbeKeys))
     exit(0)
+}
+
+if options.restoreDock {
+    let result = runDockRestore(options: options)
+    print(result.line)
+    exit(result.code)
 }
 
 // 창을 띄우지 않고 1회만 확인한다. GUI를 실제로 띄우지 않고도 상태·계획을 검증할 수 있다.

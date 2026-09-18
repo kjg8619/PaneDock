@@ -163,34 +163,3 @@ public enum DockAppliedState: Equatable, Sendable {
         }
     }
 }
-
-public enum DockModeError: Error, Equatable {
-    case notConsented
-    case unsupportedMode(DockMode)
-    case busy
-    /// 복구 정보를 기록하지 못했다 — **시스템 설정을 바꾸지 않는다.**
-    case recoveryRecordUnavailable(String)
-    /// 복구 기록 파일이 손상돼 읽을 수 없다(**지우지 않는다** — 수동 확인 경로를 남긴다).
-    case restoreRecordUnreadable(String)
-    /// 복구 기록이 없는데 원래 값도 알 수 없다.
-    case restoreRecordMissing
-    /// 다른 인스턴스가 모드를 적용 중이다.
-    case otherInstanceActive
-    case applyFailed(step: String, reason: String)
-    /// 되돌리기까지 실패했다(복구 기록은 남겨 둔다).
-    case rollbackFailed(String)
-
-    public var message: String {
-        switch self {
-        case .notConsented: return "동의가 없어 Custom 모드를 적용하지 않았습니다."
-        case .unsupportedMode(let mode): return "\(mode.label)은 이번 버전에서 적용할 수 없습니다(V20.2 예정)."
-        case .busy: return "이미 전환 작업이 진행 중입니다."
-        case .recoveryRecordUnavailable(let reason): return "복구 정보를 기록하지 못해 시스템 설정을 바꾸지 않았습니다: \(reason)"
-        case .otherInstanceActive: return "다른 PaneDock 인스턴스가 사용 모드를 적용 중입니다."
-        case .restoreRecordUnreadable(let reason): return "복구 기록 파일을 읽을 수 없습니다(\(reason)) — 지우지 않고 남겨 두었습니다. 파일을 확인한 뒤 직접 되돌려 주세요."
-        case .restoreRecordMissing: return "복구 기록이 없어 원래 값을 알 수 없습니다."
-        case .applyFailed(let step, let reason): return "\(step) 단계에서 실패했습니다: \(reason)"
-        case .rollbackFailed(let reason): return "되돌리기에 실패했습니다: \(reason) — 복구 기록을 남겼습니다."
-        }
-    }
-}

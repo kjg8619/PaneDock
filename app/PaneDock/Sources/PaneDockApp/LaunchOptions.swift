@@ -17,6 +17,8 @@ struct LaunchOptions {
     var projectsPath: String?
     /// 진단용: 시작 직후 창을 이 좌표로 옮긴다. 사용자가 창을 드래그한 것과 **같은 경로**를 탄다.
     var moveTo: CGPoint?
+    /// 진단용: 이 시간(ms) 뒤에 `--move-to` 좌표로 옮긴다(사용자 드래그와 같은 저장 경로를 지난다).
+    var moveAfterMilliseconds: Int?
     /// 진단용: 시작 후 이 시간(ms) 뒤에 메뉴의 "프로젝트 설정 다시 읽기"와 **같은 동작**을 한 번 수행한다.
     var reloadAfterMilliseconds: Int?
     /// 진단용: 상세 보기를 연 상태로 시작한다(스크린샷·확인용).
@@ -37,6 +39,12 @@ struct LaunchOptions {
     var timerAutostartAfterMilliseconds: Int?
     /// (검증용) 적용 전에 커스텀 화면을 **미리** 보여준다. 설정·시스템은 **바꾸지 않는다**.
     var previewCustom = false
+    /// (검증용) Dock 재시작을 하지 않는다 — 운영 Dock에 손대지 않고 복구 경로를 확인할 때만 쓴다.
+    var noDockRestart = false
+    /// (읽기 전용) 적용 계획의 키를 **바꾸지 않고** 값·자료형만 확인한다.
+    var dockProbe = false
+    /// `--dock-probe`에 함께 준 키(`domain:key` 또는 `key` → `com.apple.dock`).
+    var dockProbeKeys: [String] = []
     /// GUI 없이 실행하는 **Dock 복구**: 남아 있는 복구 기록으로 기본 Dock 설정을 되돌리고 종료한다.
     /// **다시 Custom 모드로 들어가지 않는다.**
     var restoreDock = false
@@ -86,6 +94,8 @@ PaneDock — 포커스된 터미널 pane을 따라가는 최소 Dock
   --timer-seconds <n>  (진단용) 집중 타이머 기본 시간(초). 완료 상태 확인용
   --timer-autostart <ms>  (진단용) 시작 후 이 시간 뒤에 첫 타이머를 시작한다
   --key-selftest <ms>  (진단용) 시작 후 이 시간 뒤에 키보드 경로(초점 이동→활성화)를 실행한다
+  --dock-probe [domain:key ...]  (읽기 전용) 적용 계획 키의 값·자료형을 바꾸지 않고 확인한다
+  --no-dock-restart  (검증용) Dock을 다시 시작하지 않는다(운영 Dock에 영향 없이 복구 경로 확인)
   --preview-custom  (검증용) Custom 적용 전에 커스텀 화면을 미리 보여준다(설정 변경 없음)
   --restore-dock   남아 있는 복구 기록으로 기본 Dock 설정을 되돌리고 종료한다(GUI 없이, Custom 재진입 없음)
   --dock-mode <macDock|custom>  (승인된 검증용) 시작 시 그 모드를 적용한다
@@ -209,6 +219,13 @@ func parseLaunchOptions(_ arguments: [String]) -> LaunchOptions? {
                 exit(2)
             }
             options.moveTo = CGPoint(x: x, y: y)
+        case "--move-after":
+            index += 1
+            guard index < arguments.count, let value = Int(arguments[index]), value > 0 else {
+                FileHandle.standardError.write(Data("--move-after requires milliseconds\n".utf8))
+                exit(2)
+            }
+            options.moveAfterMilliseconds = value
         case "--reload-after":
             index += 1
             guard index < arguments.count, let value = Int(arguments[index]), value > 0 else {
@@ -230,6 +247,17 @@ func parseLaunchOptions(_ arguments: [String]) -> LaunchOptions? {
                 exit(2)
             }
             options.timerAutostartAfterMilliseconds = value
+        case "--dock-probe":
+            options.dockProbe = true
+            // 함께 준 키도 읽는다(값·자료형 확인용). 다음 옵션(`--`)이 나오면 멈춘다.
+            var lookahead = index + 1
+            while lookahead < arguments.count, !arguments[lookahead].hasPrefix("--") {
+                options.dockProbeKeys.append(arguments[lookahead])
+                lookahead += 1
+            }
+            index = lookahead - 1
+        case "--no-dock-restart":
+            options.noDockRestart = true
         case "--preview-custom":
             options.previewCustom = true
         case "--restore-dock":

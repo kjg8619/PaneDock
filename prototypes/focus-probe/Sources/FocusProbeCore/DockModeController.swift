@@ -1,177 +1,16 @@
 import Foundation
 
-/// 복구 기록. **비정상 종료 뒤에도 남아 있어야** 다음 실행에서 복구할 수 있다.
-public struct DockRecoveryRecord: Codable, Equatable, Sendable {
-    public struct Entry: Codable, Equatable, Sendable {
-        public var domain: String
-        public var name: String
-        /// 원래 값(없던 키면 nil).
-        public var original: StoredValue?
-        /// 우리가 적용한 값.
-        public var applied: StoredValue
-        /// 사용자가 실행 중 직접 바꿔서 **복원하지 않은** 키인가.
-        public var skippedByUserChange: Bool
-    }
-
-    /// 저장용 값 표현(자료형을 함께 남긴다).
-    public enum StoredValue: Codable, Equatable, Sendable {
-        case bool(Bool)
-        case integer(Int)
-        case double(Double)
-        case string(String)
-
-        public init(_ value: DockPreferenceValue) {
-            switch value {
-            case .bool(let inner): self = .bool(inner)
-            case .integer(let inner): self = .integer(inner)
-            case .double(let inner): self = .double(inner)
-            case .string(let inner): self = .string(inner)
-            }
-        }
-
-        public var text: String {
-            switch self {
-            case .bool(let inner): return inner ? "true" : "false"
-            case .integer(let inner): return String(inner)
-            case .double(let inner): return String(inner)
-            case .string(let inner): return inner
-            }
-        }
-
-        public var asValue: DockPreferenceValue {
-            switch self {
-            case .bool(let inner): return .bool(inner)
-            case .integer(let inner): return .integer(inner)
-            case .double(let inner): return .double(inner)
-            case .string(let inner): return .string(inner)
-            }
-        }
-    }
-
-    public var mode: String
-    public var appliedAt: Date
-    public var suppression: Bool
-    public var entries: [Entry]
-    /// 이 기록을 만든 프로세스(중복 인스턴스 확인용).
-    public var ownerPID: Int32
-
-    public init(mode: String, appliedAt: Date, suppression: Bool, entries: [Entry], ownerPID: Int32) {
-        self.mode = mode
-        self.appliedAt = appliedAt
-        self.suppression = suppression
-        self.entries = entries
-        self.ownerPID = ownerPID
-    }
-
-    /// 아직 복원하지 않은 키가 있는가.
-    public var hasUnrestoredKeys: Bool { entries.contains { !$0.skippedByUserChange } }
-}
-
-/// 복구 기록을 파일로 보관한다(경로 주입 가능 — 검사는 임시 경로를 쓴다).
-/// 복구 기록 읽기 결과. **손상을 '기록 없음'으로 뭉개지 않는다**(복구 수단이 조용히 사라지면 안 된다).
-public enum DockRecoveryLoad: Equatable, Sendable {
-    case none
-    case record(DockRecoveryRecord)
-    /// 파일은 있는데 읽을 수 없다(손상·권한·잘못된 JSON). 파일은 **지우지 않는다**.
-    case unreadable(reason: String)
-    case noPath
-}
-
-public struct DockRecoveryStore: Sendable {
-    public var url: URL?
-
-    public init(url: URL?) {
-        self.url = url
-    }
-
-    public func load() -> DockRecoveryRecord? {
-        if case .record(let record) = loadResult() { return record }
-        return nil
-    }
-
-    /// 읽기 결과를 구분해 돌려준다(손상 vs 없음).
-    public func loadResult() -> DockRecoveryLoad {
-        guard let url else { return .noPath }
-        guard FileManager.default.fileExists(atPath: url.path) else { return .none }
-        guard let data = try? Data(contentsOf: url) else {
-            return .unreadable(reason: "파일을 읽을 수 없습니다")
-        }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        do {
-            return .record(try decoder.decode(DockRecoveryRecord.self, from: data))
-        } catch {
-            return .unreadable(reason: "형식이 맞지 않습니다")
-        }
-    }
-
-    /// 기록한다. **미복원 기록이 있으면 덮어쓰지 않는다**(원본을 잃지 않게).
-    @discardableResult
-    public func save(_ record: DockRecoveryRecord) -> Bool {
-        guard let url else { return false }
-        if let existing = load(), existing.hasUnrestoredKeys { return false }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(record) else { return false }
-        do {
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.write(to: url, options: .atomic)
-            return true
-        } catch {
-            return false
-        }
-    }
-
-    /// 복원을 확인한 뒤에만 기록을 지운다.
-    public func clear() {
-        guard let url else { return }
-        try? FileManager.default.removeItem(at: url)
-    }
-}
-
-/// 중복 인스턴스가 서로 설정을 바꾸지 못하게 하는 잠금(파일 존재 기반).
-public struct DockModeLock: Sendable {
-    public var url: URL?
-
-    public init(url: URL?) {
-        self.url = url
-    }
-
-    /// 잠금을 잡는다. 이미 있으면 false(다른 인스턴스가 적용 중).
-    public func acquire(ownerPID: Int32) -> Bool {
-        guard let url else { return true }
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let payload = "\(ownerPID)"
-        if FileManager.default.fileExists(atPath: url.path) {
-            // 같은 프로세스가 다시 잡는 것은 허용한다(재진입).
-            if let text = try? String(contentsOf: url, encoding: .utf8), text == payload { return true }
-            return false
-        }
-        return (try? Data(payload.utf8).write(to: url, options: .atomic)) != nil
-    }
-
-    public func release() {
-        guard let url else { return }
-        try? FileManager.default.removeItem(at: url)
-    }
-}
-
-/// 모드 적용의 결과(검사·로그용).
-public struct DockModeOutcome: Equatable, Sendable {
-    public var applied: DockAppliedState
-    public var changedKeys: [String]
-    public var rolledBackKeys: [String]
-    public var skippedByUserChange: [String]
-    public var recoveryRecordLeft: Bool
-    public var notes: [String]
-}
-
 /// 사용 모드 전환을 한 곳에서 관리한다.
 ///
 /// 적용 순서(승인된 순서 그대로):
-/// 1) 원래 설정 확인 → 2) 복구 정보 기록 → 3) 커스텀 화면 준비 → 4) 필요한 설정 적용 → 5) 숨김 확인 → 6) 완료.
-/// 3~5단계에서 실패하면 **이미 적용한 변경을 되돌린다.** 2단계에서 실패하면 **아무것도 바꾸지 않는다.**
+/// 1) 원래 설정 확인 → 2) 복구 정보 기록 → 3) 커스텀 화면 준비(**준비 완료 확인까지**) →
+/// 4) 필요한 설정 적용 → 5) 값 확인 → 6) Dock 재시작.
+///
+/// 지키는 것:
+/// - 동의 없이는 아무것도 바꾸지 않는다.
+/// - **바꾼 키만** 되돌리고, 되돌리기는 **실제 값을 다시 읽어 확인**한다.
+/// - 사용자가 실행 중 바꾼 값은 덮어쓰지 않고, 그 사실을 기록에 남긴다.
+/// - 기록·잠금의 실패를 무시하지 않는다(무엇이 실패했는지 결과에 담는다).
 public final class DockModeController {
     private let system: DockSystemControl
     private let recovery: DockRecoveryStore
@@ -180,9 +19,14 @@ public final class DockModeController {
     private let log: (String) -> Void
     private let now: () -> Date
     private let pid: Int32
+    private let bootID: String
+    private let lease: TimeInterval
+    private let isProcessAlive: (Int32) -> Bool
 
     public private(set) var applied: DockAppliedState = .none
     public private(set) var isBusy = false
+    /// 잠금을 이어받았을 때 남긴 설명(화면·명령줄에서 안내).
+    public private(set) var lastLockNote: String?
 
     public init(
         system: DockSystemControl,
@@ -190,6 +34,9 @@ public final class DockModeController {
         lock: DockModeLock = DockModeLock(url: nil),
         plan: DockModePlan = .systemDefault,
         pid: Int32 = ProcessInfo.processInfo.processIdentifier,
+        bootID: String = DockBootID.current(),
+        lease: TimeInterval = 600,
+        isProcessAlive: @escaping (Int32) -> Bool = DockModeLock.isAlive,
         now: @escaping () -> Date = Date.init,
         log: @escaping (String) -> Void = { _ in }
     ) {
@@ -198,12 +45,19 @@ public final class DockModeController {
         self.lock = lock
         self.plan = plan
         self.pid = pid
+        self.bootID = bootID
+        self.lease = lease
+        self.isProcessAlive = isProcessAlive
         self.now = now
         self.log = log
     }
 
+    // MARK: - 적용
+
     /// Custom 적용. `consent`가 false면 **아무것도 하지 않는다**(동의 없이는 시스템 설정을 바꾸지 않는다).
     /// `suppressionApproved`는 문서화되지 않은 억제 설정 사용 동의다(별도 승인).
+    ///
+    /// - `prepareScreen`은 **화면이 실제로 준비됐음을 확인한 뒤** 돌아와야 한다. 실패하면 설정을 바꾸지 않는다.
     public func applyCustom(
         consent: Bool,
         suppressionApproved: Bool,
@@ -214,201 +68,489 @@ public final class DockModeController {
         isBusy = true
         defer { isBusy = false }
 
-        guard lock.acquire(ownerPID: pid) else { throw DockModeError.otherInstanceActive }
-        defer { lock.release() }
-
+        let moment = now()
+        let operationID = UUID().uuidString
         var notes: [String] = []
-        let changes = plan.changes(includeSuppression: suppressionApproved)
 
-        // 1) 원래 설정 확인 + 2) 복구 정보 기록 (실패하면 시스템을 건드리지 않는다)
+        notes.append(contentsOf: try acquireLock(operationID: operationID, purpose: "apply", moment: moment))
+        defer { releaseLock(operationID: operationID, notes: &notes) }
+
+        let changes = plan.changes(includeSuppression: suppressionApproved)
         let snapshot = system.snapshot(changes.map(\.key))
-        let record = DockRecoveryRecord(
-            mode: DockMode.custom.rawValue,
-            appliedAt: now(),
-            suppression: suppressionApproved,
-            entries: changes.map { change in
+
+        // 적용이 **실제로 바꾸는** 키만 기록한다(이미 원하는 값이면 건드리지 않는다).
+        var entries: [DockRecoveryRecord.Entry] = []
+        var pending: [DockChange] = []
+        for change in changes {
+            let current = system.currentValue(for: change.key)
+            if let current, current.matches(change.value) {
+                notes.append("\(change.key.label)은(는) 이미 원하는 값(\(change.value.text))입니다 — 건드리지 않습니다")
+                continue
+            }
+            pending.append(change)
+            entries.append(
                 DockRecoveryRecord.Entry(
                     domain: change.key.domain,
                     name: change.key.name,
                     original: (snapshot.original(for: change.key) ?? nil).map(DockRecoveryRecord.StoredValue.init),
-                    applied: DockRecoveryRecord.StoredValue(change.value),
-                    skippedByUserChange: false
+                    applied: DockRecoveryRecord.StoredValue(change.value)
                 )
-            },
-            ownerPID: pid
-        )
-        guard recovery.save(record) else {
-            let reason = recovery.url == nil ? "복구 기록 경로가 없습니다" : "복구 기록을 쓰지 못했습니다"
-            notes.append(reason)
-            log("dockmode apply result=refused reason=\(reason)")
-            throw DockModeError.recoveryRecordUnavailable(reason)
+            )
         }
-        log("dockmode recovery=written keys=\(changes.count) suppression=\(suppressionApproved)")
 
-        // 3) 커스텀 화면 준비 — 실패하면 아직 바꾼 것이 없다.
+        let record = DockRecoveryRecord(
+            operationID: operationID,
+            mode: DockMode.custom.rawValue,
+            appliedAt: moment,
+            updatedAt: moment,
+            suppression: suppressionApproved,
+            entries: entries,
+            ownerPID: pid,
+            bootID: bootID
+        )
+
+        // 이미 원하는 상태면 기록할 것이 없다 — 기록 없이 적용 완료로 본다.
+        if !pending.isEmpty {
+            switch recovery.create(record) {
+            case .written:
+                log("dockmode recovery=written op=\(operationID.prefix(8)) keys=\(entries.count) suppression=\(suppressionApproved)")
+            case .refusedPendingRestore(let keys):
+                log("dockmode apply result=refused reason=pending keys=\(keys.count)")
+                throw DockModeError.recoveryRecordPending(keys.joined(separator: ","))
+            case .refusedUnreadable(let reason):
+                // 손상된 기록은 **원본을 보존**하고 적용도 거부한다(그 파일이 복구 단서다).
+                log("dockmode apply result=refused reason=unreadable")
+                throw DockModeError.recoveryRecordPending("복구 기록을 읽을 수 없습니다(\(reason)) — 원본을 지우지 않았습니다")
+            case .failed(let reason):
+                log("dockmode apply result=refused reason=record")
+                throw DockModeError.recoveryRecordUnavailable(reason)
+            case .noPath:
+                log("dockmode apply result=refused reason=no-path")
+                throw DockModeError.recoveryRecordUnavailable("복구 기록 경로가 없습니다")
+            }
+        } else {
+            log("dockmode apply note=already-in-desired-state")
+        }
+
+        // 3) 화면 준비 — **준비 완료를 확인한 뒤에만** 시스템 설정을 건드린다.
         do {
             try prepareScreen()
         } catch {
-            recovery.clear()
+            if !pending.isEmpty {
+                let clear = recovery.clear(operationID: operationID)
+                if !clear.isClean {
+                    let reason = clear.failureReason ?? "-"
+                    notes.append("복구 기록 정리 실패: \(reason)")
+                    log("dockmode apply cleanup=failed reason=\(reason)")
+                }
+            }
             log("dockmode apply result=failed step=prepare")
-            throw DockModeError.applyFailed(step: "커스텀 화면 준비", reason: "\(error)")
+            throw DockModeError.applyFailed(step: "커스텀 화면 준비", reason: Self.describe(error))
         }
 
-        // 4) 필요한 설정 적용 → 5) 확인
+        // 4) 적용 → 5) 확인
+        var touched: [DockPreferenceKey] = []
         var appliedKeys: [String] = []
         do {
-            for change in changes {
+            for change in pending {
+                // **쓰기 시도 전에** 되돌릴 목록에 넣는다. 값이 바뀐 뒤 오류를 던지는 구현에서도
+                // 그 키가 되돌리기에서 빠지지 않는다.
+                touched.append(change.key)
                 try system.set(change.value, for: change.key)
-                appliedKeys.append(change.key.label)
+                _ = lock.refresh(operationID: operationID, now: now())
                 let current = system.currentValue(for: change.key)
-                guard current == change.value else {
-                    throw DockModeError.applyFailed(step: "설정 확인", reason: "\(change.key.label) 값이 적용되지 않았습니다")
+                guard let current, current.matches(change.value) else {
+                    throw DockModeError.applyFailed(
+                        step: "설정 확인",
+                        reason: "\(change.key.label) 값이 적용되지 않았습니다"
+                    )
                 }
+                appliedKeys.append(change.key.label)
             }
             try system.restartDock()
         } catch {
-            // 되돌린다 — 복구 기록의 **원래 값**만 사용하고, 실제로 바꾼 키만 되돌린다.
-            let rolledBack = rollback(appliedKeys: appliedKeys, record: record)
-            if rolledBack.count == appliedKeys.count {
-                recovery.clear()
-                log("dockmode apply result=rolledback keys=\(rolledBack.count)")
-                throw DockModeError.applyFailed(
-                    step: (error as? DockModeError).map { if case .applyFailed(let step, _) = $0 { return step } else { return "적용" } } ?? "적용",
-                    reason: "\(error)"
-                )
+            let rollback = rollback(touched: touched, record: record)
+            notes.append(contentsOf: rollback.notes)
+            if rollback.failed.isEmpty {
+                // 값 확인까지 끝난 되돌리기만 성공으로 본다.
+                if !pending.isEmpty {
+                    let clear = recovery.clear(operationID: operationID)
+                    if !clear.isClean {
+                        let reason = clear.failureReason ?? "-"
+                        notes.append("복구 기록 정리 실패: \(reason)")
+                        log("dockmode apply cleanup=failed reason=\(reason)")
+                    }
+                }
+                log("dockmode apply result=rolledback keys=\(rollback.verified.count)")
+                throw DockModeError.applyFailed(step: Self.stepName(error), reason: Self.describe(error))
             }
-            log("dockmode apply result=rollback-failed")
-            throw DockModeError.rollbackFailed("\(error)")
+            // 되돌리지 못한 키가 있다 — **기록을 남긴다**(그 키들만).
+            let leftover = record.entries.filter { rollback.failed.contains($0.keyLabel) }
+            let updated = DockRecoveryRecord(
+                operationID: operationID,
+                mode: record.mode,
+                appliedAt: record.appliedAt,
+                updatedAt: now(),
+                suppression: record.suppression,
+                entries: leftover.map { entry in
+                    var copy = entry
+                    copy.skipReason = "rollbackFailed"
+                    return copy
+                },
+                ownerPID: record.ownerPID,
+                bootID: record.bootID
+            )
+            switch recovery.update(updated) {
+            case .written:
+                notes.append("되돌리지 못한 키를 기록에 남겼습니다: \(leftover.map(\.keyLabel).joined(separator: ","))")
+            case .refusedPendingRestore(let keys):
+                notes.append("기록 갱신 거부(다른 작업의 미복원 기록): \(keys.joined(separator: ","))")
+                log("dockmode apply record-update=refused pending")
+            case .refusedUnreadable(let reason):
+                notes.append("기록 갱신 거부(읽을 수 없음): \(reason)")
+                log("dockmode apply record-update=refused unreadable")
+            case .failed(let reason):
+                notes.append("기록 갱신 실패: \(reason)")
+                log("dockmode apply record-update=failed reason=\(reason)")
+            case .noPath:
+                notes.append("기록 갱신 실패: 경로 없음")
+                log("dockmode apply record-update=failed no-path")
+            }
+            log("dockmode apply result=rollback-failed keys=\(rollback.failed.count)")
+            throw DockModeError.rollbackFailed("\(Self.describe(error)) (되돌리지 못한 키 \(rollback.failed.count)개)")
         }
 
-        applied = .custom(appliedAt: record.appliedAt, suppression: suppressionApproved)
-        log("dockmode apply result=ok keys=\(appliedKeys.joined(separator: ","))")
+        applied = .custom(appliedAt: moment, suppression: suppressionApproved)
+        log("dockmode apply result=ok keys=\(appliedKeys.count) op=\(operationID.prefix(8))")
         return DockModeOutcome(
             applied: applied,
             changedKeys: appliedKeys,
-            rolledBackKeys: [],
-            skippedByUserChange: [],
-            recoveryRecordLeft: true,
+            recoveryRecordLeft: !pending.isEmpty,
+            lockNote: lastLockNote,
             notes: notes
         )
     }
 
-    /// Mac Dock 복귀. **정상 종료와 같은 경로**를 쓴다(추후 Custom → Both에서도 재사용).
+    // MARK: - 복원
+
+    /// Mac Dock 복귀. **정상 종료·비정상 종료 복구가 같은 경로**를 쓴다.
     ///
-    /// - 실제로 바꾼 키만 되돌린다(없던 키는 삭제).
-    /// - 사용자가 실행 중 직접 바꾼 값은 **조용히 덮어쓰지 않고** 건너뛴다(기록은 남긴다).
-    /// - 같은 요청을 반복해도 사용자 설정이 손상되지 않는다.
-    @discardableResult
-    public func restoreToMacDock() throws -> DockModeOutcome {
+    /// 처분을 구분해 돌려준다: 복원 / 이미 원래 값 / 사용자 변경 / 키 삭제 / 실패.
+    /// 부분 복원이나 실패를 **성공으로 뭉개지 않는다.**
+    public func restoreToMacDock() throws -> DockRestoreOutcome {
         guard !isBusy else { throw DockModeError.busy }
         isBusy = true
         defer { isBusy = false }
 
         let loaded = recovery.loadResult()
         if case .unreadable(let reason) = loaded {
-            // 손상된 기록을 '없음'으로 처리하면 사용자가 복구 수단을 잃는다. 지우지 않고 알린다.
             applied = .none
             throw DockModeError.restoreRecordUnreadable(reason)
         }
-        guard case .record(let record) = loaded else {
+        guard let record = loaded.record else {
             applied = .none
-            return DockModeOutcome(applied: .none, changedKeys: [], rolledBackKeys: [], skippedByUserChange: [], recoveryRecordLeft: false, notes: ["복구 기록이 없습니다(이미 복원됨)"])
+            return DockRestoreOutcome(kind: .nothingToDo, notes: [loaded.summary])
         }
 
-        guard lock.acquire(ownerPID: pid) else { throw DockModeError.otherInstanceActive }
-        defer { lock.release() }
+        let moment = now()
+        let operationID = UUID().uuidString
+        var notes: [String] = []
+        notes.append(contentsOf: try acquireLock(operationID: operationID, purpose: "restore", moment: moment))
+        defer { releaseLock(operationID: operationID, notes: &notes) }
 
-        var skipped: [String] = []
-        var restored: [String] = []
-        var updated = record
-        updated.entries = []
+        var results: [DockRestoreEntryResult] = []
+        var remaining: [DockRecoveryRecord.Entry] = []
+
+        func keep(_ entry: DockRecoveryRecord.Entry, _ disposition: DockRestoreDisposition, _ detail: String) {
+            results.append(DockRestoreEntryResult(key: entry.keyLabel, disposition: disposition, detail: detail))
+            var updated = entry
+            updated.skippedByUserChange = (disposition == .userChanged)
+            updated.skipReason = disposition.rawValue
+            remaining.append(updated)
+        }
 
         for entry in record.entries {
             let key = DockPreferenceKey(domain: entry.domain, name: entry.name)
             let appliedValue = entry.applied.asValue
             let current = system.currentValue(for: key)
-            // 사용자가 실행 중 직접 바꾼 값은 건드리지 않는다.
-            if entry.skippedByUserChange || (current != nil && current != appliedValue) {
-                skipped.append(key.label)
-                updated.entries.append(entry)
+
+            if entry.skippedByUserChange {
+                keep(entry, .userChanged, "이전 복원에서 사용자 변경으로 표시됨")
+                continue
+            }
+            if current == nil, entry.original == nil {
+                // 우리가 만들었던 키가 없고 원래도 없던 키 — 되돌릴 것이 없다.
+                results.append(DockRestoreEntryResult(key: entry.keyLabel, disposition: .alreadyOriginal, detail: "원래도 없던 키"))
+                continue
+            }
+            if let current, let original = entry.original, current.matches(original.asValue) {
+                results.append(DockRestoreEntryResult(key: entry.keyLabel, disposition: .alreadyOriginal, detail: "현재 값이 원래 값과 같음"))
+                continue
+            }
+            if let current, !current.matches(appliedValue) {
+                keep(entry, .userChanged, "현재 \(current.text) ≠ 적용값 \(appliedValue.text)")
                 log("dockmode restore skip=\(key.label) (사용자 변경)")
                 continue
             }
-            if let original = entry.original {
-                try system.set(original.asValue, for: key)
-            } else {
-                // 원래 없던 키는 지운다.
-                try system.remove(key)
-            }
-            let check = system.currentValue(for: key)
-            let expected = entry.original?.asValue
-            guard check == expected else {
-                skipped.append(key.label)
-                updated.entries.append(entry)
-                log("dockmode restore unverified=\(key.label)")
+            if current == nil, entry.original != nil {
+                keep(entry, .keyRemoved, "키가 없어졌습니다(사용자 삭제로 보고 만들지 않음)")
+                log("dockmode restore skip=\(key.label) (키 삭제됨)")
                 continue
             }
-            restored.append(key.label)
+
+            var writeError: String?
+            do {
+                if let original = entry.original {
+                    try system.set(original.asValue, for: key)
+                } else {
+                    // 원래 없던 키는 지운다.
+                    try system.remove(key)
+                }
+            } catch {
+                // **쓰기가 오류를 냈어도 값은 바뀌었을 수 있다.** 반환값이 아니라 실제 값으로 판정한다.
+                writeError = Self.describe(error)
+                log("dockmode restore write-error=\(key.label)")
+            }
+            _ = lock.refresh(operationID: operationID, now: now())
+
+            let check = system.currentValue(for: key)
+            let expected = entry.original?.asValue
+            let verified: Bool = {
+                guard let expected else { return check == nil }
+                return check?.matches(expected) ?? false
+            }()
+            if verified, let writeError {
+                results.append(
+                    DockRestoreEntryResult(
+                        key: entry.keyLabel,
+                        disposition: .restored,
+                        detail: "쓰기 오류 뒤 값 확인됨: \(writeError)"
+                    )
+                )
+            } else if verified {
+                results.append(
+                    DockRestoreEntryResult(
+                        key: entry.keyLabel,
+                        disposition: .restored,
+                        detail: expected.map { "→ \($0.text)" } ?? "키 삭제"
+                    )
+                )
+            } else {
+                keep(entry, .failed, writeError.map { "쓰기 실패·확인 실패(\($0))" } ?? "확인 실패(현재 \(check?.text ?? "없음"))")
+                log("dockmode restore unverified=\(key.label)")
+            }
         }
 
-        // 실제로 되돌린 키가 있을 때만 Dock을 다시 시작한다(빈 기록·전부 건너뜀일 때 괜히 흔들지 않는다).
-        if restored.isEmpty {
-            log("dockmode restore restart=skipped (되돌린 키 없음)")
+        // 되돌린 키가 있거나 지난번 재시작이 남아 있으면 Dock을 한 번 다시 시작한다.
+        let restoredCount = results.filter { $0.disposition == .restored }.count
+        var restartPerformed = false
+        var restartPending = record.restartPending
+        if restoredCount > 0 || record.restartPending {
+            do {
+                try system.restartDock()
+                restartPerformed = true
+                restartPending = false
+            } catch {
+                restartPending = true
+                notes.append("Dock 재시작 실패: \(Self.describe(error))")
+                log("dockmode restore restart=failed")
+            }
+        }
+
+        let alreadyCount = results.filter { $0.disposition == .alreadyOriginal }.count
+        let failedCount = results.filter { $0.disposition == .failed }.count
+        // 구분 규칙:
+        // - 완전 복원: 남은 키도, 미뤄 둔 재시작도 없다.
+        // - 실패: 되돌리지 못한 키가 있고 **아무것도 진행하지 못했다**(되돌리기 실패가 원인).
+        // - 부분: 그 밖에 남은 것이 있다(사용자 변경·키 삭제는 사용자의 결정이므로 실패가 아니다).
+        var kind: DockRestoreKind
+        if remaining.isEmpty, !restartPending {
+            kind = .complete
+        } else if failedCount > 0, restoredCount == 0, alreadyCount == 0 {
+            kind = .failed
         } else {
-            try system.restartDock()
+            kind = .partial
         }
 
-        let outcome = DockModeOutcome(
-            applied: .none,
-            changedKeys: restored,
-            rolledBackKeys: [],
-            skippedByUserChange: skipped,
-            recoveryRecordLeft: !updated.entries.isEmpty,
-            notes: skipped.isEmpty ? [] : ["사용자 변경으로 건너뛴 키: \(skipped.joined(separator: ","))"]
-        )
-
-        if updated.entries.isEmpty {
-            // **복원 성공을 확인한 뒤에만** 기록을 지운다.
-            recovery.clear()
-            log("dockmode restore result=ok keys=\(restored.count)")
+        var recordStillOnDisk = !remaining.isEmpty
+        if remaining.isEmpty, !restartPending {
+            // **복원 확인 뒤에만** 지운다. 지우지 못하면 그대로 알린다.
+            let clear = recovery.clear(operationID: record.operationID)
+            if !clear.isClean {
+                let reason = clear.failureReason ?? "-"
+                notes.append("복구 기록 정리 실패: \(reason)")
+                recordStillOnDisk = true
+                log("dockmode restore cleanup=failed reason=\(reason)")
+            } else {
+                log("dockmode restore result=complete restored=\(restoredCount)")
+            }
         } else {
-            // 미복원 기록은 남겨 두고 **새 원본으로 덮어쓰지 않는다.**
-            recovery.save(updated)
-            log("dockmode restore result=partial restored=\(restored.count) skipped=\(skipped.count)")
+            let updated = DockRecoveryRecord(
+                operationID: record.operationID,
+                mode: record.mode,
+                appliedAt: record.appliedAt,
+                updatedAt: now(),
+                suppression: record.suppression,
+                entries: remaining,
+                ownerPID: record.ownerPID,
+                bootID: record.bootID,
+                restartPending: restartPending
+            )
+            switch recovery.update(updated) {
+            case .written:
+                log("dockmode restore result=partial restored=\(restoredCount) left=\(remaining.count) restartPending=\(restartPending)")
+            case .refusedPendingRestore(let keys):
+                notes.append("기록 갱신 거부(다른 작업의 미복원 기록): \(keys.joined(separator: ","))")
+                kind = .partial
+                log("dockmode restore record-update=refused pending")
+            case .refusedUnreadable(let reason):
+                notes.append("기록 갱신 거부(읽을 수 없음): \(reason)")
+                kind = .partial
+                log("dockmode restore record-update=refused unreadable")
+            case .failed(let reason):
+                notes.append("기록 갱신 실패: \(reason)")
+                kind = kind == .complete ? .partial : kind
+                log("dockmode restore record-update=failed reason=\(reason)")
+            case .noPath:
+                notes.append("기록 갱신 실패: 경로 없음")
+                kind = kind == .complete ? .partial : kind
+                log("dockmode restore record-update=failed no-path")
+            }
         }
+
         applied = .none
-        return outcome
+        if kind == .partial {
+            notes.append("남은 키: " + remaining.map { "\($0.keyLabel)(\($0.skipReason ?? "-"))" }.joined(separator: ", "))
+        }
+        return DockRestoreOutcome(
+            kind: kind,
+            entries: results,
+            recordLeft: recordStillOnDisk,
+            restartPerformed: restartPerformed,
+            notes: notes
+        )
     }
+
+    // MARK: - 상태
 
     /// 복구 기록 읽기 결과(손상 포함). 화면·명령줄에서 그대로 안내한다.
-    public func recoveryState() -> DockRecoveryLoad {
-        recovery.loadResult()
-    }
+    public func recoveryState() -> DockRecoveryLoad { recovery.loadResult() }
 
     /// 다음 실행에서 **복구 상태를 감지**한다(자동 복원이 아니라 감지 + 안내).
     public func detectStaleRecord() -> DockRecoveryRecord? {
         guard let record = recovery.load() else { return nil }
-        log("dockmode detect stale mode=\(record.mode) keys=\(record.entries.count) owner=\(record.ownerPID)")
+        log("dockmode detect stale op=\(record.operationID.prefix(8)) keys=\(record.entries.count) owner=\(record.ownerPID)")
         return record
     }
 
-    /// 이미 적용된 키만 되돌린다(실패 경로에서 사용).
-    private func rollback(appliedKeys: [String], record: DockRecoveryRecord) -> [String] {
-        var rolledBack: [String] = []
-        for entry in record.entries {
-            let key = DockPreferenceKey(domain: entry.domain, name: entry.name)
-            guard appliedKeys.contains(key.label) else { continue }
+    /// 지금 잠금을 누가 잡고 있는가(화면 안내용).
+    public func lockOwner() -> DockLockInfo? { lock.current() }
+
+    // MARK: - 잠금
+
+    /// 잠금을 잡는다. 살아 있는 다른 인스턴스의 잠금은 **지우지 않고** 오류로 알린다.
+    /// 반환값은 안내 문구(이어받았을 때 원본 보존 경로 등).
+    private func acquireLock(operationID: String, purpose: String, moment: Date) throws -> [String] {
+        let info = DockLockInfo(
+            ownerPID: pid,
+            operationID: operationID,
+            purpose: purpose,
+            bootID: bootID,
+            recordedAt: moment
+        )
+        var notes: [String] = []
+        switch lock.acquire(info, lease: lease, isProcessAlive: isProcessAlive) {
+        case .acquired, .noPath:
+            lastLockNote = nil
+        case .heldByOther(let other):
+            let note = "다른 인스턴스(pid=\(other.ownerPID))가 \(other.purpose) 중"
+            lastLockNote = note
+            log("dockmode lock=held-by-other pid=\(other.ownerPID)")
+            throw DockModeError.otherInstanceActive(note)
+        case .tookOverStale(let other, let preserved):
+            let note = "이전 잠금(pid=\(other.ownerPID), \(other.purpose))을 이어받았습니다"
+                + (preserved.map { " — 원본 보존: \($0)" } ?? "")
+            lastLockNote = note
+            notes.append(note)
+            log("dockmode lock=took-over pid=\(other.ownerPID)")
+        case .unavailable(let reason):
+            throw DockModeError.lockUnavailable(reason)
+        }
+        return notes
+    }
+
+    private func releaseLock(operationID: String, notes: inout [String]) {
+        switch lock.release(operationID: operationID) {
+        case .removed, .absent, .noPath:
+            break
+        case .notOwner:
+            // 다른 작업이 잡고 있다 — 지우지 않는다(그 작업의 소유권이다).
+            log("dockmode lock=release-skipped (다른 작업 소유)")
+        case .failed(let reason):
+            notes.append("잠금 해제 실패: \(reason)")
+            log("dockmode lock=release-failed reason=\(reason)")
+        }
+    }
+
+    // MARK: - 되돌리기
+
+    private struct RollbackResult {
+        var verified: [String] = []
+        var failed: [String] = []
+        var notes: [String] = []
+    }
+
+    /// 되돌리기는 **반환 여부가 아니라 실제 값**으로 판정한다.
+    private func rollback(touched: [DockPreferenceKey], record: DockRecoveryRecord) -> RollbackResult {
+        var result = RollbackResult()
+        for key in touched {
+            guard let entry = record.entries.first(where: { $0.domain == key.domain && $0.name == key.name }) else {
+                continue
+            }
+            var writeError: String?
             do {
                 if let original = entry.original {
                     try system.set(original.asValue, for: key)
                 } else {
                     try system.remove(key)
                 }
-                rolledBack.append(key.label)
             } catch {
-                log("dockmode rollback failed key=\(key.label)")
+                // 쓰기 오류 뒤에도 값이 되돌아갔을 수 있다 — 실제 값을 확인한다.
+                writeError = Self.describe(error)
+                log("dockmode rollback write-error key=\(key.label)")
+            }
+            let current = system.currentValue(for: key)
+            let expected = entry.original?.asValue
+            let verified: Bool = {
+                guard let expected else { return current == nil }
+                return current?.matches(expected) ?? false
+            }()
+            if verified {
+                result.verified.append(key.label)
+                if let writeError {
+                    result.notes.append("\(key.label) 쓰기 오류 뒤 값은 되돌아갔다: \(writeError)")
+                }
+            } else {
+                result.failed.append(key.label)
+                result.notes.append(
+                    writeError.map { "\(key.label) 되돌리기 실패: \($0)" }
+                        ?? "\(key.label) 되돌림 확인 실패(현재 \(current?.text ?? "없음"))"
+                )
+                log("dockmode rollback unverified key=\(key.label)")
             }
         }
-        return rolledBack
+        return result
+    }
+
+    // MARK: - 보조
+
+    static func describe(_ error: Error) -> String {
+        if let mode = error as? DockModeError { return mode.message }
+        return (error as NSError).localizedDescription
+    }
+
+    static func stepName(_ error: Error) -> String {
+        if case .applyFailed(let step, _)? = error as? DockModeError { return step }
+        return "적용"
     }
 }

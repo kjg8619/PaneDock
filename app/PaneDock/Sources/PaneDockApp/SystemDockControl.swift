@@ -7,8 +7,11 @@ import FocusProbeCore
 /// 모든 변경은 적용 전에 원래 값·자료형·존재 여부를 기록하고, 실제로 바꾼 키만 되돌린다.
 final class SystemDockControl: DockSystemControl {
     private let log: (String) -> Void
+    /// Dock 재시작 허용 여부. **검증용 플래그로만 끈다**(운영에서는 항상 재시작한다).
+    private let allowRestart: Bool
 
-    init(log: @escaping (String) -> Void = { _ in }) {
+    init(allowRestart: Bool = true, log: @escaping (String) -> Void = { _ in }) {
+        self.allowRestart = allowRestart
         self.log = log
     }
 
@@ -59,6 +62,10 @@ final class SystemDockControl: DockSystemControl {
 
     /// 설정 반영을 위해 Dock을 **한 번** 다시 시작한다(반복 강제 종료 금지).
     func restartDock() throws {
+        guard allowRestart else {
+            log("dockctl restart=skipped (검증용 플래그)")
+            return
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
         process.arguments = ["Dock"]
@@ -83,11 +90,12 @@ final class SystemDockControl: DockSystemControl {
             return .bool(number.boolValue)
         }
         if let number = raw as? NSNumber {
-            let double = number.doubleValue
-            if double == double.rounded(), abs(double) < 9_007_199_254_740_992 {
-                return .integer(Int(double))
-            }
-            return .double(double)
+            // **부동소수 여부를 그대로 살린다.** 값을 보고 정수로 바꾸면
+            // `autohide-delay = 1000.0`이 `.integer(1000)`으로 읽혀 원래 자료형을 잃는다.
+            return DockPreferenceValue.fromNumber(
+                number.doubleValue,
+                isFloat: CFNumberIsFloatType(number as CFNumber)
+            )
         }
         if let text = raw as? String { return .string(text) }
         return nil

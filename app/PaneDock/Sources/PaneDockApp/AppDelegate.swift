@@ -46,8 +46,10 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private var dockModeController: DockModeController?
     /// 화면에 표시할 **실제 적용 상태**(선택값과 구분한다).
     private var dockAppliedState: DockAppliedState = .none
-    /// Custom 모드에서 하단 가장자리에 고정할 때 쓰는 기준(자유 좌표는 따로 보존한다).
-    private var customBottomAnchorY: CGFloat?
+    /// 사용자가 자유롭게 둔 위치(설정에 저장되는 값). Custom의 **하단 가장자리 배치와 구분**한다.
+    private var freeOrigin: CGPoint?
+    /// 지금 하단 가장자리에 붙여 둔 상태인가(복귀 시 자유 좌표로 되돌린다).
+    private var isBottomAnchored = false
 
     // MARK: - 사용 모드 (Mac Dock / Custom Dock)
 
@@ -64,7 +66,9 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let recovery = DockRecoveryStore(url: isFake ? nil : support?.appendingPathComponent("dock-recovery.json"))
         let lock = DockModeLock(url: isFake ? nil : support?.appendingPathComponent("dock-mode.lock"))
         let controller = DockModeController(
-            system: SystemDockControl { [weak self] line in self?.model?.appendEvent(line) },
+            system: SystemDockControl(allowRestart: !options.noDockRestart) { [weak self] line in
+                self?.model?.appendEvent(line)
+            },
             recovery: recovery,
             lock: lock,
             log: { [weak self] line in self?.model?.appendEvent(line) }
@@ -72,11 +76,13 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         dockModeController = controller
 
         // 이전 실행이 남긴 미복원 기록 감지(자동 복원이 아니라 감지 + 안내).
+        // 현재 Custom이 아니어도 **복구에 접근할 수 있게** 안내한다(메뉴 항목은 항상 열려 있다).
         switch controller.recoveryState() {
         case .record(let stale):
             model.appendEvent("dockmode stale detected keys=\(stale.entries.count)")
             startupNotice += (startupNotice.isEmpty ? "" : "\n")
-                + "이전 실행이 Dock 설정을 되돌리지 못했습니다. 메뉴 › 사용 모드 › ‘기본 Dock으로 복원’을 실행해 주세요."
+                + "이전 실행이 Dock 설정을 되돌리지 못했습니다(미복원 \(stale.entries.count)키). "
+                + "메뉴 › 사용 모드 › ‘기본 Dock으로 복원’을 실행해 주세요."
         case .unreadable(let reason):
             model.appendEvent("dockmode recovery unreadable reason=\(reason)")
             startupNotice += (startupNotice.isEmpty ? "" : "\n")
@@ -105,17 +111,28 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             return
         }
         if saved == .custom, store.settings.customDockConsent != nil {
+            // 지난 실행에서 시스템 단계가 실패했다면 **자동으로 다시 적용하지 않는다**(같은 실패 반복 방지).
+            // 사용자가 메뉴에서 직접 적용하거나 복원할 수 있다.
+            if let failedAt = store.settings.dockLastApplyFailedAt {
+                dockAppliedState = .none
+                model.appendEvent("dockmode startup apply=skipped lastFailure=\(failedAt)")
+                startupNotice += (startupNotice.isEmpty ? "" : "\n")
+                    + "지난번 Custom 적용이 실패해 이번 실행에서는 자동 적용하지 않았습니다. 메뉴 › 사용 모드에서 직접 적용하거나 복원해 주세요."
+                return
+            }
             // 저장된 모드와 동의를 사용한다. 억제 설정은 **별도 승인**이 있을 때만.
             do {
                 let outcome = try controller.applyCustom(
                     consent: true,
                     suppressionApproved: store.settings.dockSuppressionApproved,
-                    prepareScreen: { [weak self] in self?.prepareCustomScreen() }
+                    prepareScreen: { [weak self] in try self?.prepareCustomScreen() }
                 )
                 dockAppliedState = outcome.applied
-                model.appendEvent("dockmode startup apply=ok keys=\(outcome.changedKeys.count)")
+                store.update { $0.dockLastApplyFailedAt = nil }
+                model.appendEvent("dockmode startup apply=ok keys=\(outcome.changedKeys.count) lock=\(outcome.lockNote ?? "-")")
             } catch let error as DockModeError {
                 dockAppliedState = .none
+                markApplyFailure(error)
                 startupNotice += (startupNotice.isEmpty ? "" : "\n") + "Custom 모드를 적용하지 못했습니다: \(error.message)"
                 model.appendEvent("dockmode startup apply=failed reason=\(error.message)")
             } catch {
@@ -126,11 +143,40 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         dockAppliedState = .none
     }
 
-    /// 커스텀 화면 준비 — 실패하면 적용 전체가 되돌아간다.
-    private func prepareCustomScreen() {
-        // 화면 준비: 접힘을 풀고 창을 올린다(활성화는 하지 않는다 — 다른 앱 포커스를 빼앗지 않는다).
-        model?.setCollapsed(false)
-        panel?.orderFrontRegardless()
+    /// 커스텀 화면 준비. **준비가 끝난 것을 확인하고 돌아와야** 코어가 시스템 설정을 쓴다.
+    ///
+    /// - 크기가 같아도 하단 배치·표시를 **다시 적용**한다.
+    /// - 확인 전에는 기본 Dock을 숨기지 않는다(실패하면 적용 전체가 되돌아간다).
+    private func prepareCustomScreen() throws {
+        guard let panel, let model else {
+            throw DockScreenError.notReady("창이 아직 만들어지지 않았습니다")
+        }
+        // 1) 접힘을 풀고 내용에 맞는 크기를 맞춘다.
+        model.setCollapsed(false)
+        applyPanelSize()
+        // 2) 하단 가장자리 배치를 **강제로** 적용한다(이미 그 자리여도 다시 확인한다).
+        _ = anchorToBottom(panel: panel, force: true)
+        // 3) 창을 올린다(활성화는 하지 않는다 — 다른 앱의 포커스를 빼앗지 않는다).
+        panel.orderFrontRegardless()
+
+        // 4) 실제로 준비됐는지 확인한다(짧게 기다린다). 창 서버가 아직 반영하지 않았을 수 있다.
+        var ready = false
+        for _ in 0..<25 {
+            if panel.isVisible, isAtBottomEdge(panel) { ready = true; break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        model.appendEvent(
+            "dockmode prepare=ready:\(ready) visible=\(panel.isVisible) "
+                + "origin=(\(Int(panel.frame.origin.x)),\(Int(panel.frame.origin.y))) "
+                + "screenBottom=\(Int(ScreenGeometry.fallbackFrame.minY))"
+        )
+        guard ready else {
+            throw DockScreenError.notReady("패널이 하단에 보이지 않습니다")
+        }
+    }
+
+    private func isAtBottomEdge(_ panel: NSPanel) -> Bool {
+        abs(panel.frame.origin.y - ScreenGeometry.fallbackFrame.minY) <= 1.0
     }
 
     /// 모드 선택(선택만으로는 아무것도 바꾸지 않는다).
@@ -167,7 +213,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             let outcome = try controller.applyCustom(
                 consent: true,
                 suppressionApproved: suppression,
-                prepareScreen: { [weak self] in self?.prepareCustomScreen() }
+                prepareScreen: { [weak self] in try self?.prepareCustomScreen() }
             )
             dockAppliedState = outcome.applied
             // 동의는 **실제로 적용된 뒤에** 기록한다(실패한 시도로 동의를 남기지 않는다).
@@ -177,10 +223,18 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 }
                 settings.dockSuppressionApproved = suppression
             }
-            model.setActionMessage("Custom Dock을 적용했습니다 — 바꾼 설정 \(outcome.changedKeys.count)개(종료·해제 시 복원)")
-            model.appendEvent("dockmode apply result=ok keys=\(outcome.changedKeys.joined(separator: ",")) suppressed=\(suppression)")
+            store.update { $0.dockLastApplyFailedAt = nil }
+            var message = "Custom Dock을 적용했습니다 — 바꾼 설정 \(outcome.changedKeys.count)개(종료·해제 시 복원)"
+            if outcome.changedKeys.isEmpty {
+                message = "이미 원하는 상태였습니다 — 바꾼 설정 없음(기본 Dock을 숨긴 상태로 씁니다)"
+            }
+            if let lockNote = outcome.lockNote { message += "\n" + lockNote }
+            if !outcome.notes.isEmpty { message += "\n" + outcome.notes.joined(separator: "\n") }
+            model.setActionMessage(message)
+            model.appendEvent("dockmode apply result=ok keys=\(outcome.changedKeys.joined(separator: ",")) suppressed=\(suppression) lock=\(outcome.lockNote ?? "-")")
         } catch let error as DockModeError {
             dockAppliedState = .none
+            markApplyFailure(error)
             model.setActionMessage(error.message)
             model.appendEvent("dockmode apply result=failed reason=\(error.message)")
         } catch {
@@ -190,29 +244,68 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         rebuildStatusMenu()
     }
 
-    /// 복원 — 모드 해제와 정상 종료가 **같은 경로**를 쓴다(추후 Custom → Both도 재사용).
-    @discardableResult
-    private func restoreSystemDock(reason: String) -> Bool {
-        guard let controller = dockModeController else { return false }
-        do {
-            let outcome = try controller.restoreToMacDock()
-            dockAppliedState = .none
-            model?.appendEvent("dockmode restore reason=\(reason) keys=\(outcome.changedKeys.count) skipped=\(outcome.skippedByUserChange.count) left=\(outcome.recoveryRecordLeft)")
-            return true
-        } catch let error as DockModeError {
-            model?.appendEvent("dockmode restore reason=\(reason) result=failed reason=\(error.message)")
-            return false
-        } catch {
-            model?.appendEvent("dockmode restore reason=\(reason) result=failed")
-            return false
+    /// 시스템 단계에서 적용이 실패했음을 남긴다(다음 실행에서 자동 적용하지 않게).
+    private func markApplyFailure(_ error: DockModeError) {
+        switch error {
+        case .applyFailed, .rollbackFailed:
+            settings?.update { $0.dockLastApplyFailedAt = ISO8601DateFormatter().string(from: Date()) }
+        default:
+            break
         }
     }
 
+    /// 복원 — 모드 해제·정상 종료·미복원 복구가 **같은 경로**를 쓴다.
+    ///
+    /// 결과 종류(완전/부분/실패/되돌릴 것 없음)를 그대로 돌려준다. 성공으로 뭉개지 않는다.
+    @discardableResult
+    private func restoreSystemDock(reason: String) -> DockRestoreOutcome? {
+        guard let controller = dockModeController else { return nil }
+        do {
+            let outcome = try controller.restoreToMacDock()
+            dockAppliedState = .none
+            model?.appendEvent(
+                "dockmode restore reason=\(reason) kind=\(outcome.kind.rawValue) "
+                    + "restored=\(outcome.count(.restored)) already=\(outcome.count(.alreadyOriginal)) "
+                    + "userChanged=\(outcome.count(.userChanged)) removed=\(outcome.count(.keyRemoved)) "
+                    + "failed=\(outcome.count(.failed)) left=\(outcome.recordLeft) restart=\(outcome.restartPerformed)"
+            )
+            if !outcome.notes.isEmpty {
+                model?.appendEvent("dockmode restore notes=\(outcome.notes.joined(separator: " | "))")
+            }
+            // Custom에서 나왔으니 **커스텀 패널과 입력 세션을 정리**한다.
+            endCustomSession(reason: reason)
+            return outcome
+        } catch let error as DockModeError {
+            dockAppliedState = .none
+            model?.setActionMessage(error.message)
+            model?.appendEvent("dockmode restore reason=\(reason) result=failed reason=\(error.message)")
+            endCustomSession(reason: reason)
+            return nil
+        } catch {
+            model?.appendEvent("dockmode restore reason=\(reason) result=failed")
+            endCustomSession(reason: reason)
+            return nil
+        }
+    }
+
+    /// Custom 화면과 키보드 호출 세션을 정리하고 자유 좌표로 되돌린다.
+    private func endCustomSession(reason: String) {
+        guard let panel else { return }
+        endInvocation()                 // 키 모니터 해제 + 키보드 선택 해제
+        restoreFreePlacement(panel: panel)
+        panel.orderOut(nil)
+        // 모드 때문에 숨긴 것이지 사용자가 숨긴 것이 아니다(Custom에 다시 들어가면 보여야 한다).
+        isUserHidden = false
+        model?.appendEvent("dockmode session=ended reason=\(reason)")
+    }
+
     @MainActor @objc private func restoreDockModeAction() {
-        if restoreSystemDock(reason: "menu") {
-            model?.setActionMessage("기본 Dock 설정을 복원했습니다.")
-        } else {
-            model?.setActionMessage("복원할 Dock 설정이 없거나 복원에 실패했습니다(상세 보기의 기록 확인).")
+        if let outcome = restoreSystemDock(reason: "menu") {
+            var message = outcome.userMessage
+            if !outcome.notes.isEmpty {
+                message += "\n" + outcome.notes.joined(separator: "\n")
+            }
+            model?.setActionMessage(message)
         }
         applyPanelSize()
         rebuildStatusMenu()
@@ -413,7 +506,13 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             panel.orderFrontRegardless()
             if options.previewCustom, !dockAppliedState.isCustom {
                 // 미리보기는 **적용이 아니다**: 시스템 Dock 설정은 그대로다.
-                model.setActionMessage("미리보기 — Custom은 아직 적용되지 않았습니다(기본 Dock 설정 그대로).")
+                // 다만 준비 경로(접힘 해제·하단 배치·표시·확인)는 **실제와 같은 함수**를 지나간다.
+                do {
+                    try prepareCustomScreen()
+                    model.setActionMessage("미리보기 — Custom은 아직 적용되지 않았습니다(기본 Dock 설정 그대로).")
+                } catch {
+                    model.setActionMessage("미리보기 준비 실패: \(error)")
+                }
                 model.appendEvent("panel preview mode=custom applied=none")
             }
         } else {
@@ -426,8 +525,13 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         logStartup()
 
         // 진단용 창 이동. 사용자가 헤더를 드래그한 것과 같은 저장 경로(windowDidMove)를 탄다.
-        if let target = options.moveTo {
+        if let target = options.moveTo, options.moveAfterMilliseconds == nil {
             panel.setFrameOrigin(target)
+        }
+        if let target = options.moveTo, let delay = options.moveAfterMilliseconds {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(delay) / 1000.0) { [weak self] in
+                self?.panel?.setFrameOrigin(target)
+            }
         }
 
         // 진단용 다시 읽기. **메뉴 항목의 target/action을 그대로 호출**해 메뉴 배선까지 지나간다.
@@ -445,6 +549,12 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private func persistCorrectedOriginIfNeeded() {
         guard let panel, let settings, settings.canWrite,
               let stored = settings.settings.windowOrigin else { return }
+        // Custom(과 미리보기)에서는 창이 **하단 가장자리에 붙어 있다.** 그 자리를 저장하면
+        // 사용자가 두었던 자유 좌표를 잃는다 — 저장하지 않는다.
+        if dockAppliedState.isCustom || options.previewCustom {
+            model?.appendEvent("dockmode corrected-origin skipped (하단 기준)")
+            return
+        }
         let origin = panel.frame.origin
         guard stored.x != Double(origin.x) || stored.y != Double(origin.y) else { return }
         settings.update {
@@ -517,8 +627,15 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     /// 정상 종료는 **모드 해제와 같은 복원 경로**를 쓴다.
     func applicationWillTerminate(_ notification: Notification) {
-        guard dockAppliedState.isCustom else { return }
-        _ = restoreSystemDock(reason: "quit")
+        // Custom을 쓴 적이 있거나 미복원 기록이 남아 있으면 정상 종료에서 복원한다.
+        let hasRecord = dockModeController?.recoveryState().record != nil
+        guard dockAppliedState.isCustom || hasRecord else { return }
+        if let outcome = restoreSystemDock(reason: "quit") {
+            // 복원 자체는 restoreSystemDock이 로그에 남긴다(여기서는 결과만 한 줄 덧붙인다).
+            model?.appendEvent(
+                "dockmode quit-restore kind=\(outcome.kind.rawValue) left=\(outcome.recordLeft)"
+            )
+        }
     }
 
     // MARK: - 설정
@@ -612,17 +729,53 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         )
     }
 
-    /// Custom 모드에서 창을 **하단 가장자리**에 고정한다. 자유 좌표(사용자가 옮긴 위치)는 건드리지 않는다.
-    private func anchorToBottomIfCustom(panel: NSPanel) {
-        guard dockAppliedState.isCustom else { return }
+    /// 커스텀 화면 준비가 실제로 끝나지 않았을 때(코어가 시스템 설정을 쓰지 않게 한다).
+    enum DockScreenError: Error {
+        case notReady(String)
+
+        var message: String {
+            switch self {
+            case .notReady(let reason): return "커스텀 화면이 준비되지 않았습니다: \(reason)"
+            }
+        }
+    }
+
+    /// Custom 모드에서 창을 **하단 가장자리**에 붙인다.
+    ///
+    /// 자유 좌표(사용자가 옮긴 위치)는 `freeOrigin`에 그대로 두고 **덮어쓰지 않는다.**
+    /// `force`는 "이미 그 자리여도 다시 적용"이다 — 크기가 같아도 진입 시 배치를 확정하기 위해 쓴다.
+    @discardableResult
+    private func anchorToBottom(panel: NSPanel, force: Bool = false) -> Bool {
+        // 적용 중이거나 미리보기일 때, 또는 준비 단계에서 강제로(진입 시).
+        guard dockAppliedState.isCustom || options.previewCustom || force else { return false }
         let frame = ScreenGeometry.fallbackFrame
         let size = panel.frame.size
         let origin = NSPoint(x: max(frame.minX + 12, frame.midX - size.width / 2), y: frame.minY)
-        guard abs(panel.frame.origin.y - origin.y) > 0.5 || abs(panel.frame.origin.x - origin.x) > 0.5 else { return }
+        let sameSpot = abs(panel.frame.origin.y - origin.y) <= 0.5 && abs(panel.frame.origin.x - origin.x) <= 0.5
+        if !sameSpot {
+            isApplyingLayout = true
+            lastProgrammaticLayout = Date()
+            panel.setFrameOrigin(origin)
+            isApplyingLayout = false
+        }
+        isBottomAnchored = true
+        model?.appendEvent(
+            "dockmode anchor=bottom origin=(\(Int(origin.x)),\(Int(origin.y))) "
+                + "moved=\(!sameSpot) freeOrigin=\(freeOrigin.map { "(\(Int($0.x)),\(Int($0.y)))" } ?? "-")"
+        )
+        return true
+    }
+
+    /// Mac Dock으로 돌아갈 때 **자유 좌표**로 되돌린다(가장자리 배치와 분리되어 있다).
+    private func restoreFreePlacement(panel: NSPanel) {
+        guard isBottomAnchored else { return }
+        let origin = ScreenGeometry.resolve(origin: freeOrigin, size: panel.frame.size)
         isApplyingLayout = true
+        lastProgrammaticLayout = Date()
         panel.setFrameOrigin(origin)
         isApplyingLayout = false
-        model?.appendEvent("dockmode anchor=bottom origin=(\(Int(origin.x)),\(Int(origin.y)))")
+        isBottomAnchored = false
+        model?.appendEvent("dockmode anchor=none origin=(\(Int(origin.x)),\(Int(origin.y))) (자유 좌표 복귀)")
     }
 
     private func makePanel(model: DockModel) -> NSPanel {
@@ -668,7 +821,9 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             size: size
         )
         panel.setFrame(NSRect(origin: origin, size: size), display: false)
-        anchorToBottomIfCustom(panel: panel)
+        // 자유 좌표를 기억해 둔다(Custom에서 하단에 붙여도 이 값은 그대로 남는다).
+        freeOrigin = saved.map { CGPoint(x: $0.x, y: $0.y) }
+        anchorToBottom(panel: panel)
         return panel
     }
 
@@ -707,7 +862,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         )
         isApplyingLayout = false
         // Custom 모드에서는 크기·상세 보기·접기가 바뀌어도 **하단 기준 위치를 유지**한다.
-        anchorToBottomIfCustom(panel: panel)
+        anchorToBottom(panel: panel)
         // 펼침/접힘 자체도 레이아웃 변경이므로, 여기서 조건을 다시 보되 이미 접혀 있으면 그대로 둔다.
         scheduleCollapseCheck()
     }
@@ -796,7 +951,14 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if isApplyingLayout { return }
         if let last = lastProgrammaticLayout, Date().timeIntervalSince(last) < 0.75 { return }
         guard let panel, let settings, settings.canWrite else { return }
+        // Custom(과 미리보기)에서는 **하단 가장자리 기준**이므로 끌어도 자유 좌표를 덮어쓰지 않는다.
+        if dockAppliedState.isCustom || options.previewCustom {
+            model?.appendEvent("dockmode drag ignored (Custom: 하단 기준)")
+            anchorToBottom(panel: panel)
+            return
+        }
         let origin = panel.frame.origin
+        freeOrigin = origin
         pendingPositionSave?.cancel()
         let work = DispatchWorkItem { [weak self] in
             self?.settings?.update {
@@ -1101,14 +1263,42 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         )
         consent.isEnabled = false
         submenu.addItem(consent)
+
+        // 복구 기록 상태 — **Custom이 아니어도** 여기서 보이고 복원으로 갈 수 있다.
+        let recovery = dockModeController?.recoveryState() ?? .noPath
+        let recoveryItem = NSMenuItem(title: "복구 기록: \(recovery.summary)", action: nil, keyEquivalent: "")
+        recoveryItem.isEnabled = false
+        submenu.addItem(recoveryItem)
+        if let owner = dockModeController?.lockOwner(), owner.ownerPID != ProcessInfo.processInfo.processIdentifier {
+            let lockItem = NSMenuItem(
+                title: "다른 인스턴스 작업 중(pid=\(owner.ownerPID), \(owner.purpose))",
+                action: nil,
+                keyEquivalent: ""
+            )
+            lockItem.isEnabled = false
+            submenu.addItem(lockItem)
+        }
+
         submenu.addItem(.separator())
+        // 되돌릴 것이 있으면(적용 중이거나 미복원 기록·손상 기록) 복원으로 갈 수 있어야 한다.
+        let restorable: Bool = {
+            if dockAppliedState.isCustom { return true }
+            switch recovery {
+            case .record, .unreadable: return true
+            case .none, .noPath: return false
+            }
+        }()
         let apply = NSMenuItem(title: "Custom Dock 적용", action: #selector(applyDockModeAction), keyEquivalent: "")
         apply.target = self
-        apply.isEnabled = (selected ?? .macDock) != .macDock && !dockAppliedState.isCustom
+        apply.isEnabled = (selected ?? .macDock) != .macDock && !dockAppliedState.isCustom && !restorable
+        if restorable, (selected ?? .macDock) != .macDock, !dockAppliedState.isCustom {
+            // 미복원 기록이 남아 있으면 새 적용은 거부된다 — 왜 못 누르는지 메뉴에서 보인다.
+            apply.title = "Custom Dock 적용 (미복원 기록을 먼저 복원)"
+        }
         submenu.addItem(apply)
         let restore = NSMenuItem(title: "기본 Dock으로 복원", action: #selector(restoreDockModeAction), keyEquivalent: "")
         restore.target = self
-        restore.isEnabled = dockAppliedState.isCustom
+        restore.isEnabled = restorable
         submenu.addItem(restore)
 
         item.submenu = submenu

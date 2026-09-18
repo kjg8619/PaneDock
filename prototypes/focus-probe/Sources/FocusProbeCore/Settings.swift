@@ -54,6 +54,7 @@ public struct PaneDockSettings: Codable, Equatable, Sendable {
         dockMode = (try? container.decodeIfPresent(DockMode.self, forKey: .dockMode)) ?? nil
         customDockConsent = (try? container.decodeIfPresent(String.self, forKey: .customDockConsent)) ?? nil
         dockSuppressionApproved = ((try? container.decodeIfPresent(Bool.self, forKey: .dockSuppressionApproved)) ?? nil) ?? false
+        dockLastApplyFailedAt = (try? container.decodeIfPresent(String.self, forKey: .dockLastApplyFailedAt)) ?? nil
     }
 
 
@@ -71,6 +72,8 @@ public struct PaneDockSettings: Codable, Equatable, Sendable {
     public var customDockConsent: String?
     /// 재등장 억제(문서화되지 않은 설정) 사용 동의 — **별도 승인**이다.
     public var dockSuppressionApproved: Bool
+    /// 마지막 적용이 **시스템 단계에서 실패**한 시각(ISO8601). 다음 실행에서 자동 적용하지 않는다.
+    public var dockLastApplyFailedAt: String?
 
     public init(
         schemaVersion: Int = PaneDockSettings.currentSchemaVersion,
@@ -79,6 +82,7 @@ public struct PaneDockSettings: Codable, Equatable, Sendable {
         dockMode: DockMode? = nil,
         customDockConsent: String? = nil,
         dockSuppressionApproved: Bool = false,
+        dockLastApplyFailedAt: String? = nil,
         windowOrigin: StoredOrigin? = nil,
         hotKey: HotKeyChoice = .controlOptionCommandD,
         hotKeyEnabled: Bool = true
@@ -89,6 +93,7 @@ public struct PaneDockSettings: Codable, Equatable, Sendable {
         self.dockMode = dockMode
         self.customDockConsent = customDockConsent
         self.dockSuppressionApproved = dockSuppressionApproved
+        self.dockLastApplyFailedAt = dockLastApplyFailedAt
         self.windowOrigin = windowOrigin
         self.hotKey = hotKey
         self.hotKeyEnabled = hotKeyEnabled
