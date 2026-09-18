@@ -3479,8 +3479,8 @@ menu=close source=keyboard                            (Esc가 **메뉴만** 닫�
 | 구분 | 항목 |
 | --- | --- |
 | **완료(소스 + 검사)** | 표시 목록 단일화 · 승인 화면(타일·카드·프로젝트 패널) · 시계/타이머 동작 · 편집기 배치(순서·폭·카드) · 넘침 계산(항목·카드) · 키보드 조작(항목·타이머·메뉴·등록/폴더·추가) · 상태 4분류(등록/미등록/확인 중/오류) · A 시안 시각(아이콘·메뉴바 심볼·타일) · cmux 실행 경계(탐색·수집·오류 분류) |
-| **GUI로 확인함** | 등록/다른 프로젝트/미등록/오류 화면 · 오류 상세 보기와 복구 · 실제 Ghostty→cmux→Ghostty 전환(공통·타이머 유지) · 편집기 카드 추가·제거·저장 · 마우스·합성 키 이벤트로 조작 |
-| **미검증** | ① `pending` 화면 캡처(판정·문구는 검사로 고정, 현재 흐름에서 UI에 게시되지 않음) ② **물리 키보드** 입력(사람이 직접 누르는 ⌃⌥⌘D/Tab/Enter — 합성 키 이벤트와 구분) ③ cmux 쪽 실패의 **내부 원인**(파이프에서 멈추는 이유는 미확정, 우회만 적용) ④ 저장 시 `card=prune` 로그 줄 자체 |
+| **GUI로 확인함** | 등록/다른 프로젝트/미등록/오류 화면 · 오류 상세 보기와 복구 · 실제 Ghostty→cmux→Ghostty 전환(공통·타이머 유지) · 편집기 카드 추가·제거·저장 · 마우스·합성 키 이벤트로 조작 · **물리 키 입력(사용자 직접, V19)** |
+| **미검증** | ① `pending` 화면 캡처(판정·문구는 검사로 고정, 현재 흐름에서 UI에 게시되지 않음) ② cmux 쪽 실패의 **내부 원인**(파이프에서 멈추는 이유는 미확정, 우회만 적용) ③ 저장 시 `card=prune` 로그 줄 자체 |
 
 ### V18 개인 실사용 기준선 (2026-09-18)
 
@@ -3488,14 +3488,44 @@ menu=close source=keyboard                            (Esc가 **메뉴만** 닫�
 
 | 항목 | 내용 |
 | --- | --- |
-| 빌드 식별자 | 저장소 `main` **a5adbcf** 기준 작업 트리 + 아래 수정(V18.22). debug 바이너리 `sha256:2efb155d7306…`, 번들 바이너리 `sha256:1617eec45ad0…` |
+| 빌드 식별자 | 저장소 `main` **e4daf61** 기준 작업 트리 + V19 수정. 번들 `0.2a · 빌드 44 · e4daf61 · 수정된 트리`(상세 보기 '빌드' 줄에서 확인) |
 | 실행(번들) | `bash app/PaneDock/make-app.sh` → `open app/PaneDock/dist/PaneDock.app` (ad-hoc 서명, Dock 아이콘 없이 메뉴 막대에만) |
 | 실행(개발) | `cd app/PaneDock && swift build && .build/debug/PaneDock [--fake steady\|toggle\|missing] [--adapter auto\|ghostty\|cmux] [--self-check]` |
-| 자체 검사 | `cd prototypes/focus-probe && swift build && .build/debug/focus-probe --self-test` (현재 **180/180**) |
+| 자체 검사 | `cd prototypes/focus-probe && swift build && .build/debug/focus-probe --self-test` (현재 **183/183**) |
 | 확인한 환경 | macOS 27.0(26A428) · Apple M5 Pro · 화면 1512×982pt(visible 1512×859) · Ghostty 1.3.1 · cmux(`socketControlMode=automation`, 기본값) |
 | 진단 플래그 | `--state-log <path>` · `--settings-path`(임시 설정) · `--projects-path`(임시 카탈로그) · `--details` · `--editor` · `--timer-seconds` · `--timer-autostart` · `--key-selftest` |
 | 알려진 제한 | ① 중첩 TUI(herdr·tmux) 내부 경로는 공식 조회로 알 수 없다(바깥 프로세스 경로만) ② Herdr 연동은 지원 범위 밖 ③ 타이머 상태는 앱 종료 후 복원되지 않는다 ④ 프로젝트 전환은 **부분 전환**(프로젝트 영역만) — 전체 Dock 프로필 전환은 만들지 않았다 ⑤ cmux는 읽기 전용(identify·sidebar-state)이며 이 환경에서 파이프 수집 시 멈추던 문제를 **우회**로 피한다 |
 | 사용자 설정 | 이 기준선 확인은 전부 임시 설정·임시 카탈로그로 했다. 실제 `settings.json`·`projects.json`은 건드리지 않는다 |
+
+### V19. 개인 실사용 빌드 정리 (2026-09-18)
+
+**1) 실행본 식별**
+
+| 항목 | 내용 |
+| --- | --- |
+| 소스 | `BuildIdentity`(코어): 제품 버전(`0.2a` — 소스 한 곳) · 빌드 번호 · 짧은 Git SHA · **작업 트리 상태**를 구분 |
+| 번들 기록 | `make-app.sh`가 `git rev-list --count`·`git rev-parse --short`·`git status --porcelain`으로 계산해 `CFBundleShortVersionString` · `CFBundleVersion` · `PaneDockGitSHA` · `PaneDockGitDirty`에 넣는다 |
+| 확인 위치 | 상세 보기의 **빌드** 줄 + 시작 로그 `build=[version=… build=… sha=… dirty=… bundle=…]` |
+| 구분 | 번들이 없는 개발 실행 파일은 **“개발 빌드(번들 정보 없음)”** 로 표시하고 값을 지어내지 않는다 |
+
+실측: 번들 → `0.2a · 빌드 44 · e4daf61 · 수정된 트리`(`shots/v19-A-build.png` — 수정된 트리로 만든 빌드를 깨끗한 빌드처럼 표시하지 않는다),
+개발 실행 파일 → `version=0.2a build=- sha=- dirty=false bundle=false`.
+**bundle identifier(`dev.panedock.prototype`)·설정 경로는 바꾸지 않았다.**
+
+**2) 사용 안내** — `--help`에 빌드 확인 · 처음 쓰기(빌드/실행/호출/편집/등록/종료) · 연동 전제(Ghostty 1.3.0+ 공식 AppleScript, cmux 읽기 전용 socket CLI,
+중첩 TUI 제외) · 현재 제한 · **개인 실사용 빌드와 공개 배포 준비 완료의 구분**을 짧게 넣었다.
+
+**3) 실제 사용 확인(사용자 직접, 물리 키 입력)** — 화면에 떠 있는 개인 실사용 빌드에서
+`⌃⌥⌘D` 호출 → Tab으로 타이머 ▶에 초점 → Enter로 시작 → Tab으로 `⋯`에 초점 → Enter로 메뉴 열기 → Esc로 메뉴만 닫기 → Esc로 Dock 닫기.
+사용자 확인 결과 **“전부 정상”**. 이 항목은 지금까지의 **합성 키 이벤트 관측과 구분**해 기록한다(물리 입력으로 확인됨).
+
+**4) 설명 일치** — `CmuxAdapter.run()` 주석의 파이프 서술을 V18.22의 제한된 관측(시험한 Swift `Process` 경로 · Python 파이프는 정상 ·
+내부 원인 미확정)으로 맞췄다. **출력 수집 방식은 다시 구현하지 않았다.**
+
+검사: 현재 빌드로 **183/183**(신규 3건 — 버전/빌드/SHA 구분 · 수정된 트리 표시 · 번들 정보 없을 때 개발 빌드 표시).
+
+**미검증(갱신)**: ① `pending` 화면 캡처(판정·문구는 검사로 고정) ② cmux 파이프 정지의 내부 원인 ③ 저장 시 `card=prune` 로그 줄 자체.
+**물리 키보드 입력은 이번에 사용자 확인으로 닫혔다.**
 
 ### V17.7 보존 확인
 
