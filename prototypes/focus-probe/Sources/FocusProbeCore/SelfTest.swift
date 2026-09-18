@@ -604,6 +604,7 @@ public enum SelfTest {
         results.append(contentsOf: editorFlowChecks())
         results.append(contentsOf: appearanceChecks())
         results.append(contentsOf: collapseAndSaveChecks())
+        results.append(contentsOf: widgetLayoutChecks())
         return results
     }
 
@@ -725,6 +726,103 @@ public enum SelfTest {
             ))
             try? fileManager.removeItem(at: url.deletingLastPathComponent())
         }
+
+        return results
+    }
+
+    // MARK: - 구성형 배치 (V18)
+
+    /// 저장된 배치가 순서·고정 폭을 정하고, **프로젝트 항목 수가 공통 영역을 밀지 않는다**는 규칙을 값으로 고정한다.
+    private static func widgetLayoutChecks() -> [CheckResult] {
+        var results: [CheckResult] = []
+        let layout = DockLayout.default
+        let screen: CGFloat = 1512
+
+        // 1. 프로젝트 항목 수가 달라도 바 너비가 같다(공통이 밀리지 않는다)
+        let widthSmall = DockBarLayout.widgetBarWidth(layout: layout, commonItemCount: 3, screenWidth: screen)
+        let widthMany = DockBarLayout.widgetBarWidth(layout: layout, commonItemCount: 3, screenWidth: screen)
+        results.append(check(
+            "구성형: 바 너비가 프로젝트 항목 수와 무관하다",
+            widthSmall == widthMany && widthSmall > 0,
+            "width=\(Int(widthSmall))"
+        ))
+
+        // 2. 승인된 기본 배치 = 공통 → 카드 → 프로젝트
+        results.append(check(
+            "구성형: 기본 순서가 공통·카드·프로젝트다",
+            layout.order == [.common, .cards, .project] && layout.cards.count == 2,
+            "order=\(layout.order.map(\.rawValue).joined(separator: ",")) cards=\(layout.cards.map(\.kind.rawValue).joined(separator: ","))"
+        ))
+
+        // 3. 카드를 빼면 그만큼 좁아진다(배치가 너비를 정한다)
+        var withoutClock = layout
+        withoutClock.cards = layout.cards.filter { $0.kind != .clock }
+        let widthNoClock = DockBarLayout.widgetBarWidth(layout: withoutClock, commonItemCount: 3, screenWidth: screen)
+        results.append(check(
+            "구성형: 카드를 빼면 카드 폭만큼 줄어든다",
+            widthNoClock < widthSmall && (widthSmall - widthNoClock) == DockBarLayout.clockCardWidth + 8,
+            "차이=\(Int(widthSmall - widthNoClock)) clock+간격=\(Int(DockBarLayout.clockCardWidth + 8))"
+        ))
+
+        // 4. 프로젝트 항목이 넘치면 더보기로 보낸다(영역 폭 유지)
+        let budget2 = DockBarLayout.projectTileBudget(width: layout.projectAreaWidth, tileCount: 2)
+        let budget8 = DockBarLayout.projectTileBudget(width: layout.projectAreaWidth, tileCount: 8)
+        results.append(check(
+            "구성형: 영역 폭을 넘는 항목은 더보기로 넘긴다",
+            budget2 == (2, 0) && budget8.hidden > 0 && budget8.visible + budget8.hidden == 8,
+            "2개→\(budget2.visible)/\(budget2.hidden) 8개→\(budget8.visible)/\(budget8.hidden)"
+        ))
+
+        // 5. layout이 없는 설정은 승인된 기본 배치로 읽는다(기존 값 보존)
+        do {
+            let url = temporarySettingsURL()
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let legacy = #"{"schemaVersion":2,"windowOrigin":{"x":11,"y":22},"hotKey":"controlOptionD","hotKeyEnabled":false,"appearance":{"size":"large","labelMode":"iconOnly","colorMode":"dark"}}"#
+            try? Data(legacy.utf8).write(to: url)
+            let store = SettingsStore(url: url)
+            results.append(check(
+                "구성형: layout 없는 설정은 기본 배치로 읽고 기존 값은 보존한다",
+                store.settings.layout == DockLayout.default
+                    && store.settings.windowOrigin == StoredOrigin(x: 11, y: 22)
+                    && store.settings.hotKey == .controlOptionD
+                    && store.settings.hotKeyEnabled == false
+                    && store.settings.appearance.size == .large
+                    && store.settings.appearance.labelMode == .iconOnly
+                    && store.settings.appearance.colorMode == .dark,
+                "layout=\(store.settings.layout.order.map(\.rawValue).joined(separator: ",")) origin=\(store.settings.windowOrigin.map { "\($0.x),\($0.y)" } ?? "-")"
+            ))
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 6. 저장 → 재로드 왕복(순서 변경·영역 너비·카드 목록)
+        do {
+            let url = temporarySettingsURL()
+            let store = SettingsStore(url: url)
+            store.update { settings in
+                settings.layout.order = [.cards, .common, .project]
+                settings.layout.projectAreaWidth = 420
+                settings.layout.cards.append(DockCardSpec.makeDefault(.focusTimer, existing: settings.layout.cards))
+            }
+            let reloaded = SettingsStore(url: url)
+            results.append(check(
+                "구성형: 순서·영역 너비·카드 목록이 저장·복원된다",
+                reloaded.settings.layout.order == [.cards, .common, .project]
+                    && reloaded.settings.layout.projectAreaWidth == 420
+                    && reloaded.settings.layout.cards.count == 3,
+                "order=\(reloaded.settings.layout.order.map(\.rawValue).joined(separator: ",")) width=\(Int(reloaded.settings.layout.projectAreaWidth)) cards=\(reloaded.settings.layout.cards.count)"
+            ))
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        // 7. 너비 클램프(영역이 너무 넓어도 화면을 넘지 않는다)
+        var wide = layout
+        wide.projectAreaWidth = DockLayout.maximumProjectAreaWidth
+        let narrow = DockBarLayout.widgetBarWidth(layout: wide, commonItemCount: 12, screenWidth: 900)
+        results.append(check(
+            "구성형: 화면이 좁으면 바 너비가 화면 안으로 제한된다",
+            narrow <= 900 && narrow >= DockBarLayout.minimumBarWidth,
+            "width=\(Int(narrow))"
+        ))
 
         return results
     }

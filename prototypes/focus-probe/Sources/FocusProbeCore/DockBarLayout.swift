@@ -14,6 +14,51 @@ public enum DockBarLayout {
     public static let projectTileSize: CGFloat = 48
     public static let cardHeight: CGFloat = 68
 
+    /// 구성형 화면의 조각별 크기·간격(승인된 위젯 규격).
+    public static let widgetPadding: CGFloat = 16
+    public static let widgetGap: CGFloat = 12
+    public static let appTileStride: CGFloat = appTileSize + 8
+    public static let projectTileStride: CGFloat = projectTileSize + 8
+    public static let clockCardWidth: CGFloat = 104
+    public static let timerCardWidth: CGFloat = 168
+
+    /// 구성형 화면의 바 너비.
+    ///
+    /// **저장된 배치가 순서와 고정 폭(프로젝트 영역)을 정한다.** 항목 수로 다시 계산하지 않으므로
+    /// 프로젝트 항목이 2개든 8개든 **공통 영역의 위치가 밀리지 않는다**(영역 안에서 넘침을 처리한다).
+    public static func widgetBarWidth(
+        layout: DockLayout,
+        commonItemCount: Int,
+        screenWidth: CGFloat
+    ) -> CGFloat {
+        var width = widgetPadding * 2
+        for (index, component) in layout.order.enumerated() {
+            if index > 0 { width += widgetGap }
+            switch component {
+            case .common:
+                width += CGFloat(max(0, commonItemCount)) * appTileStride
+            case .cards:
+                for card in layout.cards {
+                    width += card.kind == .clock ? clockCardWidth : timerCardWidth
+                }
+                width += CGFloat(max(0, layout.cards.count - 1)) * 8
+            case .project:
+                width += CGFloat(layout.projectAreaWidth)
+            }
+        }
+        let ceiling = min(maximumBarWidth, max(minimumBarWidth, screenWidth - screenMargin * 2))
+        return min(max(width, minimumBarWidth), ceiling)
+    }
+
+    /// 프로젝트 영역에 할당된 너비 안에 들어가는 타일 수와, 넘쳐서 `더보기`로 보낼 수.
+    /// 넘침이 있으면 `더보기` 타일 자리를 하나 남긴다.
+    public static func projectTileBudget(width: Double, tileCount: Int) -> (visible: Int, hidden: Int) {
+        let fits = max(0, Int((width - widgetPadding) / projectTileStride))
+        guard tileCount > fits else { return (tileCount, 0) }
+        let visible = max(0, fits - 1)
+        return (visible, tileCount - visible)
+    }
+
     public static let barHeight: CGFloat = 76
     /// 상세 보기 높이(열렸을 때 바 위로 펼쳐진다).
     public static let detailsHeight: CGFloat = 300
