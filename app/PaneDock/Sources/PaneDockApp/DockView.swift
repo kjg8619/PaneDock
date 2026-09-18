@@ -282,15 +282,15 @@ struct DockView: View {
         Button(action: action) {
             HStack(spacing: 4) {
                 if let image {
-                    Image(nsImage: image).frame(width: 16, height: 16)
+                    Image(nsImage: image).frame(width: 30, height: 30)
                 } else {
-                    Image(systemName: icon).font(.system(size: 11, weight: .medium))
+                    Image(systemName: icon).font(.system(size: 22, weight: .medium))
                 }
                 if showsLabel {
                     Text(label).font(.caption).lineLimit(1)
                 }
             }
-            .padding(.horizontal, 9)
+            .padding(.horizontal, 12)
             .padding(.vertical, model.effectiveAppearance.size.chipVerticalPadding)
             // 칩은 **압축되지 않게** 고정한다. 압축되면 라벨이 사라져 아이콘만 남는다.
             // 넘치는 링크는 인라인 수를 줄이고 "+N"으로 알린다.
