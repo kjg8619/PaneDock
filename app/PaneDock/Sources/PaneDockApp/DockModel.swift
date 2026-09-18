@@ -549,6 +549,9 @@ final class DockModel: ObservableObject {
         )
     }
 
+    /// 실행 중인 빌드(번들 정보에서 읽는다 — 개발용 실행 파일이면 번들 정보가 없다).
+    let build = BuildIdentity.from(infoDictionary: Bundle.main.infoDictionary)
+
     /// 지금 패널 상태(화면·표시 목록·키보드가 **같은 판정**을 쓴다).
     var panelStatus: DockPanelStatus {
         DockPanelStatus.from(state: state, hasProject: resolution.hasProject)

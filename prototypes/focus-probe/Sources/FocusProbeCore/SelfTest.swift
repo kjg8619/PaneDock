@@ -605,6 +605,7 @@ public enum SelfTest {
         results.append(contentsOf: collapseAndSaveChecks())
         results.append(contentsOf: widgetLayoutChecks())
         results.append(contentsOf: widgetDisplayChecks())
+        results.append(contentsOf: buildIdentityChecks())
         results.append(contentsOf: focusCardChecks())
         return results
     }
@@ -1358,6 +1359,61 @@ public enum SelfTest {
             + boundaries * DockBarLayout.separatorStride
             + (components.isEmpty ? 0 : DockBarLayout.widgetGap)
             + DockBarLayout.trailingControlsWidth(showsFakeBadge: false)
+    }
+
+    // MARK: - 실행본 식별 (V19)
+
+    /// 제품 버전·빌드 번호·SHA·작업 트리 상태를 **구분**하고, 수정된 트리 빌드를 깨끗한 빌드처럼 보이지 않게 한다.
+    private static func buildIdentityChecks() -> [CheckResult] {
+        var results: [CheckResult] = []
+
+        let clean = BuildIdentity.from(infoDictionary: [
+            "CFBundleShortVersionString": "0.2a",
+            "CFBundleVersion": "44",
+            "PaneDockGitSHA": "e4daf61",
+            "PaneDockGitDirty": "0",
+        ])
+        let dirty = BuildIdentity.from(infoDictionary: [
+            "CFBundleShortVersionString": "0.2a",
+            "CFBundleVersion": "44",
+            "PaneDockGitSHA": "e4daf61",
+            "PaneDockGitDirty": "1",
+        ])
+        let development = BuildIdentity.from(infoDictionary: nil)
+        let partial = BuildIdentity.from(infoDictionary: ["CFBundleShortVersionString": "0.3"])
+
+        results.append(check(
+            "빌드: 제품 버전·빌드 번호·커밋을 구분해 보여준다",
+            clean.displayText == "0.2a · 빌드 44 · e4daf61"
+                && clean.productVersion == "0.2a"
+                && clean.buildNumber == "44"
+                && clean.gitSHA == "e4daf61"
+                && !clean.isDirtyTree,
+            "깨끗=\(clean.displayText)"
+        ))
+
+        results.append(check(
+            "빌드: 수정된 트리로 만든 빌드를 깨끗한 빌드처럼 표시하지 않는다",
+            dirty.isDirtyTree
+                && dirty.displayText.contains("수정된 트리")
+                && dirty.displayText != clean.displayText
+                && dirty.logText.contains("dirty=true"),
+            "수정=\(dirty.displayText)"
+        ))
+
+        results.append(check(
+            "빌드: 번들 정보가 없으면 개발 빌드로 표시하고 값을 지어내지 않는다",
+            development.displayText == "\(BuildIdentity.productVersion) · 개발 빌드(번들 정보 없음)"
+                && !development.hasBundleInfo
+                && development.buildNumber == nil
+                && development.gitSHA == nil
+                && partial.hasBundleInfo
+                && partial.buildNumber == nil
+                && partial.displayText == "0.3",
+            "개발=\(development.displayText) · 부분=\(partial.displayText)"
+        ))
+
+        return results
     }
 
     // MARK: - 카드 실행 상태 (V18.6)

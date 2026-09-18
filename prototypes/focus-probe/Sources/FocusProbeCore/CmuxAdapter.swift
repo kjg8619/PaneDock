@@ -428,9 +428,12 @@ public struct CmuxCLIClient: CmuxQuerying {
 
     /// 읽기 명령 하나를 실행한다. 인자는 배열로 넘겨 셸 해석을 거치지 않는다.
     ///
-    /// **출력은 파이프가 아니라 임시 파일로 받는다.** cmux CLI는 stdout/stderr가 파이프이면
-    /// 응답을 내놓지 않고 멈춘다(실측: 파이프=타임아웃, 파일·`/dev/null`=0.02~0.04초). 같은 실행 파일·인자·
-    /// 환경에서도 이 차이만으로 갈리므로, 실행 경계에서 파이프를 쓰지 않는다.
+    /// **출력은 파이프가 아니라 임시 파일로 받는다.**
+    ///
+    /// 시험한 Swift `Process` 실행 경로에서 stdout/stderr를 파이프로 주면 CLI가 응답 없이 멈췄다
+    /// (같은 실행 파일·인자·환경에서 파일·`/dev/null`은 0.02~0.04초). 셸·Python `subprocess`의 파이프는 정상이었으므로
+    /// **일반적인 "파이프 금지"가 아니라 이 실행 경로의 관측**이다(CLI 내부 원인은 확정하지 않았다).
+    /// 현재 방식(임시 파일)이 정상 연결되므로 수집 방식을 다시 만들지 않는다.
     private func run(_ arguments: [String]) throws -> String {
         let process = Process()
         if executable.hasPrefix("/") {

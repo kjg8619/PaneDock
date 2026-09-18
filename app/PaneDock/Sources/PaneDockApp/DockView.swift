@@ -780,6 +780,8 @@ struct DockDetailsView: View {
                 small("확인", model.state.observedAt.map { Self.timeFormatter.string(from: $0) } ?? "-")
             }
             small("경로 출처", model.state.cwdSource ?? "-")
+            // 실행 중인 빌드(제품 버전 · 빌드 번호 · 커밋 · 작업 트리 상태).
+            small("빌드", model.build.displayText)
         }
     }
 

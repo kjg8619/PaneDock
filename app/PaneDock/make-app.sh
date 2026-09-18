@@ -11,6 +11,15 @@ cd "$(dirname "$0")"
 APP="dist/PaneDock.app"
 BIN_PATH="$(swift build -c release --show-bin-path)"
 
+# 실행본 식별: 제품 버전은 소스 한 곳에서 읽고, 빌드 번호·SHA·작업 트리 상태는 git에서 얻는다.
+VERSION_SOURCE="../../prototypes/focus-probe/Sources/FocusProbeCore/BuildIdentity.swift"
+PRODUCT_VERSION="$(sed -n 's/.*static let productVersion = "\([^"]*\)".*/\1/p' "$VERSION_SOURCE" | head -1)"
+[ -n "$PRODUCT_VERSION" ] || PRODUCT_VERSION="0.0"
+BUILD_NUMBER="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
+GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+if [ -n "$(git status --porcelain 2>/dev/null)" ]; then GIT_DIRTY="1"; else GIT_DIRTY="0"; fi
+echo "식별: version=$PRODUCT_VERSION build=$BUILD_NUMBER sha=$GIT_SHA dirty=$GIT_DIRTY"
+
 echo "빌드 중 (release)..."
 swift build -c release
 
@@ -42,9 +51,14 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1a</string>
+	<string>__PRODUCT_VERSION__</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>__BUILD_NUMBER__</string>
+	<!-- 실행 중인 빌드를 진단 화면에서 확인할 수 있게 한다. 수정된 작업 트리로 만든 빌드는 dirty=1이다. -->
+	<key>PaneDockGitSHA</key>
+	<string>__GIT_SHA__</string>
+	<key>PaneDockGitDirty</key>
+	<string>__GIT_DIRTY__</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<!-- Dock 아이콘 없이 메뉴 막대에만 나타난다. 기존 Dock 설정은 건드리지 않는다. -->
@@ -56,6 +70,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+
+# 자리표시자를 실제 식별자로 바꾼다.
+sed -i '' -e "s/__PRODUCT_VERSION__/$PRODUCT_VERSION/" \
+          -e "s/__BUILD_NUMBER__/$BUILD_NUMBER/" \
+          -e "s/__GIT_SHA__/$GIT_SHA/" \
+          -e "s/__GIT_DIRTY__/$GIT_DIRTY/" "$APP/Contents/Info.plist"
 
 # ad-hoc 서명. TCC가 번들 단위로 권한을 기억할 수 있게 한다.
 if codesign --force --sign - "$APP" 2>/dev/null; then
