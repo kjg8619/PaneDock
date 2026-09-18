@@ -443,7 +443,8 @@ struct DockView: View {
     }
 
     private var areaAccessibilityLabel: String {
-        if model.display.projectRegistered {
+        // 등록 여부보다 **실제 작업 상태**를 먼저 반영한다(경로 정보가 남아 있어도 오류면 오류로 알린다).
+        if panelStatus == .registered {
             return "프로젝트 영역 \(model.resolution.projectName), 항목 \(model.display.project.count)개 표시"
         }
         switch panelStatus {
@@ -948,11 +949,53 @@ struct DockDetailsView: View {
             labeled("기준 폴더", model.resolution.projectRoot)
         }
         ForEach(model.resolution.allItems, id: \.ref) { item in
-            itemRow(item)
+            if item.isCommon || detailsPanelStatus == .registered || detailsPanelStatus == .unregistered {
+                itemRow(item)
+            } else {
+                // 지금은 실행할 수 없는 프로젝트 항목 — **참고 정보로만** 보여준다(누를 수 있는 행이 아니다).
+                itemReferenceRow(item)
+            }
+        }
+        if detailsPanelStatus == .pending || detailsPanelStatus == .failure {
+            labeled(
+                "프로젝트 항목",
+                detailsPanelStatus == .pending
+                    ? "경로를 확인하는 중이라 실행할 수 없습니다. 공통 앱·카드는 그대로 쓸 수 있습니다."
+                    : "작업 상태가 오류라 프로젝트 항목을 실행할 수 없습니다: \(model.state.detail ?? "조회 실패")",
+                color: .orange,
+                selectable: false
+            )
         }
         if !model.resolution.diagnostics.isEmpty {
             labeled("프로젝트 경고", model.resolution.diagnostics.prefix(2).joined(separator: "\n"), color: .orange)
         }
+    }
+
+    /// 상세 보기의 판정도 패널과 **같은 함수**를 쓴다.
+    private var detailsPanelStatus: DockPanelStatus {
+        DockPanelStatus.from(state: model.state, hasProject: model.display.projectRegistered)
+    }
+
+    /// 지금 실행할 수 없는 프로젝트 항목의 **참고 행**(버튼 아님 · hover/선택 없음).
+    private func itemReferenceRow(_ item: DockItemTarget) -> some View {
+        HStack(spacing: 6) {
+            if item.kind == .app {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: item.target))
+                    .resizable()
+                    .frame(width: 14, height: 14)
+            } else {
+                Image(systemName: itemSymbol(for: item.kind)).font(.caption2)
+            }
+            Text(item.name).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            Text("프로젝트").font(.caption2).foregroundStyle(.tertiary)
+            Text(item.target).font(.caption2).foregroundStyle(.tertiary)
+                .lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 6).padding(.vertical, 3)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.02)))
+        .help("지금은 실행할 수 없습니다 — 프로젝트 항목은 작업 상태가 정상일 때만 실행됩니다")
+        .accessibilityLabel("참고 항목 \(item.name) — 지금은 실행할 수 없습니다")
     }
 
     private func itemRow(_ item: DockItemTarget) -> some View {

@@ -2599,11 +2599,14 @@ public enum SelfTest {
     private static func cmuxChecks() -> [CheckResult] {
         var results: [CheckResult] = []
         do {
-            // CLI 오류 분류: **실행 파일 없음·실행 실패·연결 거부·시간 초과를 서로 다르게** 다룬다.
+            // CLI 오류 분류: **실행 파일 없음·미실행·연결 거부·기타 실패를 서로 다르게** 다룬다.
             let notFound = CmuxCLIClient.classify(stderr: "env: cmux: No such file or directory", status: 127)
             let notRunning = CmuxCLIClient.classify(stderr: "Error: No live cmux socket found. Tried: ...", status: 0)
             let refused = CmuxCLIClient.classify(stderr: "Error: Connection refused", status: 3)
             let other = CmuxCLIClient.classify(stderr: "boom", status: 9)
+            // 소켓·일반 파일 오류의 "No such file or directory"를 CLI 미설치로 단정하지 않는다.
+            let socketENOENT = CmuxCLIClient.classify(stderr: "connect: No such file or directory (socket)", status: 1)
+            let plainENOENT = CmuxCLIClient.classify(stderr: "read: No such file or directory", status: 1)
             let timedOut = CmuxQueryError.timedOut
             results.append(check(
                 "cmux: CLI 오류를 실행 파일 없음·미실행·거부·기타로 구분한다",
@@ -2611,11 +2614,57 @@ public enum SelfTest {
                     && notRunning == .notRunning
                     && refused == .refused(message: "Error: Connection refused")
                     && other == .failed(status: 9, message: "boom")
+                    && socketENOENT == .notRunning
+                    && plainENOENT == .failed(status: 1, message: "read: No such file or directory")
                     && notFound.connectionStatus == .unavailable
-                    && notRunning.connectionStatus == .unavailable
                     && refused.connectionStatus == .refused
                     && timedOut.connectionStatus == .unavailable,
-                "없음=\(notFound.diagnosticText(appName: "cmux")) · 미실행=\(notRunning.diagnosticText(appName: "cmux")) · 거부=\(refused.connectionStatus.rawValue)"
+                "없음=\(notFound.diagnosticText(appName: "cmux")) · 소켓ENOENT=\(socketENOENT.diagnosticText(appName: "cmux")) · 일반ENOENT=\(plainENOENT.diagnosticText(appName: "cmux"))"
+            ))
+        }
+
+        do {
+            // 임시 출력 파일이 **중간에 실패해도** 만든 파일을 남기지 않는다(실제 디스크를 건드리지 않는 주입).
+            var created: [URL] = []
+            var removed: [URL] = []
+            var createCount = 0
+            let failingOnSecond: CmuxTempOutputs = .init(
+                create: { name in
+                    createCount += 1
+                    if createCount == 2 { throw CmuxQueryError.launchFailed("주입된 실패") }
+                    let url = URL(fileURLWithPath: "/tmp/\(name)-injected")
+                    created.append(url)
+                    return url
+                },
+                remove: { removed.append($0) }
+            )
+            let client = CmuxCLIClient(executable: "/nonexistent/cmux", tempOutputs: failingOnSecond)
+            var thrown: CmuxQueryError?
+            do { _ = try client.identify() } catch let error as CmuxQueryError { thrown = error } catch { }
+
+            // 파일 생성은 됐지만 핸들을 열 수 없는 경우(주입: 만든 뒤 지운다)도 정리 대상이다.
+            var removedSecond: [URL] = []
+            let handleFails: CmuxTempOutputs = .init(
+                create: { name in
+                    let url = URL(fileURLWithPath: "/tmp/\(name)-injected-missing")
+                    try? FileManager.default.removeItem(at: url)
+                    return url
+                },
+                remove: { removedSecond.append($0) }
+            )
+            let handleClient = CmuxCLIClient(executable: "/nonexistent/cmux", tempOutputs: handleFails)
+            var handleThrown: CmuxQueryError?
+            do { _ = try handleClient.identify() } catch let error as CmuxQueryError { handleThrown = error } catch { }
+
+            results.append(check(
+                "cmux: 임시 출력 파일 실패 시 만든 자원을 정리한다",
+                thrown == .launchFailed("주입된 실패")
+                    && created.count == 1
+                    && removed == created
+                    && handleThrown == .launchFailed("임시 출력 파일을 열 수 없습니다")
+                    && removedSecond.count == 2
+                    && createCount == 2,
+                "생성실패=\(thrown?.diagnosticText(appName: "cmux") ?? "-") 정리=\(removed.count)/\(created.count) · 핸들실패=\(handleThrown?.diagnosticText(appName: "cmux") ?? "-") 정리=\(removedSecond.count)/2"
             ))
         }
 

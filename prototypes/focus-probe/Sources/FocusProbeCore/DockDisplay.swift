@@ -262,7 +262,10 @@ public enum DockDisplayBuilder {
         layout: DockLayout,
         screenWidth: CGFloat,
         showsFakeBadge: Bool = false,
-        labelMode: DockLabelMode = .iconOnly
+        labelMode: DockLabelMode = .iconOnly,
+        /// 화면에 프로젝트 타일을 그리는가. 확인 중·오류에는 패널이 사유만 보여주므로 목록에서도 뺀다
+        /// (표시 목록·그린 화면·키보드 목록이 같은 대상을 가리키게 한다).
+        showsProjectItems: Bool = true
     ) -> DockDisplay {
         let fit = DockBarLayout.barFit(
             layout: layout,
@@ -270,9 +273,10 @@ public enum DockDisplayBuilder {
             screenWidth: screenWidth,
             showsFakeBadge: showsFakeBadge
         )
+        let projectTileCount = showsProjectItems ? resolution.projectItems.count : 0
         let projectBudget = DockBarLayout.projectTileBudget(
             width: fit.projectAreaWidth,
-            tileCount: resolution.projectItems.count,
+            tileCount: projectTileCount,
             labelMode: labelMode
         )
 
@@ -280,7 +284,7 @@ public enum DockDisplayBuilder {
         for (index, item) in resolution.commonItems.prefix(max(0, fit.commonVisible)).enumerated() {
             items.append(DockDisplayItem(ref: item.ref, index: index, item: item))
         }
-        for (index, item) in resolution.projectItems.prefix(max(0, projectBudget.visible)).enumerated() {
+        for (index, item) in (showsProjectItems ? resolution.projectItems : []).prefix(max(0, projectBudget.visible)).enumerated() {
             items.append(
                 DockDisplayItem(
                     ref: item.ref,

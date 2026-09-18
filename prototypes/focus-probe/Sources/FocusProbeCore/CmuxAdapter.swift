@@ -373,13 +373,46 @@ public struct CmuxSidebarState: Equatable, Sendable {
 /// 소켓을 직접 열지 않고 **공식 CLI**를 쓴다("Every command is available through both
 /// interfaces" — 공식 문서). 프로세스 경계가 있어 승인 주체도 바뀌지 않는다.
 /// **읽기 명령만 실행한다**(`identify`, `sidebar-state`).
+/// CLI 출력을 받을 **임시 파일**을 만드는 방법. 테스트에서 실패를 주입할 수 있게 분리했다.
+public struct CmuxTempOutputs: @unchecked Sendable {
+    /// 이름(접두어)을 받아 빈 파일을 만들고 경로를 돌려준다. 실패하면 던진다.
+    public var create: (String) throws -> URL
+    /// 만든 파일을 지운다(없으면 아무것도 하지 않는다).
+    public var remove: (URL) -> Void
+
+    public init(create: @escaping (String) throws -> URL, remove: @escaping (URL) -> Void) {
+        self.create = create
+        self.remove = remove
+    }
+
+    /// 실제 파일 시스템(기본값).
+    public static let fileSystem = CmuxTempOutputs(
+        create: { name in
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(name)-\(UUID().uuidString).txt")
+            guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+                throw CmuxQueryError.launchFailed("임시 출력 파일을 만들 수 없습니다: \(url.lastPathComponent)")
+            }
+            return url
+        },
+        remove: { url in try? FileManager.default.removeItem(at: url) }
+    )
+}
+
 public struct CmuxCLIClient: CmuxQuerying {
     public let executable: String
     public let timeout: TimeInterval
+    /// 임시 출력 파일 제공자(기본은 실제 파일 시스템).
+    public let tempOutputs: CmuxTempOutputs
 
-    public init(executable: String = CmuxCLIResolver.resolve(), timeout: TimeInterval = 4.0) {
+    public init(
+        executable: String = CmuxCLIResolver.resolve(),
+        timeout: TimeInterval = 4.0,
+        tempOutputs: CmuxTempOutputs = .fileSystem
+    ) {
         self.executable = executable
         self.timeout = timeout
+        self.tempOutputs = tempOutputs
     }
 
     public func identify() throws -> CmuxIdentify {
@@ -415,23 +448,33 @@ public struct CmuxCLIClient: CmuxQuerying {
         // GUI 앱의 작업 디렉터리(`/`)가 아니라 사용자의 홈에서 실행한다(셸 실행과 같은 조건).
         process.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory())
 
-        let directory = FileManager.default.temporaryDirectory
         let stamp = UUID().uuidString
-        let outURL = directory.appendingPathComponent("cmux-out-\(stamp).txt")
-        let errURL = directory.appendingPathComponent("cmux-err-\(stamp).txt")
-        guard FileManager.default.createFile(atPath: outURL.path, contents: nil),
-              FileManager.default.createFile(atPath: errURL.path, contents: nil),
-              let outHandle = FileHandle(forWritingAtPath: outURL.path),
+        var created: [URL] = []
+        func cleanupCreated() {
+            for url in created { tempOutputs.remove(url) }
+            created.removeAll()
+        }
+        let outURL: URL
+        let errURL: URL
+        do {
+            outURL = try tempOutputs.create("cmux-out-\(stamp)")
+            created.append(outURL)
+            errURL = try tempOutputs.create("cmux-err-\(stamp)")
+            created.append(errURL)
+        } catch {
+            // **중간에 실패해도 이미 만든 파일을 남기지 않는다.**
+            cleanupCreated()
+            if let queryError = error as? CmuxQueryError { throw queryError }
+            throw CmuxQueryError.launchFailed("임시 출력 파일을 만들 수 없습니다: \((error as NSError).localizedDescription)")
+        }
+        defer { cleanupCreated() }
+        guard let outHandle = FileHandle(forWritingAtPath: outURL.path),
               let errHandle = FileHandle(forWritingAtPath: errURL.path) else {
-            throw CmuxQueryError.launchFailed("임시 출력 파일을 만들 수 없습니다")
+            throw CmuxQueryError.launchFailed("임시 출력 파일을 열 수 없습니다")
         }
         process.standardOutput = outHandle
         process.standardError = errHandle
         process.standardInput = FileHandle.nullDevice
-        defer {
-            try? FileManager.default.removeItem(at: outURL)
-            try? FileManager.default.removeItem(at: errURL)
-        }
 
         do {
             try process.run()
@@ -466,18 +509,32 @@ public struct CmuxCLIClient: CmuxQuerying {
         return stdout
     }
 
-    /// CLI 실패를 분류한다. **실행 파일 없음·실행 실패·연결 거부·시간 초과를 서로 다르게** 다룬다.
-    public static func classify(stderr: String, status: Int32) -> CmuxQueryError {
+    /// CLI 실패를 분류한다. **실행 파일 없음·미실행·연결 거부·기타 실패를 서로 다르게** 다룬다.
+    ///
+    /// `No such file or directory`만 보고 CLI 미설치로 단정하지 않는다 — 소켓 경로·일반 파일 오류도 같은 문구를 쓴다.
+    /// 소켓 신호를 먼저 보고, CLI 미설치로 보려면 **실행 파일을 가리키는 근거**(exit 127·`command not found`·
+    /// `env:` 접두어·실행 파일 이름)가 있어야 한다.
+    public static func classify(
+        stderr: String,
+        status: Int32,
+        executable: String = "cmux"
+    ) -> CmuxQueryError {
         let lowered = stderr.lowercased()
-        if status == 127 || lowered.contains("no such file or directory") || lowered.contains("command not found") {
-            return .cliNotFound(searched: [])
+        let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        if lowered.contains("refused") {
+            return .refused(message: trimmed)
         }
-        if lowered.contains("socket not found") || lowered.contains("not running") || lowered.contains("no live cmux socket") {
+        if lowered.contains("socket") || lowered.contains("not running") {
             return .notRunning
         }
-        if lowered.contains("connection refused") || lowered.contains("refused") {
-            return .refused(message: stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+        let name = (executable as NSString).lastPathComponent.lowercased()
+        let looksLikeCliMissing = status == 127
+            || lowered.contains("command not found")
+            || (lowered.contains("no such file or directory")
+                && (lowered.contains("env:") || lowered.contains("\(name):")))
+        if looksLikeCliMissing {
+            return .cliNotFound(searched: [])
         }
-        return .failed(status: status, message: stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+        return .failed(status: status, message: trimmed)
     }
 }

@@ -549,6 +549,11 @@ final class DockModel: ObservableObject {
         )
     }
 
+    /// 지금 패널 상태(화면·표시 목록·키보드가 **같은 판정**을 쓴다).
+    var panelStatus: DockPanelStatus {
+        DockPanelStatus.from(state: state, hasProject: resolution.hasProject)
+    }
+
     /// 표시 목록을 다시 만든다. **화면·숨김 개수·키보드 이동이 모두 이 결과를 쓴다.**
     private func rebuildDisplay() {
         let next = DockDisplayBuilder.make(
@@ -558,7 +563,9 @@ final class DockModel: ObservableObject {
             // 가짜 모드 표시도 바 폭을 차지한다 → 기하 계산에 함께 넣는다.
             showsFakeBadge: isFake,
             // 표시 방식(아이콘+이름/아이콘 중심)이 타일 폭·개수를 정한다.
-            labelMode: effectiveAppearance.labelMode
+            labelMode: effectiveAppearance.labelMode,
+            // 확인 중·오류에는 패널이 사유만 보여준다 → 표시 목록도 같은 대상을 가리키게 한다.
+            showsProjectItems: panelStatus == .registered || panelStatus == .unregistered
         )
         guard next != display else { return }
         display = next
@@ -698,8 +705,8 @@ final class DockModel: ObservableObject {
             layout: effectiveLayout,
             allItems: resolution.allItems,
             detailsVisible: isDetailsVisible,
-            // 패널 표시와 **같은 판정**을 쓴다(작업 상태 우선).
-            panelStatus: DockPanelStatus.from(state: state, hasProject: display.projectRegistered)
+            // 화면·표시 목록과 **같은 판정**을 쓴다(작업 상태 우선).
+            panelStatus: panelStatus
         )
     }
 
