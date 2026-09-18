@@ -35,6 +35,9 @@ struct LaunchOptions {
     var timerSecondsOverride: Int?
     /// 진단용: 시작 후 이 시간(ms) 뒤에 첫 집중 타이머를 **시작**한다(입력 없이 완료 상태까지 관측하기 위한 것).
     var timerAutostartAfterMilliseconds: Int?
+    /// 진단용: 시작 후 이 시간(ms) 뒤에 **키보드 경로**(초점 이동 → 활성화)를 순서대로 실행한다.
+    /// macOS가 합성 키로 앱을 활성화하지 못하게 하므로, 키가 들어왔을 때 타는 같은 함수를 부른다.
+    var keyboardSelfTestAfterMilliseconds: Int?
 
     var isFake: Bool { fake != nil }
 }
@@ -73,6 +76,7 @@ PaneDock — 포커스된 터미널 pane을 따라가는 최소 Dock
   --self-check      창을 띄우지 않고 1회 조회 결과와 실행 계획만 출력한다
   --timer-seconds <n>  (진단용) 집중 타이머 기본 시간(초). 완료 상태 확인용
   --timer-autostart <ms>  (진단용) 시작 후 이 시간 뒤에 첫 타이머를 시작한다
+  --key-selftest <ms>  (진단용) 시작 후 이 시간 뒤에 키보드 경로(초점 이동→활성화)를 실행한다
   --help            이 도움말
 
 추적 소스:
@@ -190,6 +194,13 @@ func parseLaunchOptions(_ arguments: [String]) -> LaunchOptions? {
                 exit(2)
             }
             options.timerAutostartAfterMilliseconds = value
+        case "--key-selftest":
+            index += 1
+            guard index < arguments.count, let value = Int(arguments[index]), value > 0 else {
+                FileHandle.standardError.write(Data("--key-selftest requires milliseconds\n".utf8))
+                exit(2)
+            }
+            options.keyboardSelfTestAfterMilliseconds = value
         case "--help", "-h":
             return nil
         default:

@@ -33,14 +33,16 @@ public enum DockBarLayout {
     public static let minimumTrailingGap: CGFloat = 6
     public static let appTileStride: CGFloat = appTileSize + tileGap
     public static let projectTileStride: CGFloat = projectTileSize + tileGap
-    /// `아이콘+이름` 모드의 프로젝트 항목 칩 폭(아이콘 + 이름). 48pt 타일에는 이름이 들어가지 않는다.
-    public static let projectTileChipWidth: CGFloat = 112
+    /// `아이콘+이름` 모드의 프로젝트 항목 폭 — **아이콘 + 하단 짧은 이름**(A 시안).
+    /// 넓은 가로 칩을 쓰지 않는다(48pt 타일 아래 이름 한 줄).
+    public static let projectTileLabeledWidth: CGFloat = 64
+
     /// 자리가 없어 밀린 카드를 알리는 타일의 폭(카드 높이와 같다).
     public static let cardOverflowTileWidth: CGFloat = 68
 
-    /// 항목 타일 폭. **표시 모드에 따라 다르다**(아이콘 중심 48 / 아이콘+이름 112).
+    /// 항목 타일 폭. **표시 모드에 따라 다르다**(아이콘 중심 48 / 아이콘+하단 이름 64).
     public static func projectTileWidth(_ mode: DockLabelMode) -> CGFloat {
-        mode == .iconOnly ? projectTileSize : projectTileChipWidth
+        mode == .iconOnly ? projectTileSize : projectTileLabeledWidth
     }
 
     public static func projectTileStride(_ mode: DockLabelMode) -> CGFloat {

@@ -396,14 +396,19 @@ public enum DockFocusPlan {
         let projectRefs = detailsVisible
             ? allItems.filter { !$0.isCommon }.map(\.ref)
             : display.project.map(\.ref)
+        // 화면과 **같은 기준**으로 구성요소를 판단한다(카탈로그에 있는 공통 항목 수).
+        // 공통 항목이 전부 밀려 `display.common`이 비어도 `+N` 타일은 화면에 있으므로 순회해야 한다.
+        let commonItemCount = allItems.filter(\.isCommon).count
+        // 상세 보기가 열려 있으면 **밀린 카드의 조작도** 그 목록에서 다룰 수 있다.
+        let cards = detailsVisible ? layout.cards : display.visibleCards
 
-        for component in DockBarLayout.renderedComponents(layout: layout, commonItemCount: commonRefs.count) {
+        for component in DockBarLayout.renderedComponents(layout: layout, commonItemCount: commonItemCount) {
             switch component {
             case .common:
                 controls.append(contentsOf: commonRefs.map { .item($0) })
                 if !detailsVisible, display.commonHidden > 0 { controls.append(.overflow(.common)) }
             case .cards:
-                for card in display.visibleCards where card.kind == .focusTimer {
+                for card in cards where card.kind == .focusTimer {
                     // 화면에 보이는 순서 그대로 ▶ ❚❚ ↺.
                     controls.append(contentsOf: DockTimerAction.allCases.map { .timer(cardID: card.id, action: $0) })
                 }

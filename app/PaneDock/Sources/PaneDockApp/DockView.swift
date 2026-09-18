@@ -321,25 +321,25 @@ struct DockView: View {
         let ref = entry.ref
         let width = DockBarLayout.projectTileWidth(model.effectiveAppearance.labelMode)
         return Button(action: { model.performItem(ref: ref, source: .mouse) }) {
-            HStack(spacing: 6) {
+            VStack(spacing: 3) {
+                // 아이콘은 A 시안처럼 **정사각 타일**로 두고, 이름은 아래에 짧게 붙인다.
                 tileFace(for: item, iconSize: 26, symbolSize: 19, letterSize: 19)
+                    .frame(width: DockBarLayout.projectTileSize, height: DockBarLayout.projectTileSize)
+                    .background(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .fill(tileGradient(for: item))
+                    )
+                    .overlay(focusRing(for: .item(ref), radius: 13))
+                    .shadow(color: .black.opacity(0.3), radius: 5, y: 2)
                 if showsLabels {
-                    // 아이콘+이름 모드: 48pt 타일에는 이름이 들어가지 않아 칩으로 넓어진다.
                     Text(item.name)
-                        .font(.system(size: 11))
+                        .font(.system(size: 9))
                         .lineLimit(1)
                         .truncationMode(.middle)
-                        .foregroundStyle(.primary.opacity(0.9))
-                        .padding(.trailing, 8)
+                        .foregroundStyle(.primary.opacity(0.85))
                 }
             }
-            .frame(width: width, height: DockBarLayout.projectTileSize, alignment: .center)
-            .background(
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .fill(tileGradient(for: item))
-            )
-            .overlay(focusRing(for: .item(ref), radius: 13))
-            .shadow(color: .black.opacity(0.3), radius: 5, y: 2)
+            .frame(width: width, height: DockBarLayout.cardHeight, alignment: .top)
         }
         .buttonStyle(.plain)
         .onHover { inside in
@@ -678,9 +678,7 @@ struct DockDetailsView: View {
                 + " · 카드 \(model.display.visibleCards.count)/\(model.effectiveLayout.cards.count)개"
                 + (model.display.cardHidden > 0 ? " (밀림 \(model.display.cardHidden))" : "")
         )
-        if !model.effectiveLayout.cards.isEmpty {
-            labeled("카드", cardSummary, selectable: false)
-        }
+        cardSection
         if model.display.isSpaceShort {
             labeled(
                 "공간 부족",
@@ -710,20 +708,86 @@ struct DockDetailsView: View {
         return parts.joined(separator: " · ") + (names.isEmpty ? "" : " — \(names.joined(separator: ", "))")
     }
 
-    /// 카드 상태 요약. **밀린 카드도 여기서는 상태를 볼 수 있다**(타이머는 계속 돈다).
-    private var cardSummary: String {
-        let shown = Set(model.display.visibleCards.map(\.id))
-        return model.effectiveLayout.cards.map { card in
-            let visibility = shown.contains(card.id) ? "" : " (밀림)"
-            switch card.kind {
-            case .clock:
-                return "시계\(visibility)"
-            case .focusTimer:
-                let state = model.timerState(for: card.id)
-                return "타이머 \(state.text(at: model.now)) \(state.statusText(at: model.now))\(visibility)"
+    /// 카드 목록과 **조작**. 밀린 카드도 여기서 시작·일시정지·재설정할 수 있다(같은 id·같은 실행 경로).
+    @ViewBuilder
+    private var cardSection: some View {
+        if !model.effectiveLayout.cards.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text("카드").font(.caption2).foregroundStyle(.secondary)
+                    Text("\(model.effectiveLayout.cards.count)개").font(.caption2)
+                    if model.display.cardHidden > 0 {
+                        Text("· 밀림 \(model.display.cardHidden)").font(.caption2).foregroundStyle(.orange)
+                    }
+                    Spacer()
+                }
+                ForEach(model.effectiveLayout.cards) { card in
+                    cardRow(card)
+                }
             }
         }
-        .joined(separator: " · ")
+    }
+
+    private func cardRow(_ card: DockCardSpec) -> some View {
+        let shown = model.display.visibleCards.contains { $0.id == card.id }
+        let state = model.timerState(for: card.id)
+        return HStack(spacing: 6) {
+            Text(card.kind.label).font(.caption2).foregroundStyle(.secondary)
+            if card.kind == .focusTimer {
+                Text(state.text(at: model.now)).font(.caption).monospacedDigit()
+                Text(state.statusText(at: model.now))
+                    .font(.caption2)
+                    .foregroundStyle(state.isFinished(at: model.now) ? .orange : .secondary)
+            }
+            if !shown {
+                Text("밀림").font(.caption2).foregroundStyle(.orange)
+            }
+            Spacer(minLength: 0)
+            if card.kind == .focusTimer {
+                ForEach(DockTimerAction.allCases, id: \.self) { action in
+                    cardControl(card.id, action: action, state: state)
+                }
+            }
+        }
+        .padding(.horizontal, 6).padding(.vertical, 2)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.03)))
+    }
+
+    /// 카드 조작 버튼(마우스·키보드가 같은 `performTimer` 경로를 쓴다).
+    private func cardControl(_ cardID: String, action: DockTimerAction, state: FocusTimerState) -> some View {
+        let focus = DockFocusControl.timer(cardID: cardID, action: action)
+        let isOn: Bool = {
+            switch action {
+            case .start: return state.isRunning(at: model.now)
+            case .pause: return !state.isRunning(at: model.now) && !state.isFinished(at: model.now) && state.elapsed(at: model.now) > 0
+            case .reset: return false
+            }
+        }()
+        let ended = state.isFinished(at: model.now)
+        return Button(action: { model.performTimer(action, cardID: cardID, source: .mouse) }) {
+            Label(
+                action == .start && ended ? "다시 시작" : action.label,
+                systemImage: action == .start ? (ended ? "arrow.clockwise" : "play.fill")
+                    : (action == .pause ? "pause.fill" : "arrow.counterclockwise")
+            )
+            .labelStyle(.titleAndIcon)
+            .font(.caption2)
+            .padding(.horizontal, 5).padding(.vertical, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(isOn ? Color.green.opacity(0.22) : Color.primary.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(
+                        model.focusedItem == focus ? Color.accentColor : Color.primary.opacity(0.12),
+                        lineWidth: model.focusedItem == focus ? 2 : 1
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .help("\(cardID) — \(action.label)")
+        .accessibilityLabel("\(cardID) \(action.label)")
     }
 
     private var connectionText: String {

@@ -17,6 +17,12 @@ swift build -c release
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_PATH/PaneDock" "$APP/Contents/MacOS/PaneDock"
+# A 시안의 앱 아이콘(제작용 에셋)을 번들에 넣는다. 생성: assets/make-icon.swift 참고.
+if [ -f assets/PaneDock.icns ]; then
+    cp assets/PaneDock.icns "$APP/Contents/Resources/PaneDock.icns"
+else
+    echo "경고: assets/PaneDock.icns 없음 — 아이콘 없이 만든다"
+fi
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -28,6 +34,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 	<key>CFBundleDisplayName</key>
 	<string>PaneDock</string>
 	<key>CFBundleExecutable</key>
+	<string>PaneDock</string>
+	<key>CFBundleIconFile</key>
 	<string>PaneDock</string>
 	<key>CFBundleIdentifier</key>
 	<string>dev.panedock.prototype</string>

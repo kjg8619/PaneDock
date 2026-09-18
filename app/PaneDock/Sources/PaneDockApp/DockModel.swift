@@ -719,6 +719,36 @@ final class DockModel: ObservableObject {
         isDetailsVisible ? hideDetails() : showDetails()
     }
 
+    /// 진단용: 호출 세션을 열고 **키보드 경로를 순서대로** 실행한다(초점 이동 → 활성화).
+    ///
+    /// macOS는 다른 앱이 앞에 있을 때 **합성 키 이벤트로 이 앱을 활성화하지 못하게** 한다.
+    /// 그래서 실제 키 입력 대신, 키가 들어왔을 때 타는 **같은 함수**(`moveFocus`·`activateFocusedItem`)를
+    /// 순서대로 불러 초점 목록과 조작 연결을 확인한다.
+    func runKeyboardSelfTest() {
+        setDockInvoked(true)
+        stateLog?.appendEvent("keyselftest list=[\(focusItems.map(\.label).joined(separator: ","))]")
+
+        func focusAndActivate(matching match: (FocusItem) -> Bool, label: String) -> Bool {
+            for _ in 0..<max(4, focusItems.count + 2) {
+                if let current = focusedItem, match(current) {
+                    stateLog?.appendEvent("keyselftest target=\(label) at=\(current.label)")
+                    activateFocusedItem()
+                    return true
+                }
+                moveFocus(forward: true)
+            }
+            stateLog?.appendEvent("keyselftest target=\(label) result=not-found")
+            return false
+        }
+
+        _ = focusAndActivate(matching: { if case .timer(_, .start) = $0 { return true }; return false }, label: "timer.start")
+        _ = focusAndActivate(matching: { if case .timer(_, .pause) = $0 { return true }; return false }, label: "timer.pause")
+        _ = focusAndActivate(matching: { if case .timer(_, .reset) = $0 { return true }; return false }, label: "timer.reset")
+        _ = focusAndActivate(matching: { if case .overflow = $0 { return true }; return false }, label: "overflow")
+        stateLog?.appendEvent("keyselftest done details=\(isDetailsVisible)")
+        setDockInvoked(false)
+    }
+
     // MARK: - Dock 편집 (초안 → 저장/취소)
 
     /// 편집을 시작한다. 범위를 지정하지 않으면 **지금 표시 중인 대상**을 고른다.

@@ -118,6 +118,12 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if let seconds = options.timerSecondsOverride {
             model.setTimerDuration(seconds)
         }
+        // 진단용: 키보드 경로(초점 이동 → 활성화)를 순서대로 실행한다.
+        if let delay = options.keyboardSelfTestAfterMilliseconds {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(delay) / 1000.0) { [weak self] in
+                self?.model?.runKeyboardSelfTest()
+            }
+        }
         // 진단용: 입력 없이 첫 집중 타이머를 시작한다(완료 상태까지 화면으로 관측).
         if let delay = options.timerAutostartAfterMilliseconds {
             DispatchQueue.main.asyncAfter(deadline: .now() + Double(delay) / 1000.0) { [weak self] in
@@ -753,7 +759,13 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     /// 창을 숨긴 뒤 다시 표시할 수단. 앱이 `.accessory`라 Dock 아이콘이 없어서 필요하다.
     private func installStatusItem(model _: DockModel) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = options.isFake ? "PaneDock [FAKE]" : "PaneDock"
+        // 메뉴바는 **pane 형태의 단색 심볼**을 쓴다(A 시안). 가짜 모드는 흐리게 그려 구분한다.
+        item.button?.image = PaneDockSymbol.menuBarImage(isActive: !options.isFake)
+        item.button?.imagePosition = .imageOnly
+        item.button?.toolTip = options.isFake
+            ? "PaneDock — 가짜 데이터 모드(실제 터미널에 연결되지 않았습니다)"
+            : "PaneDock — ⌃⌥⌘D로 Dock을 부릅니다"
+        item.button?.setAccessibilityLabel("PaneDock")
         statusItem = item
         rebuildStatusMenu()
     }

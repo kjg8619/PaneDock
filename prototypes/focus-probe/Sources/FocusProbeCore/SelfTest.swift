@@ -1032,7 +1032,7 @@ public enum SelfTest {
         )
         results.append(check(
             "표시: 표시 방식이 프로젝트 타일 폭·개수를 바꾼다",
-            DockBarLayout.projectTileWidth(.nameAndIcon) == DockBarLayout.projectTileChipWidth
+            DockBarLayout.projectTileWidth(.nameAndIcon) == DockBarLayout.projectTileLabeledWidth
                 && DockBarLayout.projectTileWidth(.iconOnly) == DockBarLayout.projectTileSize
                 && labelChips.project.count < iconOnly.project.count
                 && labelChips.project.count + labelChips.projectHidden == 6,
@@ -1058,6 +1058,58 @@ public enum SelfTest {
                     display: cardOverflow, layout: manyCards, allItems: [], detailsVisible: false
                 ).contains(.overflow(.cards)),
             "보이는 카드=\(cardOverflow.visibleCards.count) 밀림=\(cardOverflow.cardHidden) 바=\(Int(cardOverflow.barWidth)) 필요=\(Int(cardOverflow.demandWidth))"
+        ))
+
+        // 8d. 공통 항목이 **전부 밀려** `display.common`이 비어도 화면에는 `+N` 타일이 있으므로
+        //     키보드로도 그 타일에 갈 수 있어야 한다(계획과 화면의 구성요소 판단이 같아야 한다).
+        var tight = layout
+        tight.projectAreaWidth = DockLayout.maximumProjectAreaWidth
+        tight.cards = (1...6).map { DockCardSpec(id: "focus-\($0)", kind: .focusTimer) }
+        let zeroCommon = DockDisplayBuilder.make(
+            resolution: makeResolution(common: 12, project: 2),
+            layout: tight,
+            screenWidth: 560,
+            showsFakeBadge: true
+        )
+        let zeroCommonAll = ProjectResolver.resolve(cwd: "/work/shop", catalog: makeCatalog(common: 12, project: 2)).allItems
+        let zeroCommonFocus = DockFocusPlan.controls(
+            display: zeroCommon,
+            layout: tight,
+            allItems: zeroCommonAll,
+            detailsVisible: false
+        )
+        results.append(check(
+            "표시: 공통이 전부 밀려도 화면의 +N 타일을 키보드로 고를 수 있다",
+            zeroCommon.common.count == 0 && zeroCommon.commonHidden == 12
+                && DockBarLayout.renderedComponents(layout: tight, commonItemCount: zeroCommonAll.filter(\.isCommon).count).contains(.common)
+                && zeroCommonFocus.contains(.overflow(.common))
+                && zeroCommonFocus.first == .overflow(.common),
+            "공통 보임=\(zeroCommon.common.count) 밀림=\(zeroCommon.commonHidden) 첫 조작=\(zeroCommonFocus.first?.label ?? "-")"
+        ))
+
+        // 8e. 카드가 밀려도 **밀린 카드의 타이머 조작**을 키보드로 고를 수 있다(상세 보기를 열었을 때).
+        var manyTimers = layout
+        manyTimers.cards = (1...6).map { DockCardSpec(id: "focus-\($0)", kind: .focusTimer) }
+        let cardShort = DockDisplayBuilder.make(
+            resolution: makeResolution(common: 3, project: 2),
+            layout: manyTimers,
+            screenWidth: screen
+        )
+        let cardFocusClosed = DockFocusPlan.controls(
+            display: cardShort, layout: manyTimers, allItems: [], detailsVisible: false
+        )
+        let cardFocusOpen = DockFocusPlan.controls(
+            display: cardShort, layout: manyTimers, allItems: [], detailsVisible: true
+        )
+        let hiddenCardID = manyTimers.cards.last!.id
+        results.append(check(
+            "표시: 밀린 카드의 타이머 조작은 상세 보기에서 키보드로 고를 수 있다",
+            cardShort.cardHidden > 0
+                && !cardFocusClosed.contains(.timer(cardID: hiddenCardID, action: .start))
+                && cardFocusOpen.contains(.timer(cardID: hiddenCardID, action: .start))
+                && cardFocusOpen.contains(.timer(cardID: hiddenCardID, action: .pause))
+                && cardFocusOpen.contains(.timer(cardID: hiddenCardID, action: .reset)),
+            "밀림=\(cardShort.cardHidden) 닫힘 포함=\(cardFocusClosed.contains(.timer(cardID: hiddenCardID, action: .start))) 열림 포함=\(cardFocusOpen.contains(.timer(cardID: hiddenCardID, action: .start)))"
         ))
 
         // 8c. 저장된 영역 폭을 그대로 쓸 수 없어 줄여야 하는 경우도 **공간 부족으로 남긴다**.
