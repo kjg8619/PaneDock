@@ -3423,7 +3423,8 @@ menu=close source=keyboard                            (Esc가 **메뉴만** 닫�
 | Swift `Process` + `/dev/null` | exit 0, 0.04s |
 | Swift `Process` + 파이프 + stdin=/dev/null | 여전히 타임아웃 |
 
-→ cmux CLI는 **stdout/stderr가 파이프일 때 응답을 내놓지 않는다.** 그래서 실행 경계를 고쳤다(다른 것은 그대로):
+→ **시험한 Swift `Process` 실행 경로에서** 파이프로 출력을 받을 때만 응답이 없었다(Python `subprocess`의 파이프는 정상이었다 —
+일반적인 "파이프 금지"가 아니라 이 실행 경로의 관측이다. CLI 내부 원인은 확정하지 않았다). 그래서 실행 경계를 고쳤다(다른 것은 그대로):
 
 - 출력 수집을 파이프 → **임시 파일**로 바꿈(`CmuxCLIClient.run`), 작업 디렉터리는 사용자 홈으로 고정
 - 실행 파일 탐색 추가(`CmuxCLIResolver`): **명시적 주입 → `PANEDOCK_CMUX_CLI` → 설치본 후보 6곳 → PATH 조회**.
@@ -3446,6 +3447,55 @@ menu=close source=keyboard                            (Esc가 **메뉴만** 닫�
 
 화면(`shots/v18-G-cmux-project.png`): 헤더가 `CodeMose · cmux`로 바뀌고 도구 타일이 문서·게임·추가로 교체 —
 **공통 앱·카드 위치와 진행 중 타이머(24:51 집중 중)는 그대로**다. cmux 설정·접근 제한·패치는 건드리지 않았다.
+
+### V18.22 오류 상태 표현 통일 · cmux 실행 실패 처리 보완
+
+**표현 일치(등록 여부보다 작업 상태 우선):**
+
+- `areaAccessibilityLabel`도 **작업 상태를 먼저** 본다(경로 정보가 남아 있어도 오류면 오류로 알린다).
+- **표시 목록도 화면과 같아진다**: 확인 중·오류에는 패널이 사유만 그리므로 `DockDisplayBuilder(showsProjectItems:)`가
+  프로젝트 항목을 목록에서 뺀다 → 이전에는 상세 보기가 `표시 5개`라면서 패널에는 프로젝트 타일이 없었다.
+  이제 로그/상세는 `표시 3개(공통 3, 프로젝트 0)`으로 화면과 일치한다.
+- 상세 보기의 프로젝트 항목은 확인 중·오류일 때 **참고 행**으로 표시한다(버튼 아님 · hover/선택 없음) +
+  "작업 상태가 오류라 프로젝트 항목을 실행할 수 없습니다: <사유>" 안내. **공통 항목 행과 카드 조작은 그대로 살아 있다.**
+- 기존 실행 차단(`DockItemActionPlanner`)과 키보드 목록 규칙(V18.21)은 그대로다.
+
+**cmux 실행 경계:**
+
+- 임시 출력 파일을 **중간에 실패해도** 이미 만든 파일을 정리한다(생성 실패·핸들 열기 실패 모두 `defer`/cleanup 경로).
+  실제 디스크를 건드리지 않는 **주입 가능한** `CmuxTempOutputs`(create/remove)로 검사한다.
+- `classify`가 `No such file or directory`만으로 CLI 미설치를 단정하지 않는다: 소켓 신호 → 거부 → (exit 127·`command not found`·
+  `env:`/실행 파일 이름 근거가 있을 때만) CLI 미설치 → 그 밖은 일반 실패.
+- 정상 연결되는 출력 수집 방식(임시 파일)은 그대로 유지했다. cmux 설정·패치·포크는 하지 않았다.
+
+자체 검사(현재 빌드로 실행): **180/180** — 신규 1건(임시 자원 정리) + 분류 검사 확장(소켓 ENOENT ≠ CLI 미설치).
+
+**GUI 관측(임시 설정, 실제 앱):** cmux 연결 → **cmux 종료로 오류** → 재시작으로 **복구** 순서.
+로그: `display shown=5 project=2/0` → `shown=3 project=0/0` → `shown=5 project=2/0`.
+화면: 오류 상태 상세 보기에서 프로젝트 행이 참고 행으로 바뀌고 사유가 붙는다(`shots/v18-L2.png`), 복구 후 원래 상태(`shots/v18-M-recovered.png`).
+
+### V18 현재 상태 요약 (완료 / 미검증)
+
+| 구분 | 항목 |
+| --- | --- |
+| **완료(소스 + 검사)** | 표시 목록 단일화 · 승인 화면(타일·카드·프로젝트 패널) · 시계/타이머 동작 · 편집기 배치(순서·폭·카드) · 넘침 계산(항목·카드) · 키보드 조작(항목·타이머·메뉴·등록/폴더·추가) · 상태 4분류(등록/미등록/확인 중/오류) · A 시안 시각(아이콘·메뉴바 심볼·타일) · cmux 실행 경계(탐색·수집·오류 분류) |
+| **GUI로 확인함** | 등록/다른 프로젝트/미등록/오류 화면 · 오류 상세 보기와 복구 · 실제 Ghostty→cmux→Ghostty 전환(공통·타이머 유지) · 편집기 카드 추가·제거·저장 · 마우스·합성 키 이벤트로 조작 |
+| **미검증** | ① `pending` 화면 캡처(판정·문구는 검사로 고정, 현재 흐름에서 UI에 게시되지 않음) ② **물리 키보드** 입력(사람이 직접 누르는 ⌃⌥⌘D/Tab/Enter — 합성 키 이벤트와 구분) ③ cmux 쪽 실패의 **내부 원인**(파이프에서 멈추는 이유는 미확정, 우회만 적용) ④ 저장 시 `card=prune` 로그 줄 자체 |
+
+### V18 개인 실사용 기준선 (2026-09-18)
+
+**이 기준선은 개인 실사용 검증용이다. 공개 배포 준비 완료를 뜻하지 않는다**(서명·공증 없음, 실사용 피드백 미수집).
+
+| 항목 | 내용 |
+| --- | --- |
+| 빌드 식별자 | 저장소 `main` **a5adbcf** 기준 작업 트리 + 아래 수정(V18.22). debug 바이너리 `sha256:2efb155d7306…`, 번들 바이너리 `sha256:1617eec45ad0…` |
+| 실행(번들) | `bash app/PaneDock/make-app.sh` → `open app/PaneDock/dist/PaneDock.app` (ad-hoc 서명, Dock 아이콘 없이 메뉴 막대에만) |
+| 실행(개발) | `cd app/PaneDock && swift build && .build/debug/PaneDock [--fake steady\|toggle\|missing] [--adapter auto\|ghostty\|cmux] [--self-check]` |
+| 자체 검사 | `cd prototypes/focus-probe && swift build && .build/debug/focus-probe --self-test` (현재 **180/180**) |
+| 확인한 환경 | macOS 27.0(26A428) · Apple M5 Pro · 화면 1512×982pt(visible 1512×859) · Ghostty 1.3.1 · cmux(`socketControlMode=automation`, 기본값) |
+| 진단 플래그 | `--state-log <path>` · `--settings-path`(임시 설정) · `--projects-path`(임시 카탈로그) · `--details` · `--editor` · `--timer-seconds` · `--timer-autostart` · `--key-selftest` |
+| 알려진 제한 | ① 중첩 TUI(herdr·tmux) 내부 경로는 공식 조회로 알 수 없다(바깥 프로세스 경로만) ② Herdr 연동은 지원 범위 밖 ③ 타이머 상태는 앱 종료 후 복원되지 않는다 ④ 프로젝트 전환은 **부분 전환**(프로젝트 영역만) — 전체 Dock 프로필 전환은 만들지 않았다 ⑤ cmux는 읽기 전용(identify·sidebar-state)이며 이 환경에서 파이프 수집 시 멈추던 문제를 **우회**로 피한다 |
+| 사용자 설정 | 이 기준선 확인은 전부 임시 설정·임시 카탈로그로 했다. 실제 `settings.json`·`projects.json`은 건드리지 않는다 |
 
 ### V17.7 보존 확인
 
