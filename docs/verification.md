@@ -3393,8 +3393,59 @@ menu=close source=keyboard                            (Esc가 **메뉴만** 닫�
 | ③ 대조군: 같은 명령을 이 세션 셸에서 | **정상** | `identify` 0.04s JSON · `sidebar-state --workspace …` 0.16s → `cwd=…/Workspace/make-games/CodeMose` |
 | ④ cmux 설정 | `socketControlMode=automation`(기본값, **변경하지 않음**) | `defaults read com.cmuxterm.app` |
 
-→ 실패는 **②앱이 띄운 CLI가 소켓 응답을 받지 못하고 멈추는 단계**이며, GUI 환경에서는 ①이 먼저 걸린다.
-원인을 더 좁히려면 cmux 설정/소스 접근이 필요해 **여기서 멈췄다**(Automation 설정·패치·포크 금지). cmux는 확인 후 종료했다.
+→ 이 시점의 실패는 **②앱이 띄운 CLI가 소켓 응답을 받지 못하고 멈추는 단계**였고, GUI 환경에서는 ①이 먼저 걸렸다.
+**V18.21에서 원인을 파이프로 좁혀 해결했다**(아래). cmux 설정·패치·포크는 하지 않았다.
+
+### V18.21 등록 여부와 작업 유효성 분리 · cmux 실행 경계
+
+**1) 프로젝트를 알아도 작업 상태가 먼저다**
+
+`DockPanelStatus.from`이 `hasProject`를 먼저 보던 탓에, 경로 정보가 남은 채 연결이 끊기면 **정상 프로젝트처럼** 보였다.
+이제 **작업 상태를 먼저** 본다: `pending→확인 중`, `error→오류`, 그 밖에 `tracked/held/locked`일 때만 `registered/unregistered`로 나뉜다.
+프로젝트 이름은 참고 정보로만 남고(헤더 도움말), 상태 표시·실행 조건은 실제 작업 상태를 따른다.
+
+`DockFocusPlan`도 같은 판정(`panelStatus`)을 받는다 — 화면에 프로젝트 타일·버튼이 없으면 **초점 목록에도 없다**.
+공통 앱·카드는 상태와 무관하게 계속 순회한다(독립 사용 유지). 추적 코어·프로젝트 매칭은 손대지 않았다.
+
+자체 검사 3건 추가(총 **179**): 등록+확인 중/오류 ≠ 정상 · 정상→오류→복구 전이 · 오류(상세 열림)에서도 프로젝트 항목·
+`+`·등록 버튼 제외(공통은 유지). 실행 예: 오류 상태 초점 목록 =
+`item:common/c1..c3, timer:focus-1:start/pause/reset, details, menu`.
+
+**2) cmux 실행 경계 — 원인은 "파이프"였다**
+
+같은 실행 파일·인자·환경으로 **셸 실행과 PaneDock(Process) 실행만 갈리는 지점**을 좁혔다.
+
+| 실행 방식 | 결과 |
+| --- | --- |
+| 셸 / python(subprocess, 파이프) | exit 0, 0.03~0.16s |
+| Swift `Process` + **Pipe**(stdout·stderr) | **응답 없음(타임아웃)** |
+| Swift `Process` + **임시 파일** | exit 0, 0.02s |
+| Swift `Process` + `/dev/null` | exit 0, 0.04s |
+| Swift `Process` + 파이프 + stdin=/dev/null | 여전히 타임아웃 |
+
+→ cmux CLI는 **stdout/stderr가 파이프일 때 응답을 내놓지 않는다.** 그래서 실행 경계를 고쳤다(다른 것은 그대로):
+
+- 출력 수집을 파이프 → **임시 파일**로 바꿈(`CmuxCLIClient.run`), 작업 디렉터리는 사용자 홈으로 고정
+- 실행 파일 탐색 추가(`CmuxCLIResolver`): **명시적 주입 → `PANEDOCK_CMUX_CLI` → 설치본 후보 6곳 → PATH 조회**.
+  `/opt/homebrew` 한 경로에 고정하지 않는다(후보: `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/bin`,
+  `/Applications/cmux.app/…`, `~/Applications/cmux.app/…`)
+- 오류 분리: `cliNotFound`(실행 파일 없음, exit 127 포함) · `launchFailed`(실행 실패) · `notRunning`(소켓 없음) ·
+  `refused`(연결 거부) · `timedOut` — 이전에는 `env`가 못 찾은 경우가 일반 실패로 뭉뚱그려졌다.
+  진단 문구는 찾아본 **개수와 대표 경로만** 남긴다(환경·비밀번호 출력 없음)
+
+**cmux 연결 성공(실측)**: GUI와 같은 PATH(`/usr/bin:/bin:/usr/sbin:/sbin`)로 실행해도
+`connection=connected … path=/Users/kangjingoo/Workspace/make-games/CodeMose cwdSource=cmux:sidebar-state.focused_cwd` ✓
+
+**실제 전환(같은 PaneDock 실행, `--adapter auto`, 임시 설정)**:
+
+| 전면 앱 | 관측 |
+| --- | --- |
+| Ghostty | `host=ghostty path=/Users/kangjingoo project=p-home(6) shown=6 area=360 bar=1090` |
+| **cmux** | `host=cmux path=…/make-games/CodeMose project=p-codemose(5) shown=5 area=360 bar=1090` |
+| Ghostty(복귀) | `host=ghostty project=p-home(6) area=360 bar=1090` |
+
+화면(`shots/v18-G-cmux-project.png`): 헤더가 `CodeMose · cmux`로 바뀌고 도구 타일이 문서·게임·추가로 교체 —
+**공통 앱·카드 위치와 진행 중 타이머(24:51 집중 중)는 그대로**다. cmux 설정·접근 제한·패치는 건드리지 않았다.
 
 ### V17.7 보존 확인
 
