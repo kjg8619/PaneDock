@@ -7,6 +7,13 @@ import Foundation
 /// 실제 화면 측정은 UI가 하고, 이 계산은 숫자만 받는다.
 public enum DockBarLayout {
     /// 바 높이. 첫 시안은 64~80pt 범위로 잡고 가독성·클릭 영역을 보고 조정한다.
+    /// 승인된 구성형 배치의 기본 높이(104pt). 크기 선택은 이 값을 기준으로 움직인다.
+    public static let widgetBarHeight: CGFloat = 104
+    /// 공통 앱 타일 / 프로젝트 항목 타일.
+    public static let appTileSize: CGFloat = 68
+    public static let projectTileSize: CGFloat = 48
+    public static let cardHeight: CGFloat = 68
+
     public static let barHeight: CGFloat = 76
     /// 상세 보기 높이(열렸을 때 바 위로 펼쳐진다).
     public static let detailsHeight: CGFloat = 300

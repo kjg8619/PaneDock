@@ -46,6 +46,7 @@ public struct PaneDockSettings: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = ((try? container.decodeIfPresent(Int.self, forKey: .schemaVersion)) ?? nil) ?? 1
         appearance = ((try? container.decodeIfPresent(DockAppearance.self, forKey: .appearance)) ?? nil) ?? .default
+        layout = ((try? container.decodeIfPresent(DockLayout.self, forKey: .layout)) ?? nil) ?? .default
         windowOrigin = (try? container.decodeIfPresent(StoredOrigin.self, forKey: .windowOrigin)) ?? nil
         hotKey = ((try? container.decodeIfPresent(HotKeyChoice.self, forKey: .hotKey)) ?? nil) ?? .controlOptionCommandD
         hotKeyEnabled = ((try? container.decodeIfPresent(Bool.self, forKey: .hotKeyEnabled)) ?? nil) ?? true
@@ -58,16 +59,20 @@ public struct PaneDockSettings: Codable, Equatable, Sendable {
     public var hotKeyEnabled: Bool
     /// Dock 외형(크기·항목 표시·색상 모드). **없던 파일에서는 기본 외형**으로 동작한다.
     public var appearance: DockAppearance
+    /// 저장된 Dock 배치(순서·영역 너비·카드). 없으면 승인된 기본 배치로 읽는다.
+    public var layout: DockLayout
 
     public init(
         schemaVersion: Int = PaneDockSettings.currentSchemaVersion,
         appearance: DockAppearance = .default,
+        layout: DockLayout = .default,
         windowOrigin: StoredOrigin? = nil,
         hotKey: HotKeyChoice = .controlOptionCommandD,
         hotKeyEnabled: Bool = true
     ) {
         self.schemaVersion = schemaVersion
         self.appearance = appearance
+        self.layout = layout
         self.windowOrigin = windowOrigin
         self.hotKey = hotKey
         self.hotKeyEnabled = hotKeyEnabled
