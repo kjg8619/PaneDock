@@ -3343,6 +3343,59 @@ menu=close source=keyboard                            (Esc가 **메뉴만** 닫�
 **cmux: 미확인(실행은 했음).** `open -a cmux`로 실행해도 어댑터가 `connection=unavailable (앱 미실행 또는 조회 실패)` —
 소켓 CLI가 없어 pane 정보를 읽지 못한다. cmux 설정(Settings > Automation)을 바꾸는 것은 사용자 설정 변경이라 하지 않았다. cmux는 확인 후 종료했다.
 
+### V18.20 프로젝트 패널 공간·키보드·상태 일치
+
+**1) 한 줄 공간 계산에 추가 타일 포함**
+
+이전 `projectTileBudget`은 **항목과 넘침 타일만** 세고 화면에 항상 있는 **추가 타일** 자리를 예약하지 않았다.
+그래서 영역 360pt·이름 모드·항목 4개에서 화면은 `4항목(280) + 간격(8) + 추가(64) = 352`를 요구했지만 안쪽 폭은 336이었다.
+
+| 함수 | 규칙 |
+| --- | --- |
+| `projectRowWidth(visible:hidden:labelMode:)` | 항목 + 넘침 + **추가** + 간격 + 패딩을 모두 포함한 한 줄 폭 |
+| `projectRowTileCapacity(width:labelMode:)` | 한 줄에 들어가는 타일 수(`n·w + (n−1)·gap ≤ 안쪽 폭`) |
+| `projectTileBudget(...)` | **추가 타일 자리를 항상 남기고**, 밀린 항목이 있으면 넘침 자리도 남긴다 |
+
+자체 검사(175/175) 신규 2건: 두 표시 모드 × 넓이 240·300·360·620 × 항목 0~14개에서 한 줄 폭이 영역을 넘지 않음 ·
+경계(딱 맞음=넘침 0 / 하나 더=넘침 발생)·빈 목록(0/0)·합계 일치.
+**실측 화면**: 360pt·이름 모드·항목 4개 → 보임 2 + `+2` + 추가 = 304pt ≤ 360pt(`shots/v18-F-row4.png`, 로그 `shown=5 hidden=2`).
+
+**2) 프로젝트 영역 키보드 조작 (화면과 같은 기준)**
+
+| 화면 | 초점 목록(코어 `DockFocusPlan`) |
+| --- | --- |
+| 등록 프로젝트 | 항목 → 넘침 → **`project.add`(추가)** → 상태 점 → `⋯` |
+| 미등록(경로 유효) | **`project.openFolder`(폴더 열기)** → **`project.register`(프로젝트로 등록)** → 상태 점 → `⋯` |
+| 확인 중·오류 | 위 버튼들이 **화면에 없으므로 초점 목록에도 없다** |
+
+실행은 기존 경로 그대로다: 폴더 열기는 `perform(.openFolder)`(=`DockActionPlanner` 검증), 등록·추가는 `openEditor()`.
+**실제 키 이벤트 전달 확인**(LaunchServices 실행, 함수 직접 호출 아님):
+
+```
+등록:  … item:p-a/a2 → overflow:project → project.add → details       (Enter) → editor=open scope=p-a
+미등록: … timer:focus-1:reset → project.openFolder                    (Enter) → action=openFolder source=keyboard result=allowed target=/tmp
+        project.register                                              (Enter) → editor=open scope=common
+```
+
+**3) 상태 표시 분리 (미등록 / 확인 중 / 오류)**
+
+`DockPanelStatus.from(state:hasProject:)` 한 곳에서 판단한다: registered · unregistered(주황) · pending(회색 “경로 확인 중”) · failure(붉은 “경로 확인 실패”).
+`isActionable`은 건드리지 않았다 — 확인 중·오류는 그대로 실행이 막히고, 공통 앱·카드는 독립적으로 동작한다.
+검사: `tracked+프로젝트=registered`, `tracked+무프로젝트=unregistered`, `pending→pending`, `error→failure`, `!pending.isActionable`.
+**한계:** 현재 흐름에서 `pending`은 UI에 게시되지 않는다(조준 직후 같은 refresh 안에서 경로가 채워진다). 판정·문구는 검사로 고정했고 **화면 캡처는 얻지 못했다**.
+
+**4) cmux 조회 실패 단계 분리 (설정·패치 없이)**
+
+| 단계 | 결과 | 근거 |
+| --- | --- | --- |
+| ① GUI 환경에서 CLI 찾기 | **실패** | `env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /usr/bin/env cmux …` → `env: cmux: No such file or directory`, **exit 127**. CLI 실체는 `/opt/homebrew/bin/cmux → /Applications/cmux.app/Contents/Resources/bin/cmux`(GUI PATH에 없음) |
+| ② CLI 실행 + 소켓 조회(PATH 고정) | **응답 없음** | 앱이 띄운 `cmux identify` 자식이 살아 있는 채 메인 런루프에서 대기(`mach_msg_trap`), 출력 없음 → 4초 타임아웃 `failure: cmux did not answer in time`(2회 재현) |
+| ③ 대조군: 같은 명령을 이 세션 셸에서 | **정상** | `identify` 0.04s JSON · `sidebar-state --workspace …` 0.16s → `cwd=…/Workspace/make-games/CodeMose` |
+| ④ cmux 설정 | `socketControlMode=automation`(기본값, **변경하지 않음**) | `defaults read com.cmuxterm.app` |
+
+→ 실패는 **②앱이 띄운 CLI가 소켓 응답을 받지 못하고 멈추는 단계**이며, GUI 환경에서는 ①이 먼저 걸린다.
+원인을 더 좁히려면 cmux 설정/소스 접근이 필요해 **여기서 멈췄다**(Automation 설정·패치·포크 금지). cmux는 확인 후 종료했다.
+
 ### V17.7 보존 확인
 
 | 규칙 | 상태 |
