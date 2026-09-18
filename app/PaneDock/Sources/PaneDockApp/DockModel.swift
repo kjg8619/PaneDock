@@ -147,6 +147,17 @@ final class DockModel: ObservableObject {
 
     /// 상세 보기 표시 여부. 창 크기는 AppDelegate가 이 값에 맞춘다.
     @Published private(set) var isDetailsVisible = false
+    /// 저장된 Dock 배치(순서·프로젝트 영역 너비·카드). **표시 구성만** 정한다 —
+    /// 프로젝트 내용·실행 상태와는 별개다.
+    private(set) var layout: DockLayout = .default
+
+    /// 배치를 반영한다(시작 시·설정 저장 후). 구성만 바뀌고 추적·잠금·대상은 건드리지 않는다.
+    func applyLayout(_ layout: DockLayout) {
+        self.layout = layout
+        stateLog?.appendEvent("layout order=\(layout.order.map(\.rawValue).joined(separator: ",")) area=\(Int(layout.projectAreaWidth)) cards=\(layout.cards.count)")
+        onLayoutChange?()
+    }
+
     /// **자동 접기** 상태(작은 호출 손잡이만 남긴 상태).
     /// 표시 방식일 뿐이며 **추적·잠금·표시 대상과는 분리**돼 있다.
     @Published private(set) var isCollapsed = false
@@ -387,7 +398,7 @@ final class DockModel: ObservableObject {
         for index in 0..<min(count, all.count) {
             items.append(.item(index))
         }
-        items.append(contentsOf: [.openFolder, .copyPath, .lock])
+        // 열기·복사·잠금은 화면의 ⋯ 메뉴로 옮겼다 → 초점 목록에도 넣지 않는다(표시 대상과 실행 대상 일치).
         items.append(isDetailsVisible ? .detailsClose : .more)
         if isDetailsVisible {
             items.append(contentsOf: [.hide, .quit])
@@ -396,11 +407,15 @@ final class DockModel: ObservableObject {
     }
 
     /// 바에 인라인으로 그릴 항목 수. 화면 너비와 항목 수로 정해진다.
+    /// 구성형 화면: **공통 항목은 항상 보이고**, 프로젝트 항목 수는 **영역에 할당된 폭**이 정한다.
+    /// 전체 항목 수로 Dock 크기를 다시 계산하지 않는다 — 프로젝트가 바뀌어도 공통 구성이 밀리지 않는다.
     var visibleItemCount: Int {
-        DockBarLayout.linkBudget(
-            total: resolution.allItems.count,
-            availableWidth: ScreenGeometry.fallbackFrame.width
-        ).visible
+        let common = resolution.commonItems.count
+        let budget = DockBarLayout.projectTileBudget(
+            width: layout.projectAreaWidth,
+            tileCount: resolution.projectItems.count
+        )
+        return min(common + budget.visible, resolution.allItems.count)
     }
 
     /// 바에 인라인으로 그릴 항목. `id`를 명시해 목록 갱신이 안정적이게 한다.

@@ -73,10 +73,8 @@ struct DockView: View {
 
     /// 인라인에서 밀린 항목 수(조용히 자르지 않고 "+N"으로 알린다).
     private var hiddenItemCount: Int {
-        DockBarLayout.linkBudget(
-            total: model.resolution.allItems.count,
-            availableWidth: availableWidth
-        ).hidden
+        // 표시 수는 모델이 배치(프로젝트 영역 폭)로 정한다 → 여기서 다시 계산하지 않는다.
+        max(0, model.resolution.allItems.count - model.visibleItemCount)
     }
 
     var body: some View {
@@ -174,23 +172,15 @@ struct DockView: View {
     }
 
     /// 상태를 **아이콘 + 한국어 이름**으로 보여준다(색만으로 구분하지 않는다).
+    /// 상태 표시는 **작게** — 색만으로 구분하지 않는다는 규칙은 툴팁·접근성 이름과 상세 보기가 지킨다.
+    /// (승인된 배치: 큰 진단 배지 대신 작은 점)
     private var stateBadge: some View {
-        HStack(spacing: 5) {
-            Image(systemName: stateSymbol)
-                .font(.system(size: 12, weight: .semibold))
-            Text(stateLabel)
-                .font(.caption).bold()
-                .lineLimit(1)
-        }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .background(stateColor.opacity(0.18))
-        .foregroundStyle(stateColor)
-        .clipShape(Capsule())
-        // 상태 이름은 잘리면 안 된다(색만으로 구분하지 않는다는 규칙의 핵심이다).
-        .fixedSize(horizontal: true, vertical: false)
-        .help(shortStatusHelp)
-        .accessibilityLabel("상태: \(stateLabel)")
+        Circle()
+            .fill(stateColor)
+            .frame(width: 10, height: 10)
+            .overlay(Circle().strokeBorder(stateColor.opacity(0.35), lineWidth: 3).padding(-3))
+            .help(shortStatusHelp)
+            .accessibilityLabel("상태: \(stateLabel)")
     }
 
     /// 현재 프로젝트/폴더 이름과 소스·짧은 상태.
@@ -246,31 +236,28 @@ struct DockView: View {
         }
     }
 
+    /// 보조 동작은 **작은 ⋯ 메뉴**로 접는다(승인된 배치).
+    /// 열기·복사·잠금은 초점 목록에서도 빠져 있어 화면과 키보드가 어긋나지 않는다.
+    /// "더보기"는 화면에 남겨 키보드 초점의 시각 앵커로 쓴다.
     private var actionCluster: some View {
         HStack(spacing: 6) {
-            chip(
-                icon: "folder",
-                label: "열기",
-                item: .openFolder,
-                enabled: model.state.canOpenFolder,
-                help: openHelp,
-                action: { model.perform(.openFolder, source: .mouse) }
-            )
-            chip(
-                icon: "doc.on.doc",
-                label: "복사",
-                item: .copyPath,
-                enabled: model.state.canCopyPath,
-                help: copyHelp,
-                action: { model.perform(.copyPath, source: .mouse) }
-            )
-            chip(
-                icon: model.state.isLocked ? "lock.fill" : "lock.open",
-                label: model.state.isLocked ? "잠금 해제" : "잠금",
-                item: .lock,
-                help: model.state.isLocked ? "고정을 풀고 현재 포커스를 다시 확인합니다" : "표시 대상을 고정합니다",
-                action: { model.toggleLock() }
-            )
+            Menu {
+                Button("현재 폴더 열기") { model.perform(.openFolder, source: .mouse) }
+                    .disabled(!model.state.canOpenFolder)
+                Button("현재 경로 복사") { model.perform(.copyPath, source: .mouse) }
+                    .disabled(!model.state.canCopyPath)
+                Divider()
+                Button(model.state.isLocked ? "고정 해제" : "표시 대상 고정") { model.toggleLock() }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 34, height: 34)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .help("보조 동작: 현재 폴더 열기 · 경로 복사 · 표시 대상 고정")
+            .accessibilityLabel("보조 동작 메뉴")
+
             chip(
                 icon: "ellipsis.circle",
                 label: "더보기",

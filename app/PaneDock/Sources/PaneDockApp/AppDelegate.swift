@@ -97,6 +97,8 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
         // 저장된 외형을 반영하고 시작한다(없던 설정이면 기본 외형).
         model.applyAppearance(store.settings.appearance)
+        // 저장된 구성형 배치(순서·프로젝트 영역 너비·카드)도 함께 반영한다.
+        model.applyLayout(store.settings.layout)
         let panel = makePanel(model: model)
         panel.delegate = self
         self.panel = panel
@@ -336,10 +338,18 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if model.isCollapsed {
             return NSSize(width: DockBarLayout.handleWidth, height: DockBarLayout.handleHeight)
         }
-        return ScreenGeometry.dockBarSize(
-            linkCount: model.resolution.allItems.count,
-            detailsVisible: model.isDetailsVisible,
-            barHeight: model.effectiveAppearance.size.barHeight
+        // 구성형 화면: **저장된 배치**가 너비를 정한다(항목 수로 다시 계산하지 않는다).
+        let width = DockBarLayout.widgetBarWidth(
+            layout: model.layout,
+            commonItemCount: model.resolution.commonItems.count,
+            screenWidth: ScreenGeometry.fallbackFrame.width
+        )
+        return NSSize(
+            width: width,
+            height: DockBarLayout.windowHeight(
+                detailsVisible: model.isDetailsVisible,
+                barHeight: model.effectiveAppearance.size.barHeight
+            )
         )
     }
 
