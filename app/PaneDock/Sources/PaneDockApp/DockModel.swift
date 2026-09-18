@@ -698,8 +698,8 @@ final class DockModel: ObservableObject {
             layout: effectiveLayout,
             allItems: resolution.allItems,
             detailsVisible: isDetailsVisible,
-            // 화면에 등록·폴더 열기 버튼이 있는가(경로 확인 중·오류면 없다).
-            canActOnPath: state.isActionable
+            // 패널 표시와 **같은 판정**을 쓴다(작업 상태 우선).
+            panelStatus: DockPanelStatus.from(state: state, hasProject: display.projectRegistered)
         )
     }
 

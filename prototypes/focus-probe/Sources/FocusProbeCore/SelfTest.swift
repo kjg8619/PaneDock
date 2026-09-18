@@ -887,7 +887,7 @@ public enum SelfTest {
             cwd: "/work/shop",
             catalog: makeCatalog(common: 3, project: 2)
         ).allItems
-        let closed = DockFocusPlan.controls(display: regression, layout: layout, allItems: all, detailsVisible: false, canActOnPath: true)
+        let closed = DockFocusPlan.controls(display: regression, layout: layout, allItems: all, detailsVisible: false)
         let closedRefs = closed.compactMap(\.itemRef)
         let closedTimers = closed.compactMap { control -> String? in
             if case .timer(let cardID, let action) = control { return "\(cardID):\(action.rawValue)" }
@@ -914,8 +914,7 @@ public enum SelfTest {
             ),
             layout: cardsFirst,
             allItems: all,
-            detailsVisible: false,
-            canActOnPath: true
+            detailsVisible: false
         )
         results.append(check(
             "표시: 배치 순서를 바꾸면 조작 순서도 바뀐다",
@@ -936,7 +935,7 @@ public enum SelfTest {
             layout: layout,
             allItems: ProjectResolver.resolve(cwd: "/work/other", catalog: makeCatalog(common: 3, project: 2)).allItems,
             detailsVisible: false,
-            canActOnPath: true
+            panelStatus: .unregistered
         )
         results.append(check(
             "표시: 미등록 경로에서는 등록 조작이 키보드 목록에 들어간다",
@@ -952,9 +951,9 @@ public enum SelfTest {
             screenWidth: screen
         )
         let overflowAll = ProjectResolver.resolve(cwd: "/work/shop", catalog: makeCatalog(common: 3, project: 8)).allItems
-        let overflowFocus = DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: false, canActOnPath: true)
+        let overflowFocus = DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: false)
         let hiddenRefs = overflowAll.map(\.ref).filter { !overflow.order.map(\.ref).contains($0) }
-        let detailsOpen = DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: true, canActOnPath: true)
+        let detailsOpen = DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: true)
         results.append(check(
             "표시: 영역을 넘긴 항목은 화면·키보드에서 함께 빠지고 상세 보기에는 있다",
             overflow.projectHidden == 4 && overflow.project.count == 4
@@ -968,9 +967,9 @@ public enum SelfTest {
         // 4b. 밀린 항목이 있으면 **밀린 수를 알리는 타일**도 키보드 목록에 있다.
         results.append(check(
             "표시: 밀린 항목을 알리는 타일이 키보드 목록에 있다",
-            DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: false, canActOnPath: true)
+            DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: false)
                 .contains(.overflow(.project)),
-            "목록=\(DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: false, canActOnPath: true).map(\.label).joined(separator: ","))"
+            "목록=\(DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: false).map(\.label).joined(separator: ","))"
         ))
 
         // 5. 프로젝트 항목 수가 달라져도 공통 구성 위치(바 폭·공통 타일 수)는 그대로다.
@@ -1057,7 +1056,7 @@ public enum SelfTest {
                 && cardOverflow.isSpaceShort
                 && cardOverflow.barWidth <= DockBarLayout.screenCeiling(screenWidth: screen)
                 && DockFocusPlan.controls(
-                    display: cardOverflow, layout: manyCards, allItems: [], detailsVisible: false, canActOnPath: true
+                    display: cardOverflow, layout: manyCards, allItems: [], detailsVisible: false
                 ).contains(.overflow(.cards)),
             "보이는 카드=\(cardOverflow.visibleCards.count) 밀림=\(cardOverflow.cardHidden) 바=\(Int(cardOverflow.barWidth)) 필요=\(Int(cardOverflow.demandWidth))"
         ))
@@ -1113,7 +1112,7 @@ public enum SelfTest {
 
         // 8e. 프로젝트 영역의 버튼도 **화면과 같은 기준**으로 초점 목록에 들어간다.
         let registeredFocus = DockFocusPlan.controls(
-            display: regression, layout: layout, allItems: all, detailsVisible: false, canActOnPath: true
+            display: regression, layout: layout, allItems: all, detailsVisible: false
         )
         let unregisteredCatalog = makeCatalog(common: 3, project: 2)
         let unregisteredItems = ProjectResolver.resolve(cwd: "/work/other", catalog: unregisteredCatalog).allItems
@@ -1124,11 +1123,11 @@ public enum SelfTest {
         )
         let unregisteredButtons = DockFocusPlan.controls(
             display: unregisteredDisplay, layout: layout, allItems: unregisteredItems,
-            detailsVisible: false, canActOnPath: true
+            detailsVisible: false, panelStatus: .unregistered
         )
         let blockedButtons = DockFocusPlan.controls(
             display: unregisteredDisplay, layout: layout, allItems: unregisteredItems,
-            detailsVisible: false, canActOnPath: false
+            detailsVisible: false, panelStatus: .failure
         )
         results.append(check(
             "표시: 프로젝트 영역 버튼이 화면과 같은 기준으로 키보드 목록에 들어간다",
@@ -1158,6 +1157,59 @@ public enum SelfTest {
             "등록=\(DockPanelStatus.from(state: trackedState, hasProject: true)) 미등록=\(DockPanelStatus.from(state: trackedState, hasProject: false)) 확인중=\(DockPanelStatus.from(state: pendingState, hasProject: false)) 오류=\(DockPanelStatus.from(state: errorState, hasProject: false))"
         ))
 
+        // 8e-3. **프로젝트를 알아도 작업 상태가 먼저다**: 등록 프로젝트 + 확인 중/오류는 정상처럼 보이면 안 된다.
+        let registeredItems = ProjectResolver.resolve(cwd: "/work/shop", catalog: makeCatalog(common: 3, project: 2)).allItems
+        let registeredDisplay = DockDisplayBuilder.make(
+            resolution: ProjectResolver.resolve(cwd: "/work/shop", catalog: makeCatalog(common: 3, project: 2)),
+            layout: layout,
+            screenWidth: screen
+        )
+        let pendingWithProject = makeWorkState(display: .pending)
+        let errorWithProject = makeWorkState(display: .error)
+        let pendingStatus = DockPanelStatus.from(state: pendingWithProject, hasProject: true)
+        let errorStatus = DockPanelStatus.from(state: errorWithProject, hasProject: true)
+        let pendingFocus = DockFocusPlan.controls(
+            display: registeredDisplay, layout: layout, allItems: registeredItems,
+            detailsVisible: false, panelStatus: pendingStatus
+        )
+        let errorFocus = DockFocusPlan.controls(
+            display: registeredDisplay, layout: layout, allItems: registeredItems,
+            detailsVisible: false, panelStatus: errorStatus
+        )
+        // 정상 등록 → 연결 오류 → 정상 복구 순서.
+        let recovered = DockPanelStatus.from(state: makeWorkState(display: .tracked), hasProject: true)
+        results.append(check(
+            "표시: 등록 프로젝트라도 확인 중·오류를 정상 상태로 표시하지 않는다",
+            pendingStatus == .pending && errorStatus == .failure && recovered == .registered
+                && !pendingFocus.contains(.projectAdd)
+                && !errorFocus.contains(.projectAdd)
+                && pendingFocus.compactMap(\.itemRef).allSatisfy { ref in
+                    registeredItems.first { $0.ref == ref }?.isCommon == true
+                }
+                && errorFocus.compactMap(\.itemRef).allSatisfy { ref in
+                    registeredItems.first { $0.ref == ref }?.isCommon == true
+                }
+                && pendingFocus.contains(.details) && errorFocus.contains(.menu),
+            "확인중=\(pendingStatus) 오류=\(errorStatus) 복구=\(recovered) · 오류 초점=\(errorFocus.map(\.label).joined(separator: ","))"
+        ))
+
+        // 8e-4. 프로젝트 항목이 화면에 없으면(오류) 상세 보기를 열어도 프로젝트 항목을 실행 대상으로 넣지 않는다.
+        let errorDetailsFocus = DockFocusPlan.controls(
+            display: registeredDisplay, layout: layout, allItems: registeredItems,
+            detailsVisible: true, panelStatus: errorStatus
+        )
+        results.append(check(
+            "표시: 오류 상태에서는 프로젝트 항목을 키보드 목록에 넣지 않는다(공통은 유지)",
+            !errorDetailsFocus.contains(.projectAdd)
+                && !errorDetailsFocus.contains(.projectOpenFolder)
+                && !errorDetailsFocus.contains(.registerProject)
+                && errorDetailsFocus.contains(where: { control in
+                    if case .item(let ref) = control { return ref.scopeID == "common" }
+                    return false
+                }),
+            "오류(상세 열림) 초점=\(errorDetailsFocus.map(\.label).joined(separator: ","))"
+        ))
+
         // 8f. 공통 항목이 **전부 밀려** `display.common`이 비어도 화면에는 `+N` 타일이 있으므로
         //     키보드로도 그 타일에 갈 수 있어야 한다(계획과 화면의 구성요소 판단이 같아야 한다).
         var tight = layout
@@ -1174,8 +1226,7 @@ public enum SelfTest {
             display: zeroCommon,
             layout: tight,
             allItems: zeroCommonAll,
-            detailsVisible: false,
-            canActOnPath: true
+            detailsVisible: false
         )
         results.append(check(
             "표시: 공통이 전부 밀려도 화면의 +N 타일을 키보드로 고를 수 있다",
@@ -1195,10 +1246,10 @@ public enum SelfTest {
             screenWidth: screen
         )
         let cardFocusClosed = DockFocusPlan.controls(
-            display: cardShort, layout: manyTimers, allItems: [], detailsVisible: false, canActOnPath: true
+            display: cardShort, layout: manyTimers, allItems: [], detailsVisible: false
         )
         let cardFocusOpen = DockFocusPlan.controls(
-            display: cardShort, layout: manyTimers, allItems: [], detailsVisible: true, canActOnPath: true
+            display: cardShort, layout: manyTimers, allItems: [], detailsVisible: true
         )
         let hiddenCardID = manyTimers.cards.last!.id
         results.append(check(
@@ -2547,6 +2598,48 @@ public enum SelfTest {
 
     private static func cmuxChecks() -> [CheckResult] {
         var results: [CheckResult] = []
+        do {
+            // CLI 오류 분류: **실행 파일 없음·실행 실패·연결 거부·시간 초과를 서로 다르게** 다룬다.
+            let notFound = CmuxCLIClient.classify(stderr: "env: cmux: No such file or directory", status: 127)
+            let notRunning = CmuxCLIClient.classify(stderr: "Error: No live cmux socket found. Tried: ...", status: 0)
+            let refused = CmuxCLIClient.classify(stderr: "Error: Connection refused", status: 3)
+            let other = CmuxCLIClient.classify(stderr: "boom", status: 9)
+            let timedOut = CmuxQueryError.timedOut
+            results.append(check(
+                "cmux: CLI 오류를 실행 파일 없음·미실행·거부·기타로 구분한다",
+                notFound == .cliNotFound(searched: [])
+                    && notRunning == .notRunning
+                    && refused == .refused(message: "Error: Connection refused")
+                    && other == .failed(status: 9, message: "boom")
+                    && notFound.connectionStatus == .unavailable
+                    && notRunning.connectionStatus == .unavailable
+                    && refused.connectionStatus == .refused
+                    && timedOut.connectionStatus == .unavailable,
+                "없음=\(notFound.diagnosticText(appName: "cmux")) · 미실행=\(notRunning.diagnosticText(appName: "cmux")) · 거부=\(refused.connectionStatus.rawValue)"
+            ))
+        }
+
+        do {
+            // 실행 파일 탐색: 주입 → 환경 변수 → 설치본 후보 → PATH 조회 순서.
+            let existing: (String) -> Bool = { $0 == "/opt/homebrew/bin/cmux" || $0 == "/injected/cmux" }
+            let injected = CmuxCLIResolver.resolve(explicit: "/injected/cmux", environment: [:], isExecutable: existing)
+            let fromEnvironment = CmuxCLIResolver.resolve(
+                explicit: nil,
+                environment: ["PANEDOCK_CMUX_CLI": "/injected/cmux"],
+                isExecutable: existing
+            )
+            let fromCandidates = CmuxCLIResolver.resolve(explicit: nil, environment: [:], isExecutable: existing)
+            let fallback = CmuxCLIResolver.resolve(explicit: nil, environment: [:], isExecutable: { _ in false })
+            results.append(check(
+                "cmux: 실행 파일을 주입·환경 변수·설치본 후보 순서로 찾고, 없으면 PATH 조회로 넘긴다",
+                injected == "/injected/cmux"
+                    && fromEnvironment == "/injected/cmux"
+                    && fromCandidates == "/opt/homebrew/bin/cmux"
+                    && fallback == "cmux"
+                    && CmuxCLIResolver.candidates().contains { $0.hasPrefix("/usr/local/bin") || $0.hasPrefix("/opt/homebrew/bin") },
+                "주입=\(injected) 환경=\(fromEnvironment) 후보=\(fromCandidates) 폴백=\(fallback) 후보수=\(CmuxCLIResolver.candidates().count)"
+            ))
+        }
 
         // A: workspace A → B 전환. 새 workspace·surface 식별자와 새 경로가 함께 바뀐다.
         do {

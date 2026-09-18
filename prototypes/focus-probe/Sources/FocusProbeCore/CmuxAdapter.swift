@@ -59,7 +59,7 @@ public struct CmuxAdapter: TerminalHostAdapter {
     private let frontmost: FrontmostAppChecking
 
     public init(
-        client: CmuxQuerying = CmuxCLIClient(),
+        client: CmuxQuerying = CmuxCLIClient(executable: CmuxCLIResolver.resolve()),
         frontmost: FrontmostAppChecking = WorkspaceFrontmostAppChecker(),
         hostAppID: String = "cmux",
         machineID: String = "local"
@@ -188,36 +188,79 @@ public extension FrontmostAppChecking {
 
 /// 조회 실패. 연결 상태 표시로 바로 매핑된다.
 public enum CmuxQueryError: Error, Equatable, TerminalHostQueryFailure {
-    /// cmux CLI를 찾을 수 없다.
-    case cliUnavailable
+    /// cmux CLI를 찾을 수 없다(설치 위치를 찾지 못했거나 `env`가 실행 파일을 못 찾음).
+    case cliNotFound(searched: [String])
+    /// CLI는 찾았지만 실행 자체가 실패했다(권한·손상 등).
+    case launchFailed(String)
     /// 소켓이 없다 → cmux가 실행 중이 아니다.
     case notRunning
     /// 시간 안에 응답이 없다.
     case timedOut
     /// 응답을 해석할 수 없다.
     case malformed(String)
+    /// 소켓 연결이 거부됐다.
+    case refused(message: String)
     case failed(status: Int32, message: String)
 
     public var connectionStatus: ConnectionStatus {
         switch self {
-        case .cliUnavailable: return .unavailable
-        case .notRunning: return .unavailable
-        case .timedOut: return .unavailable
+        case .cliNotFound, .launchFailed, .notRunning, .timedOut: return .unavailable
         case .malformed: return .incompatible
-        case .failed: return .refused
+        case .refused, .failed: return .refused
         }
     }
 
     public func diagnosticText(appName: String, requirement: String? = nil) -> String {
         switch self {
-        case .cliUnavailable: return "\(appName) CLI not found"
+        case .cliNotFound(let searched):
+            // 찾아본 위치는 **개수와 대표 경로만** 남긴다(환경 전체를 출력하지 않는다).
+            let sample = searched.prefix(3).joined(separator: ", ")
+            return "\(appName) CLI not found (tried \(searched.count): \(sample))"
+        case .launchFailed(let reason): return "\(appName) CLI could not start: \(reason)"
         case .notRunning: return "\(appName) is not running (socket not found)"
         case .timedOut: return "\(appName) did not answer in time"
         case .malformed(let text): return "\(appName) returned an unreadable answer: \(text)"
+        case .refused(let message): return "\(appName) refused the connection: \(message)"
         case .failed(let status, let message):
             let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? "\(appName) query failed (exit \(status))" : trimmed
         }
+    }
+}
+
+/// cmux CLI 실행 파일을 찾는다.
+///
+/// GUI 앱은 셸 PATH(`/opt/homebrew/bin` 등)를 물려받지 않으므로 **설치 위치를 직접 찾아본다.**
+/// 특정 사용자의 홈브루 경로에 고정하지 않는다 — 아래 후보를 순서대로 확인하고, 없으면 PATH 조회로 넘어간다.
+public enum CmuxCLIResolver {
+    /// 설치본 후보(존재하는 첫 항목을 쓴다).
+    public static func candidates(home: String = NSHomeDirectory()) -> [String] {
+        [
+            "/opt/homebrew/bin/cmux",
+            "/usr/local/bin/cmux",
+            "\(home)/.local/bin/cmux",
+            "\(home)/bin/cmux",
+            "/Applications/cmux.app/Contents/Resources/bin/cmux",
+            "\(home)/Applications/cmux.app/Contents/Resources/bin/cmux",
+        ]
+    }
+
+    /// 명시적 주입 → 설치본 후보 → PATH 조회(`env`) 순서로 실행 파일을 정한다.
+    ///
+    /// - Parameter explicit: 호출자가 지정한 경로(진단용 플래그·테스트 주입). 존재하면 그대로 쓴다.
+    public static func resolve(
+        explicit: String? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        isExecutable: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) }
+    ) -> String {
+        if let explicit, !explicit.isEmpty, isExecutable(explicit) { return explicit }
+        // 환경 변수로 지정한 경로도 존중한다(PATH를 못 쓰는 환경을 위한 우회).
+        if let override = environment["PANEDOCK_CMUX_CLI"], !override.isEmpty, isExecutable(override) {
+            return override
+        }
+        for candidate in candidates() where isExecutable(candidate) { return candidate }
+        // 마지막으로 PATH 조회에 맡긴다(셸에서 실행할 때와 같은 동작).
+        return "cmux"
     }
 }
 
@@ -334,7 +377,7 @@ public struct CmuxCLIClient: CmuxQuerying {
     public let executable: String
     public let timeout: TimeInterval
 
-    public init(executable: String = "cmux", timeout: TimeInterval = 4.0) {
+    public init(executable: String = CmuxCLIResolver.resolve(), timeout: TimeInterval = 4.0) {
         self.executable = executable
         self.timeout = timeout
     }
@@ -351,23 +394,56 @@ public struct CmuxCLIClient: CmuxQuerying {
     }
 
     /// 읽기 명령 하나를 실행한다. 인자는 배열로 넘겨 셸 해석을 거치지 않는다.
+    ///
+    /// **출력은 파이프가 아니라 임시 파일로 받는다.** cmux CLI는 stdout/stderr가 파이프이면
+    /// 응답을 내놓지 않고 멈춘다(실측: 파이프=타임아웃, 파일·`/dev/null`=0.02~0.04초). 같은 실행 파일·인자·
+    /// 환경에서도 이 차이만으로 갈리므로, 실행 경계에서 파이프를 쓰지 않는다.
     private func run(_ arguments: [String]) throws -> String {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = [executable] + arguments
+        if executable.hasPrefix("/") {
+            // 설치본·주입 경로를 그대로 실행한다(GUI PATH에 의존하지 않는다).
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.arguments = arguments
+        } else {
+            // PATH 조회가 필요할 때만 `env`를 거친다.
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = [executable] + arguments
+        }
         var environment = ProcessInfo.processInfo.environment
         environment["CMUX_QUIET"] = "1"   // 안내 문구를 stderr에서 줄인다(값은 쓰지 않는다)
         process.environment = environment
+        // GUI 앱의 작업 디렉터리(`/`)가 아니라 사용자의 홈에서 실행한다(셸 실행과 같은 조건).
+        process.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory())
 
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = errPipe
+        let directory = FileManager.default.temporaryDirectory
+        let stamp = UUID().uuidString
+        let outURL = directory.appendingPathComponent("cmux-out-\(stamp).txt")
+        let errURL = directory.appendingPathComponent("cmux-err-\(stamp).txt")
+        guard FileManager.default.createFile(atPath: outURL.path, contents: nil),
+              FileManager.default.createFile(atPath: errURL.path, contents: nil),
+              let outHandle = FileHandle(forWritingAtPath: outURL.path),
+              let errHandle = FileHandle(forWritingAtPath: errURL.path) else {
+            throw CmuxQueryError.launchFailed("임시 출력 파일을 만들 수 없습니다")
+        }
+        process.standardOutput = outHandle
+        process.standardError = errHandle
+        process.standardInput = FileHandle.nullDevice
+        defer {
+            try? FileManager.default.removeItem(at: outURL)
+            try? FileManager.default.removeItem(at: errURL)
+        }
 
         do {
             try process.run()
         } catch {
-            throw CmuxQueryError.cliUnavailable
+            let reason = (error as NSError).localizedDescription
+            // 실행 파일이 없으면 "설치본을 찾지 못했다"로 구분한다(일반 실패로 뭉뚱그리지 않는다).
+            if (error as NSError).code == NSFileNoSuchFileError
+                || (error as NSError).code == ENOENT
+                || reason.lowercased().contains("no such file") {
+                throw CmuxQueryError.cliNotFound(searched: [executable])
+            }
+            throw CmuxQueryError.launchFailed(reason)
         }
 
         // 무한 대기를 피한다. AppleScript가 응답 없이 멈추는 것을 실제로 관측했으므로
@@ -381,10 +457,8 @@ public struct CmuxCLIClient: CmuxQuerying {
             throw CmuxQueryError.timedOut
         }
 
-        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-        let stdout = String(decoding: outData, as: UTF8.self)
-        let stderr = String(decoding: errData, as: UTF8.self)
+        let stdout = (try? String(contentsOf: outURL, encoding: .utf8)) ?? ""
+        let stderr = (try? String(contentsOf: errURL, encoding: .utf8)) ?? ""
 
         guard process.terminationStatus == 0 else {
             throw Self.classify(stderr: stderr, status: process.terminationStatus)
@@ -392,11 +466,17 @@ public struct CmuxCLIClient: CmuxQuerying {
         return stdout
     }
 
-    /// CLI 실패를 분류한다. 소켓이 없으면 "실행 중이 아님"이다.
-    static func classify(stderr: String, status: Int32) -> CmuxQueryError {
+    /// CLI 실패를 분류한다. **실행 파일 없음·실행 실패·연결 거부·시간 초과를 서로 다르게** 다룬다.
+    public static func classify(stderr: String, status: Int32) -> CmuxQueryError {
         let lowered = stderr.lowercased()
-        if lowered.contains("socket not found") || lowered.contains("not running") {
+        if status == 127 || lowered.contains("no such file or directory") || lowered.contains("command not found") {
+            return .cliNotFound(searched: [])
+        }
+        if lowered.contains("socket not found") || lowered.contains("not running") || lowered.contains("no live cmux socket") {
             return .notRunning
+        }
+        if lowered.contains("connection refused") || lowered.contains("refused") {
+            return .refused(message: stderr.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         return .failed(status: status, message: stderr.trimmingCharacters(in: .whitespacesAndNewlines))
     }

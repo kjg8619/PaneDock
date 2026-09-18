@@ -385,14 +385,15 @@ public enum DockFocusPlan {
     ///
     /// - 구성요소 순서(`layout.order`)대로 그 안의 조작을 순회한다: 항목 타일 → (카드면)타이머 버튼 →
     ///   밀린 항목·카드 타일 → 프로젝트 영역의 **추가**(등록) 또는 **폴더 열기·프로젝트로 등록**(미등록).
-    /// - `canActOnPath`가 false면(경로 확인 중·오류) 화면에 등록·폴더 열기 버튼이 없으므로 초점 목록에도 넣지 않는다.
+    /// - `panelStatus`가 `.pending`·`.failure`면 화면에 프로젝트 타일도 버튼도 없으므로 **초점 목록에도 넣지 않는다**.
+    ///   공통 앱·카드는 그대로 순회한다(작업 상태와 독립).
     /// - 그 뒤에 화면 오른쪽 조작(상태 점 → `⋯` 메뉴), 상세 보기가 열려 있으면 숨기기·종료가 온다.
     public static func controls(
         display: DockDisplay,
         layout: DockLayout,
         allItems: [DockItemTarget],
         detailsVisible: Bool,
-        canActOnPath: Bool
+        panelStatus: DockPanelStatus = .registered
     ) -> [DockFocusControl] {
         var controls: [DockFocusControl] = []
         // 상세 보기가 닫혀 있으면 **화면에 그린 항목만** 돈다(밀린 항목은 타일로 알리고 그 타일만 순회한다).
@@ -421,15 +422,19 @@ public enum DockFocusPlan {
                 }
                 if !detailsVisible, display.cardHidden > 0 { controls.append(.overflow(.cards)) }
             case .project:
-                if display.projectRegistered {
+                switch panelStatus {
+                case .registered:
                     controls.append(contentsOf: projectRefs.map { .item($0) })
                     if !detailsVisible, display.projectHidden > 0 { controls.append(.overflow(.project)) }
                     // 화면에 항상 있는 **추가** 타일.
                     controls.append(.projectAdd)
-                } else if canActOnPath {
+                case .unregistered:
                     // 화면의 두 버튼(폴더 열기 · 프로젝트로 등록)과 같은 순서.
                     controls.append(.projectOpenFolder)
                     controls.append(.registerProject)
+                case .pending, .failure:
+                    // 화면에 프로젝트 타일·버튼이 없다 → 초점 목록에도 없다.
+                    break
                 }
             }
         }
@@ -454,12 +459,13 @@ public enum DockPanelStatus: Equatable, Sendable {
     /// 경로가 없거나 조회에 실패했다.
     case failure
 
+    /// **작업 상태가 먼저다.** 프로젝트 이름을 알고 있다는 이유로 정상 상태처럼 표시하지 않는다
+    /// (경로 정보가 남은 채 연결이 끊기면 확인 중·오류로 보여 주고, 프로젝트 이름은 참고 정보로만 남긴다).
     public static func from(state: DockState, hasProject: Bool) -> DockPanelStatus {
-        if hasProject { return .registered }
         switch state.display {
-        case .tracked, .held, .locked: return .unregistered
         case .pending: return .pending
         case .error: return .failure
+        case .tracked, .held, .locked: return hasProject ? .registered : .unregistered
         }
     }
 }
