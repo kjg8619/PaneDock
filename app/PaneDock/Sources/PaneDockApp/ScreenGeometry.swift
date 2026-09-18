@@ -5,6 +5,7 @@ import Foundation
 /// 화면 배치를 코어의 순수 계산에 넘겨주는 얇은 계층.
 ///
 /// 다중 화면 동시 표시나 전체화면 대응은 하지 않는다. 저장된 좌표가 지금 보이는지만 판정한다.
+/// **창 크기는 표시 목록(`DockModel.display`)이 정한다** — 여기서 다시 계산하지 않는다.
 enum ScreenGeometry {
     /// Dock과 메뉴 막대를 제외한 영역들.
     static var visibleFrames: [CGRect] {
@@ -27,19 +28,6 @@ enum ScreenGeometry {
             size: size,
             screens: visibleFrames,
             fallback: fallbackFrame
-        )
-    }
-
-    /// 가로형 Dock 창의 크기. 화면 너비와 항목 수로 정해진다.
-    ///
-    /// 기본 위치는 **화면 하단**이다(`WindowPlacement.defaultOrigin`). macOS Dock과 메뉴 막대는
-    /// `visibleFrame`에서 이미 제외되므로 그 위에 놓인다.
-    static func dockBarSize(linkCount: Int, detailsVisible: Bool, barHeight: CGFloat = DockBarLayout.barHeight) -> CGSize {
-        let available = fallbackFrame.width
-        let visibleLinks = DockBarLayout.linkBudget(total: linkCount, availableWidth: available).visible
-        return CGSize(
-            width: DockBarLayout.barWidth(visibleLinkCount: visibleLinks, availableWidth: available),
-            height: DockBarLayout.windowHeight(detailsVisible: detailsVisible, barHeight: barHeight)
         )
     }
 }

@@ -9,6 +9,8 @@ public enum DockBarLayout {
     /// 바 높이. 첫 시안은 64~80pt 범위로 잡고 가독성·클릭 영역을 보고 조정한다.
     /// 승인된 구성형 배치의 기본 높이(104pt). 크기 선택은 이 값을 기준으로 움직인다.
     public static let widgetBarHeight: CGFloat = 104
+    /// 상세 보기 높이(열렸을 때 바 위로 펼쳐진다).
+    public static let detailsHeight: CGFloat = 300
     /// 공통 앱 타일 / 프로젝트 항목 타일.
     public static let appTileSize: CGFloat = 68
     public static let projectTileSize: CGFloat = 48
@@ -17,37 +19,51 @@ public enum DockBarLayout {
     /// 구성형 화면의 조각별 크기·간격(승인된 위젯 규격).
     public static let widgetPadding: CGFloat = 16
     public static let widgetGap: CGFloat = 12
-    public static let appTileStride: CGFloat = appTileSize + 8
-    public static let projectTileStride: CGFloat = projectTileSize + 8
-    public static let clockCardWidth: CGFloat = 104
+    /// 타일 사이 간격(앱 68pt·프로젝트 48pt 공통).
+    public static let tileGap: CGFloat = 8
+    /// 카드 사이 간격.
+    public static let cardGap: CGFloat = 8
+    /// 오른쪽 조작(상태 점·⋯ 메뉴)과 가짜 모드 표시의 폭. **바 기하 계산에 포함**한다
+    /// (포함하지 않으면 그만큼 내용이 잘린다 — V18.5에서 오른쪽 조작이 밀려난 것을 화면으로 확인).
+    public static let stateDotWidth: CGFloat = 30
+    public static let menuButtonWidth: CGFloat = 38
+    public static let fakeBadgeWidth: CGFloat = 44
+    public static let controlGap: CGFloat = 6
+    public static let minimumTrailingGap: CGFloat = 6
+    public static let appTileStride: CGFloat = appTileSize + tileGap
+    public static let projectTileStride: CGFloat = projectTileSize + tileGap
+    /// 시계 카드는 **아날로그 시계 + 큰 시간 + 날짜**가 함께 들어가야 한다.
+    /// 104pt에서는 날짜가 잘려 "9월…"까지만 보였다(화면 확인). 승인 시안의 내용 폭에 맞춘다.
+    public static let clockCardWidth: CGFloat = 152
     public static let timerCardWidth: CGFloat = 168
+
+    /// 구성요소 사이 구분선 하나가 차지하는 폭(선 + 양쪽 간격).
+    public static let separatorStride: CGFloat = 1 + widgetGap * 2
+
+    /// 오른쪽 조작 묶음의 폭(최소 여백 포함).
+    ///
+    /// 묶음은 `[여백][가짜 배지?][상태 점][⋯ 메뉴]`이고 **사이 간격까지** 포함한다.
+    public static func trailingControlsWidth(showsFakeBadge: Bool) -> CGFloat {
+        let controls = (showsFakeBadge ? 1 : 0) + 2   // [가짜 배지] + 상태 점 + ⋯ 메뉴
+        let gaps = (controls + 1) - 1                 // 여백 + 조작들 사이
+        return minimumTrailingGap
+            + (showsFakeBadge ? fakeBadgeWidth : 0)
+            + stateDotWidth
+            + menuButtonWidth
+            + CGFloat(gaps) * controlGap
+    }
 
     /// 구성형 화면의 바 너비.
     ///
     /// **저장된 배치가 순서와 고정 폭(프로젝트 영역)을 정한다.** 항목 수로 다시 계산하지 않으므로
     /// 프로젝트 항목이 2개든 8개든 **공통 영역의 위치가 밀리지 않는다**(영역 안에서 넘침을 처리한다).
+    /// 공간이 모자라는 경우의 판단은 `barFit` 한 곳에서만 한다.
     public static func widgetBarWidth(
         layout: DockLayout,
         commonItemCount: Int,
         screenWidth: CGFloat
     ) -> CGFloat {
-        var width = widgetPadding * 2
-        for (index, component) in layout.order.enumerated() {
-            if index > 0 { width += widgetGap }
-            switch component {
-            case .common:
-                width += CGFloat(max(0, commonItemCount)) * appTileStride
-            case .cards:
-                for card in layout.cards {
-                    width += card.kind == .clock ? clockCardWidth : timerCardWidth
-                }
-                width += CGFloat(max(0, layout.cards.count - 1)) * 8
-            case .project:
-                width += CGFloat(layout.projectAreaWidth)
-            }
-        }
-        let ceiling = min(maximumBarWidth, max(minimumBarWidth, screenWidth - screenMargin * 2))
-        return min(max(width, minimumBarWidth), ceiling)
+        barFit(layout: layout, commonItemCount: commonItemCount, screenWidth: screenWidth).barWidth
     }
 
     /// 프로젝트 영역에 할당된 너비 안에 들어가는 타일 수와, 넘쳐서 `더보기`로 보낼 수.
@@ -59,60 +75,21 @@ public enum DockBarLayout {
         return (visible, tileCount - visible)
     }
 
-    public static let barHeight: CGFloat = 76
-    /// 상세 보기 높이(열렸을 때 바 위로 펼쳐진다).
-    public static let detailsHeight: CGFloat = 300
     /// 바 최소 너비. 항목이 없어도 주요 조작이 뭉개지지 않게 한다.
     public static let minimumBarWidth: CGFloat = 460
-
     /// 자동 접기 상태에서 남기는 **호출 손잡이** 크기.
     /// 화면 가장자리로 숨기는 방식이 아니라, 지금 위치에 작게 남아 마우스를 받는 영역이다.
     public static let handleWidth: CGFloat = 168
     public static let handleHeight: CGFloat = 30
-    /// 바 최대 너비. 이보다 넓어지면 화면을 넘지 않도록 줄이고, 넘치는 링크는 더보기로 보낸다.
-    public static let maximumBarWidth: CGFloat = 1_100
+    /// 바 최대 너비. 이보다 넓어지면 화면을 넘지 않도록 줄이고, 넘치는 항목은 영역 안에서 밀어낸다.
+    /// V18 위젯 배치(앱 3 + 카드 2 + 영역 360)가 약 1090pt라 기존 1100으로는 여유가 없었다.
+    /// 화면 여백(`screenMargin`)이 실질 상한이며, 이 값은 그보다 좁은 화면을 위한 안전 상한이다.
+    public static let maximumBarWidth: CGFloat = 1_240
     /// 화면 가장자리에서 남길 여백(양쪽 합계).
     public static let screenMargin: CGFloat = 48
-    /// 상태 배지·가짜 표시·아이콘 버튼·구분선·여백이 차지하는 **고정 영역**의 대략 너비.
-    ///
-    /// V15에서 항목 칩이 늘고 가짜 모드 표시가 바에 들어오면서 이 값이 커졌다.
-    /// 실제보다 작게 잡으면 이름·배지가 압축돼 글자가 사라진다(V14·V15에서 스크린샷으로 확인).
-    public static let fixedWidth: CGFloat = 448
-    /// 링크 칩 하나의 대략 너비(아이콘 + 짧은 이름).
-    ///
-    /// **보수적으로 잡는다.** 이보다 좁게 잡으면 이름이 긴 칩이 압축돼 라벨이 사라진다
-    /// (V14에서 실제로 그렇게 보이는 것을 스크린샷으로 확인했다 — 아이콘만 남았다).
-    public static let linkChipWidth: CGFloat = 104
-    /// 프로젝트/폴더 영역이 최소한 확보해야 하는 너비. 이보다 좁아지면 이름을 줄여 표시한다.
-    public static let projectAreaMinimumWidth: CGFloat = 190
-
-    /// 지금 화면에서 바가 쓸 수 있는 최대 너비.
-    public static func maximumWidth(visibleFrameWidth: CGFloat) -> CGFloat {
-        let usable = visibleFrameWidth - screenMargin
-        return max(minimumBarWidth, min(maximumBarWidth, usable))
-    }
-
-    /// 인라인으로 보여줄 링크 수와, 더보기로 보낼 개수.
-    ///
-    /// 넘치는 링크를 **조용히 잘라내지 않는다.** 숨긴 개수를 UI가 "+N"으로 알리고,
-    /// 그 항목들은 상세 보기에서 전부 접근할 수 있다.
-    public static func linkBudget(total: Int, availableWidth: CGFloat) -> (visible: Int, hidden: Int) {
-        guard total > 0 else { return (0, 0) }
-        let usable = maximumWidth(visibleFrameWidth: availableWidth)
-        let remaining = usable - fixedWidth - projectAreaMinimumWidth
-        guard remaining > 0 else { return (0, total) }
-        let visible = min(total, Int(remaining / linkChipWidth))
-        return (visible, total - visible)
-    }
-
-    /// 링크 수에 맞춘 바 너비. 항목이 늘어도 최대 너비를 넘지 않는다.
-    public static func barWidth(visibleLinkCount: Int, availableWidth: CGFloat) -> CGFloat {
-        let needed = fixedWidth + projectAreaMinimumWidth + CGFloat(visibleLinkCount) * linkChipWidth
-        return max(minimumBarWidth, min(maximumWidth(visibleFrameWidth: availableWidth), needed))
-    }
 
     /// 창 전체 높이(바 + 상세 보기). 바 높이는 외형 설정에서 온다.
-    public static func windowHeight(detailsVisible: Bool, barHeight: CGFloat = barHeight) -> CGFloat {
+    public static func windowHeight(detailsVisible: Bool, barHeight: CGFloat = widgetBarHeight) -> CGFloat {
         barHeight + (detailsVisible ? detailsHeight : 0)
     }
 }

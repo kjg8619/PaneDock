@@ -25,23 +25,33 @@ struct ItemEditorView: View {
         VStack(alignment: .leading, spacing: 10) {
             header
             Divider()
-            if let draft {
-                HStack(alignment: .top, spacing: 14) {
-                    scopeColumn(draft)
-                    Divider().frame(height: 320)
-                    itemColumn(draft)
+            // 가운데(편집 대상·항목·배치·모양)만 스크롤한다.
+            // **저장·취소는 항상 보여야 한다** — 창이 작을 때 푸터가 잘리면 저장할 수 없다(V18.5에서 화면으로 확인).
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    if let draft {
+                        HStack(alignment: .top, spacing: 14) {
+                            scopeColumn(draft)
+                            Divider().frame(height: 320)
+                            itemColumn(draft)
+                        }
+                    } else {
+                        Text("편집 중인 초안이 없습니다.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                    Divider()
+                    layoutSection
+                    Divider()
+                    appearanceSection
                 }
-            } else {
-                Text("편집 중인 초안이 없습니다.")
-                    .font(.callout).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Divider()
-            appearanceSection
             Divider()
             footer
         }
         .padding(16)
-        .frame(minWidth: 760, minHeight: 560, alignment: .topLeading)
+        .frame(minWidth: 860, minHeight: 560, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     // MARK: - 헤더
@@ -343,6 +353,121 @@ struct ItemEditorView: View {
         }
     }
 
+    // MARK: - 배치 (순서·영역 폭·카드 — 저장 전에는 미리보기)
+
+    private var layoutSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "rectangle.3.group")
+                Text("배치").font(.caption).bold()
+                Text("바꾸면 Dock에 바로 보입니다. 저장을 눌러야 유지됩니다.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                Spacer()
+                if model.layoutIsDirty {
+                    Text("저장하지 않은 배치 변경")
+                        .font(.caption2).foregroundStyle(.orange)
+                }
+            }
+            DockLayoutPreview(model: model)
+            HStack(alignment: .top, spacing: 18) {
+                layoutOrderControls
+                layoutWidthControls
+                layoutCardControls
+            }
+        }
+    }
+
+    /// 공통·카드·프로젝트 영역의 순서. 화면에 보이는 순서를 그대로 바꾼다.
+    private var layoutOrderControls: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("순서").font(.caption2).foregroundStyle(.secondary)
+            ForEach(Array(model.effectiveLayout.order.enumerated()), id: \.element) { index, component in
+                HStack(spacing: 5) {
+                    Text("\(index + 1). \(component.label)").font(.caption).frame(width: 120, alignment: .leading)
+                    Button("↑") { model.editorMoveComponent(component, by: -1) }
+                        .buttonStyle(.bordered)
+                        .disabled(index == 0)
+                        .help("\(component.label) 구역을 한 칸 앞으로")
+                    Button("↓") { model.editorMoveComponent(component, by: 1) }
+                        .buttonStyle(.bordered)
+                        .disabled(index == model.effectiveLayout.order.count - 1)
+                        .help("\(component.label) 구역을 한 칸 뒤로")
+                }
+            }
+        }
+        .frame(width: 230, alignment: .leading)
+    }
+
+    /// 프로젝트 영역 폭. **항목 수와 무관하게 유지되는 값**이다.
+    private var layoutWidthControls: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("프로젝트 영역 폭").font(.caption2).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Button("−") { model.editorSetProjectAreaWidth(model.effectiveLayout.projectAreaWidth - 20) }
+                    .buttonStyle(.bordered)
+                    .disabled(model.effectiveLayout.projectAreaWidth <= DockLayout.minimumProjectAreaWidth)
+                    .help("영역 폭을 20pt 줄입니다")
+                Slider(
+                    value: Binding(
+                        get: { model.effectiveLayout.projectAreaWidth },
+                        set: { model.editorSetProjectAreaWidth($0) }
+                    ),
+                    in: DockLayout.minimumProjectAreaWidth...DockLayout.maximumProjectAreaWidth,
+                    step: 20
+                )
+                .frame(width: 120)
+                Button("＋") { model.editorSetProjectAreaWidth(model.effectiveLayout.projectAreaWidth + 20) }
+                    .buttonStyle(.bordered)
+                    .disabled(model.effectiveLayout.projectAreaWidth >= DockLayout.maximumProjectAreaWidth)
+                    .help("영역 폭을 20pt 늘립니다")
+                Text("\(Int(model.effectiveLayout.projectAreaWidth))pt")
+                    .font(.caption).monospacedDigit()
+                    .frame(width: 48, alignment: .leading)
+            }
+            Text("항목이 많아도 이 폭은 그대로이고, 넘치는 항목은 영역 안에서 `+N`으로 밀립니다.")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            if model.display.isSpaceShort {
+                Text("지금 배치가 화면보다 넓어 영역이 \(Int(model.display.projectAreaWidth))pt로 줄어 있습니다.")
+                    .font(.caption2).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(width: 240, alignment: .leading)
+    }
+
+    /// 카드 추가·제거·순서. 같은 종류를 여러 개 두어도 id로 구분한다.
+    private var layoutCardControls: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text("카드").font(.caption2).foregroundStyle(.secondary)
+                ForEach(DockCardKind.allCases, id: \.self) { kind in
+                    Button("\(kind.label) 추가") { model.editorAddCard(kind) }
+                        .buttonStyle(.bordered)
+                }
+            }
+            if model.effectiveLayout.cards.isEmpty {
+                Text("카드가 없습니다. 추가하면 바의 카드 구역에 나타납니다.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
+            ForEach(Array(model.effectiveLayout.cards.enumerated()), id: \.element.id) { index, card in
+                HStack(spacing: 5) {
+                    Text("\(card.kind.label) (\(card.id))").font(.caption).frame(width: 150, alignment: .leading)
+                    Button("↑") { model.editorMoveCard(card.id, by: -1) }
+                        .buttonStyle(.bordered)
+                        .disabled(index == 0)
+                    Button("↓") { model.editorMoveCard(card.id, by: 1) }
+                        .buttonStyle(.bordered)
+                        .disabled(index == model.effectiveLayout.cards.count - 1)
+                    Button("제거") { model.editorRemoveCard(card.id) }
+                        .buttonStyle(.bordered)
+                        .help("카드를 바에서 뺍니다. 실행 중이던 타이머 상태는 앱이 실행 중인 동안 유지됩니다")
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     // MARK: - 푸터
 
     private var footer: some View {
@@ -361,12 +486,171 @@ struct ItemEditorView: View {
             Spacer()
             Button("저장") { model.saveAll() }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.draft == nil)
-                .help("편집한 구성을 디스크에 기록합니다")
+                .disabled(model.draft == nil && !model.layoutIsDirty && model.previewAppearance == nil)
+                .help("편집한 구성·배치·모양을 디스크에 기록합니다(바뀐 파일만 씁니다)")
             Button("취소") { model.cancelEditing() }
                 .buttonStyle(.bordered)
                 .help("아무것도 저장하지 않고 닫습니다")
         }
+    }
+}
+
+/// 배치 미리보기. **저장 전 배치로 실제 바와 같은 계산**(`DockDisplayBuilder`)을 써서
+/// 순서·영역 폭·카드·밀린 항목 수를 그대로 보여준다.
+struct DockLayoutPreview: View {
+    @ObservedObject var model: DockModel
+
+    private let previewWidth: CGFloat = 620
+
+    private var display: DockDisplay {
+        DockDisplayBuilder.make(
+            resolution: model.resolution,
+            layout: model.effectiveLayout,
+            screenWidth: ScreenGeometry.fallbackFrame.width,
+            showsFakeBadge: model.isFake
+        )
+    }
+
+    private var scale: CGFloat {
+        let width = max(display.barWidth, 1)
+        return previewWidth / width
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                ForEach(renderedComponents, id: \.self) { component in
+                    if component != renderedComponents.first { separator }
+                    componentBlock(component)
+                }
+                Spacer(minLength: 0)
+                Text("⋯")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, DockBarLayout.widgetPadding * scale)
+            .frame(width: previewWidth, height: max(34, DockBarLayout.widgetBarHeight * scale), alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.primary.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+            )
+
+            Text(caption)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var renderedComponents: [DockComponent] {
+        model.effectiveLayout.order.filter { component in
+            switch component {
+            case .common: return !model.resolution.commonItems.isEmpty
+            case .cards: return !model.effectiveLayout.cards.isEmpty
+            case .project: return true
+            }
+        }
+    }
+
+    private var separator: some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.15))
+            .frame(width: 1, height: max(18, 52 * scale))
+    }
+
+    @ViewBuilder
+    private func componentBlock(_ component: DockComponent) -> some View {
+        switch component {
+        case .common:
+            HStack(spacing: DockBarLayout.tileGap * scale) {
+                ForEach(0..<min(model.display.common.count, 8), id: \.self) { index in
+                    block(
+                        width: DockBarLayout.appTileSize * scale,
+                        height: DockBarLayout.appTileSize * scale,
+                        radius: 6,
+                        label: shortLabel(model.display.common[index].item.name)
+                    )
+                }
+                if model.display.commonHidden > 0 {
+                    block(
+                        width: DockBarLayout.appTileSize * scale,
+                        height: DockBarLayout.appTileSize * scale,
+                        radius: 6,
+                        label: "+\(model.display.commonHidden)"
+                    )
+                }
+            }
+        case .cards:
+            HStack(spacing: DockBarLayout.cardGap * scale) {
+                ForEach(model.effectiveLayout.cards) { card in
+                    block(
+                        width: (card.kind == .clock ? DockBarLayout.clockCardWidth : DockBarLayout.timerCardWidth) * scale,
+                        height: DockBarLayout.cardHeight * scale,
+                        radius: 6,
+                        label: card.kind == .clock ? "시계" : "타이머"
+                    )
+                }
+            }
+        case .project:
+            HStack(spacing: DockBarLayout.tileGap * scale) {
+                if model.resolution.hasProject {
+                    ForEach(0..<min(model.display.project.count, 5), id: \.self) { index in
+                        block(
+                            width: DockBarLayout.projectTileSize * scale,
+                            height: DockBarLayout.projectTileSize * scale,
+                            radius: 5,
+                            label: shortLabel(model.display.project[index].item.name)
+                        )
+                    }
+                    if model.display.projectHidden > 0 {
+                        block(
+                            width: DockBarLayout.projectTileSize * scale,
+                            height: DockBarLayout.projectTileSize * scale,
+                            radius: 5,
+                            label: "⋯"
+                        )
+                    }
+                } else {
+                    Text("미등록 경로").font(.caption2).foregroundStyle(.orange)
+                }
+            }
+            .padding(.horizontal, 8 * scale)
+            .frame(width: CGFloat(display.projectAreaWidth) * scale, height: DockBarLayout.cardHeight * scale, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(0.03))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(
+                        model.resolution.hasProject ? Color.primary.opacity(0.25) : Color.orange.opacity(0.5),
+                        style: StrokeStyle(lineWidth: 1, dash: [3, 2])
+                    )
+            )
+        }
+    }
+
+    private func block(width: CGFloat, height: CGFloat, radius: CGFloat, label: String) -> some View {
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(Color.primary.opacity(0.10))
+            .frame(width: max(8, width), height: max(8, height))
+            .overlay(
+                Text(label).font(.system(size: 8)).foregroundStyle(.secondary).lineLimit(1)
+            )
+    }
+
+    private func shortLabel(_ name: String) -> String {
+        name.count <= 4 ? name : String(name.prefix(4))
+    }
+
+    private var caption: String {
+        "바 \(Int(display.barWidth))pt · 프로젝트 영역 \(Int(display.projectAreaWidth))pt · "
+            + "보이는 항목 \(display.visibleItemCount)개 · 숨김 \(display.hiddenItemCount)개"
+            + (display.isSpaceShort ? " · 공간 부족(영역을 줄였습니다)" : "")
     }
 }
 

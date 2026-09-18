@@ -599,12 +599,13 @@ public enum SelfTest {
         results.append(contentsOf: hostRouterChecks())
         results.append(contentsOf: hostBoundaryChecks())
         results.append(contentsOf: candidatePathChecks())
-        results.append(contentsOf: dockBarChecks())
         results.append(contentsOf: itemEditorChecks())
         results.append(contentsOf: editorFlowChecks())
         results.append(contentsOf: appearanceChecks())
         results.append(contentsOf: collapseAndSaveChecks())
         results.append(contentsOf: widgetLayoutChecks())
+        results.append(contentsOf: widgetDisplayChecks())
+        results.append(contentsOf: focusCardChecks())
         return results
     }
 
@@ -822,6 +823,302 @@ public enum SelfTest {
             "구성형: 화면이 좁으면 바 너비가 화면 안으로 제한된다",
             narrow <= 900 && narrow >= DockBarLayout.minimumBarWidth,
             "width=\(Int(narrow))"
+        ))
+
+        return results
+    }
+
+    // MARK: - 표시 목록 단일화 (V18.5)
+
+    /// 표시 목록(`DockDisplay`)이 화면·숨김 수·키보드의 **유일한 기준**인지 값을 고정한다.
+    private static func widgetDisplayChecks() -> [CheckResult] {
+        var results: [CheckResult] = []
+        let screen: CGFloat = 1512
+        let layout = DockLayout.default
+
+        // 1. 회귀: 화면 1512 · 공통 3 · 프로젝트 2 · 영역 360에서 화면과 모델이 **같은 수**를 본다.
+        //    (이전에는 View가 linkBudget으로 4, Model이 projectTileBudget으로 5로 갈라졌다.)
+        let regression = DockDisplayBuilder.make(
+            resolution: makeResolution(common: 3, project: 2),
+            layout: layout,
+            screenWidth: screen
+        )
+        // 승인 배치의 필요 폭: 여백 32 + 공통 3타일(220) + 구분선 2개(50) + 카드(152+8+168) + 영역 360
+        //                    + 오른쪽 조작(86) + 사이 간격 12
+        let expectedWidth = 32 + 220 + 50 + 328 + 360 + 86 + 12
+        results.append(check(
+            "표시: 회귀(1512·공통3·프로젝트2·영역360)에서 5개를 보여주고 숨김이 없다",
+            regression.visibleItemCount == 5 && regression.hiddenItemCount == 0
+                && regression.projectAreaWidth == 360 && regression.barWidth == CGFloat(expectedWidth)
+                && !regression.isSpaceShort,
+            "보이는=\(regression.visibleItemCount) 숨김=\(regression.hiddenItemCount) 영역=\(Int(regression.projectAreaWidth)) 바=\(Int(regression.barWidth))"
+        ))
+
+        // 1b. 가짜 모드 표시도** 폭을 차지한다**(빠뜨리면 오른쪽 조작이 창 밖으로 밀린다 — 화면 확인).
+        let withBadge = DockDisplayBuilder.make(
+            resolution: makeResolution(common: 3, project: 2),
+            layout: layout,
+            screenWidth: screen,
+            showsFakeBadge: true
+        )
+        results.append(check(
+            "표시: 가짜 모드 표시·오른쪽 조작 폭이 바 폭에 포함된다",
+            withBadge.barWidth == regression.barWidth + DockBarLayout.fakeBadgeWidth + DockBarLayout.controlGap
+                && withBadge.barWidth <= DockBarLayout.screenCeiling(screenWidth: screen),
+            "표시 없음=\(Int(regression.barWidth)) 표시 있음=\(Int(withBadge.barWidth))"
+        ))
+
+        // 2. 그린 타일이 실제로 바 폭 안에 들어간다(보이는 수와 기하가 어긋나지 않는다).
+        //    프로젝트 타일은 **영역 안**에 들어가야 한다(영역은 폭이 고정이라 타일이 바 폭을 늘리지 않는다).
+        let barPainted = chromeWidth(DockBarLayout.renderedComponents(layout: layout, commonItemCount: 3))
+            + commonTileWidth(regression)
+            + DockBarLayout.cardStripWidth(layout.cards) + CGFloat(regression.projectAreaWidth)
+        let areaPainted = CGFloat(projectTiles(regression)) * DockBarLayout.projectTileStride
+        results.append(check(
+            "표시: 보이는 타일이 바 폭과 영역 폭 안에 들어간다",
+            barPainted <= regression.barWidth + 0.5
+                && areaPainted <= CGFloat(regression.projectAreaWidth) - DockBarLayout.widgetPadding + 0.5,
+            "바 합계=\(Int(barPainted))/\(Int(regression.barWidth)) 영역 타일=\(Int(areaPainted))/\(Int(regression.projectAreaWidth))"
+        ))
+
+        // 3. 화면·키보드가 같은 목록을 쓴다(상세 보기가 닫혀 있을 때).
+        let all = regression.order.isEmpty ? [] : ProjectResolver.resolve(
+            cwd: "/work/shop",
+            catalog: makeCatalog(common: 3, project: 2)
+        ).allItems
+        let closed = DockFocusPlan.controls(display: regression, allItems: all, detailsVisible: false)
+        let closedRefs = closed.compactMap(\.itemRef)
+        results.append(check(
+            "표시: 키보드 목록이 화면 목록과 같다",
+            closedRefs == regression.order.map(\.ref) && closed.last == .details,
+            "키보드=\(closedRefs.map(\.label).joined(separator: ",")) 화면=\(regression.order.map(\.ref.label).joined(separator: ","))"
+        ))
+
+        // 4. 프로젝트 항목이 밀리면 **화면에 없는 항목은 키보드로도 갈 수 없다**.
+        let overflow = DockDisplayBuilder.make(
+            resolution: makeResolution(common: 3, project: 8),
+            layout: layout,
+            screenWidth: screen
+        )
+        let overflowAll = ProjectResolver.resolve(cwd: "/work/shop", catalog: makeCatalog(common: 3, project: 8)).allItems
+        let overflowFocus = DockFocusPlan.controls(display: overflow, allItems: overflowAll, detailsVisible: false)
+        let hiddenRefs = overflowAll.map(\.ref).filter { !overflow.order.map(\.ref).contains($0) }
+        let detailsOpen = DockFocusPlan.controls(display: overflow, allItems: overflowAll, detailsVisible: true)
+        results.append(check(
+            "표시: 영역을 넘긴 항목은 화면·키보드에서 함께 빠지고 상세 보기에는 있다",
+            overflow.projectHidden == 3 && overflow.project.count == 5
+                && !hiddenRefs.isEmpty
+                && hiddenRefs.allSatisfy { ref in !overflowFocus.compactMap(\.itemRef).contains(ref) }
+                && detailsOpen.compactMap(\.itemRef).count == overflowAll.count
+                && overflow.projectAreaWidth == 360,
+            "영역=\(Int(overflow.projectAreaWidth)) 보이는 프로젝트=\(overflow.project.count) 숨김=\(overflow.projectHidden) 상세=\(detailsOpen.compactMap(\.itemRef).count)개"
+        ))
+
+        // 5. 프로젝트 항목 수가 달라져도 공통 구성 위치(바 폭·공통 타일 수)는 그대로다.
+        let many = DockDisplayBuilder.make(
+            resolution: makeResolution(common: 3, project: 6),
+            layout: layout,
+            screenWidth: screen
+        )
+        results.append(check(
+            "표시: 프로젝트 항목이 2개든 6개든 바 폭·공통 타일 수가 같다",
+            many.barWidth == regression.barWidth && many.common.count == 3
+                && many.projectAreaWidth == regression.projectAreaWidth,
+            "2개=\(Int(regression.barWidth))/공통\(regression.common.count) 6개=\(Int(many.barWidth))/공통\(many.common.count)"
+        ))
+
+        // 6. 배치 순서를 바꾸면 화면 목록 순서도 바뀐다(같은 구성요소, 같은 폭).
+        var reordered = layout
+        reordered.order = [.project, .common, .cards]
+        let reorderedDisplay = DockDisplayBuilder.make(
+            resolution: makeResolution(common: 3, project: 2),
+            layout: reordered,
+            screenWidth: screen
+        )
+        results.append(check(
+            "표시: 배치 순서가 화면·키보드 순서를 정한다",
+            reorderedDisplay.order.prefix(2).allSatisfy { !$0.item.isCommon }
+                && reorderedDisplay.order.suffix(3).allSatisfy(\.item.isCommon)
+                && reorderedDisplay.barWidth == regression.barWidth,
+            "순서=\(reorderedDisplay.order.map { $0.item.isCommon ? "공통" : "프로젝트" }.joined(separator: ",")) 바=\(Int(reorderedDisplay.barWidth))"
+        ))
+
+        // 7. 전체 공간 부족: 영역을 최소까지 줄여도 모자라면 **공통 타일도 밀리고 그 수가 남는다**.
+        var wide = layout
+        wide.projectAreaWidth = DockLayout.maximumProjectAreaWidth
+        let short = DockDisplayBuilder.make(
+            resolution: makeResolution(common: 12, project: 4),
+            layout: wide,
+            screenWidth: 900
+        )
+        results.append(check(
+            "표시: 공간이 부족하면 영역을 줄이고, 그래도 모자라면 밀린 수를 남긴다",
+            short.isSpaceShort && short.projectAreaWidth == DockLayout.minimumProjectAreaWidth
+                && short.commonHidden > 0 && short.common.count + short.commonHidden == 12
+                && short.visibleItemCount + short.hiddenItemCount == 16
+                && short.barWidth <= DockBarLayout.screenCeiling(screenWidth: 900) + 0.5,
+            "영역=\(Int(short.projectAreaWidth)) 공통 보임=\(short.common.count)/숨김=\(short.commonHidden) 바=\(Int(short.barWidth)) 필요=\(Int(short.demandWidth))"
+        ))
+
+        // 8. 저장된 영역 폭을 그대로 쓸 수 없어 줄여야 하는 경우도 **공간 부족으로 남긴다**.
+        var wideArea = layout
+        wideArea.projectAreaWidth = DockLayout.maximumProjectAreaWidth
+        let areaShort = DockDisplayBuilder.make(
+            resolution: makeResolution(common: 3, project: 2),
+            layout: wideArea,
+            screenWidth: screen,
+            showsFakeBadge: true
+        )
+        results.append(check(
+            "표시: 영역을 줄여야 하는 경우도 공간 부족으로 드러난다",
+            areaShort.isSpaceShort
+                && areaShort.projectAreaWidth < DockLayout.maximumProjectAreaWidth
+                && areaShort.projectAreaWidth > DockLayout.minimumProjectAreaWidth
+                && areaShort.commonHidden == 0
+                && areaShort.demandWidth > areaShort.barWidth,
+            "요청=620 → 적용=\(Int(areaShort.projectAreaWidth)) 필요=\(Int(areaShort.demandWidth)) 바=\(Int(areaShort.barWidth))"
+        ))
+
+        // 9. 공통 항목이 넘침 타일 자리를 남기는지(밀린 수가 0이면 자리를 쓰지 않는다).
+        let fitsExactly = DockDisplayBuilder.make(
+            resolution: makeResolution(common: 2, project: 2),
+            layout: layout,
+            screenWidth: screen
+        )
+        results.append(check(
+            "표시: 자리가 남으면 넘침 타일을 만들지 않는다",
+            fitsExactly.commonHidden == 0 && fitsExactly.common.count == 2
+                && fitsExactly.barWidth == DockBarLayout.widgetBarWidth(layout: layout, commonItemCount: 2, screenWidth: screen),
+            "보임=\(fitsExactly.common.count) 숨김=\(fitsExactly.commonHidden) 바=\(Int(fitsExactly.barWidth))"
+        ))
+
+        return results
+    }
+
+    private static func makeCatalog(common: Int, project: Int) -> ProjectCatalog {
+        ProjectCatalog(
+            common: (1...max(1, common)).map {
+                DockItem(id: "common-\($0)", kind: .link, name: "공통\($0)", target: "https://example.com/c\($0)")
+            },
+            projects: [
+                Project(
+                    id: "p-shop",
+                    name: "shop",
+                    root: "/work/shop",
+                    items: (1...max(1, project)).map {
+                        DockItem(id: "item-\($0)", kind: .folder, name: "항목\($0)", target: "/work/shop/\($0)")
+                    }
+                )
+            ]
+        )
+    }
+
+    private static func makeResolution(common: Int, project: Int) -> ProjectResolution {
+        ProjectResolver.resolve(cwd: "/work/shop", catalog: makeCatalog(common: common, project: project))
+    }
+
+    /// 공통 구역 타일 폭(넘침 타일 포함). 영역이 정하는 값이라 바 폭 합계에 넣는다.
+    private static func commonTileWidth(_ display: DockDisplay) -> CGFloat {
+        let tiles = display.common.count + (display.commonHidden > 0 ? 1 : 0)
+        return tiles > 0 ? CGFloat(tiles) * DockBarLayout.appTileSize + CGFloat(tiles - 1) * DockBarLayout.tileGap : 0
+    }
+
+    /// 프로젝트 구역에 놓이는 타일 수(넘침 타일 포함).
+    private static func projectTiles(_ display: DockDisplay) -> Int {
+        display.project.count + (display.projectHidden > 0 ? 1 : 0)
+    }
+
+    /// 그린 구성요소 바깥의 고정 폭(여백·구분선·오른쪽 조작).
+    private static func chromeWidth(_ components: [DockComponent]) -> CGFloat {
+        let boundaries = CGFloat(max(0, components.count - 1))
+        return DockBarLayout.widgetPadding * 2
+            + boundaries * DockBarLayout.separatorStride
+            + (components.isEmpty ? 0 : DockBarLayout.widgetGap)
+            + DockBarLayout.trailingControlsWidth(showsFakeBadge: false)
+    }
+
+    // MARK: - 카드 실행 상태 (V18.6)
+
+    /// 타이머가 **갱신 횟수가 아니라 시각**으로 남은 시간을 정하는지 고정한다.
+    private static func focusCardChecks() -> [CheckResult] {
+        var results: [CheckResult] = []
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+
+        var timer = FocusTimerState()
+        results.append(check(
+            "카드: 시작 전에는 가득 찬 시간이고 멈춰 있다",
+            timer.remaining(at: start) == 1500 && !timer.isRunning && timer.text(at: start) == "25:00",
+            "남은=\(Int(timer.remaining(at: start))) 표시=\(timer.text(at: start))"
+        ))
+
+        timer.start(at: start)
+        let afterFiveMinutes = timer.remaining(at: start.addingTimeInterval(300))
+        // 갱신이 밀린 상황(중간 계산을 건너뛴 경우)에도 같은 시각이면 같은 값이다.
+        let skipped = FocusTimerState(duration: 1500)
+        var jumped = skipped
+        jumped.start(at: start)
+        results.append(check(
+            "카드: 남은 시간이 시각 기준이다(갱신 횟수와 무관)",
+            afterFiveMinutes == 1200 && jumped.remaining(at: start.addingTimeInterval(300)) == 1200
+                && timer.text(at: start.addingTimeInterval(300)) == "20:00",
+            "5분 후=\(Int(afterFiveMinutes))초 표시=\(timer.text(at: start.addingTimeInterval(300)))"
+        ))
+
+        timer.pause(at: start.addingTimeInterval(300))
+        let paused = timer.remaining(at: start.addingTimeInterval(9999))
+        results.append(check(
+            "카드: 일시정지하면 시간이 흐르지 않는다",
+            !timer.isRunning && paused == 1200 && timer.text(at: start.addingTimeInterval(9999)) == "20:00",
+            "일시정지 후=\(Int(paused))초"
+        ))
+
+        timer.start(at: start.addingTimeInterval(1000))
+        results.append(check(
+            "카드: 다시 시작하면 멈춘 지점부터 이어진다",
+            timer.isRunning && timer.remaining(at: start.addingTimeInterval(1100)) == 1100,
+            "재시작 100초 후=\(Int(timer.remaining(at: start.addingTimeInterval(1100))))초"
+        ))
+
+        timer.reset()
+        results.append(check(
+            "카드: 재설정하면 처음 상태로 돌아간다",
+            !timer.isRunning && timer.remaining(at: start) == 1500 && timer.text(at: start) == "25:00",
+            "남은=\(Int(timer.remaining(at: start))) 표시=\(timer.text(at: start))"
+        ))
+
+        // 끝을 넘겨도 음수가 되지 않고 00:00에서 멈춘다.
+        var finished = FocusTimerState()
+        finished.start(at: start)
+        results.append(check(
+            "카드: 끝을 넘겨도 음수가 되지 않는다",
+            finished.remaining(at: start.addingTimeInterval(2000)) == 0
+                && finished.isFinished(at: start.addingTimeInterval(2000))
+                && finished.text(at: start.addingTimeInterval(2000)) == "00:00"
+                && finished.remainingFraction(at: start.addingTimeInterval(2000)) == 0,
+            "표시=\(finished.text(at: start.addingTimeInterval(2000)))"
+        ))
+
+        // 시각이 뒤로 가도(수동 조정) 남은 시간이 늘어나지 않는다.
+        var backwards = FocusTimerState()
+        backwards.start(at: start)
+        results.append(check(
+            "카드: 시각이 뒤로 가도 남은 시간이 늘지 않는다",
+            backwards.remaining(at: start.addingTimeInterval(-60)) == 1500,
+            "남은=\(Int(backwards.remaining(at: start.addingTimeInterval(-60))))초"
+        ))
+
+        // 카드 id가 다르면 상태도 따로 둔다(같은 종류를 여러 개 두어도 섞이지 않는다).
+        let first = DockCardSpec.makeDefault(.clock, existing: [])
+        let second = DockCardSpec.makeDefault(.clock, existing: [first])
+        var states: [String: FocusTimerState] = [:]
+        states[first.id] = FocusTimerState()
+        states[first.id]?.start(at: start)
+        results.append(check(
+            "카드: 카드 id가 다르면 실행 상태도 따로 둔다",
+            first.id != second.id
+                && states[first.id]?.isRunning == true
+                && states[second.id] == nil,
+            "id=\(first.id)/\(second.id) 진행중=\(states[first.id]?.isRunning == true)"
         ))
 
         return results
@@ -2827,54 +3124,6 @@ public enum SelfTest {
         return results
     }
 
-    // MARK: - 가로형 바 배치 (V14)
-
-    /// 항목이 많아도 창이 화면을 넘지 않고, 숨긴 항목을 조용히 버리지 않는지 확인한다.
-    private static func dockBarChecks() -> [CheckResult] {
-        var results: [CheckResult] = []
-
-        let wide = DockBarLayout.maximumWidth(visibleFrameWidth: 1_512)
-        let narrow = DockBarLayout.maximumWidth(visibleFrameWidth: 900)
-
-        // 링크가 많으면 인라인 수를 줄이고 **숨긴 개수를 알린다**(조용히 잘라내지 않는다).
-        let many = DockBarLayout.linkBudget(total: 20, availableWidth: 1_512)
-        let few = DockBarLayout.linkBudget(total: 2, availableWidth: 1_512)
-        let none = DockBarLayout.linkBudget(total: 0, availableWidth: 1_512)
-        results.append(
-            check(
-                "V14: 링크가 많으면 인라인 수를 줄이고 숨긴 개수를 알린다",
-                many.visible + many.hidden == 20 && many.hidden > 0 && few.hidden == 0 && few.visible == 2
-                    && none.visible == 0 && none.hidden == 0,
-                "많음=\(many.visible)+\(many.hidden) 적음=\(few.visible)+\(few.hidden)"
-            )
-        )
-
-        // 좁은 화면에서도 최소 너비를 보장하고, 넓은 화면에서도 최대 너비를 넘지 않는다.
-        let narrowBar = DockBarLayout.barWidth(visibleLinkCount: 10, availableWidth: 900)
-        let wideBar = DockBarLayout.barWidth(visibleLinkCount: 10, availableWidth: 1_512)
-        results.append(
-            check(
-                "V14: 바 너비는 화면 범위 안에 머문다",
-                narrowBar <= narrow && narrowBar >= DockBarLayout.minimumBarWidth
-                    && wideBar <= wide && wideBar >= DockBarLayout.minimumBarWidth,
-                "좁은화면=\(Int(narrowBar))/\(Int(narrow)) 넓은화면=\(Int(wideBar))/\(Int(wide))"
-            )
-        )
-
-        results.append(
-            check(
-                "V14: 항목이 없어도 주요 조작 영역이 뭉개지지 않는다",
-                DockBarLayout.barWidth(visibleLinkCount: 0, availableWidth: 1_512) >= DockBarLayout.minimumBarWidth
-                    && DockBarLayout.windowHeight(detailsVisible: false) == DockBarLayout.barHeight
-                    && DockBarLayout.windowHeight(detailsVisible: true)
-                        == DockBarLayout.barHeight + DockBarLayout.detailsHeight,
-                "바=\(Int(DockBarLayout.barWidth(visibleLinkCount: 0, availableWidth: 1_512))) 높이=\(Int(DockBarLayout.windowHeight(detailsVisible: false)))"
-            )
-        )
-
-        return results
-    }
-
     // MARK: - 항목 편집 (V15)
 
     private static func itemEditorChecks() -> [CheckResult] {
@@ -3418,15 +3667,18 @@ public enum SelfTest {
             let heights = DockSizeSetting.allCases.map(\.barHeight)
             let distinct = Set(heights).count == DockSizeSetting.allCases.count
             let ascending = heights == heights.sorted()
-            let paddingAscending = DockSizeSetting.allCases.map(\.chipVerticalPadding) == DockSizeSetting.allCases.map(\.chipVerticalPadding).sorted()
+            // 창 높이 계산이 선택한 크기를 그대로 반영한다(칩 여백·최소 항목 폭은 위젯 화면에서 쓰지 않는다).
+            let windowHeights = DockSizeSetting.allCases.map {
+                DockBarLayout.windowHeight(detailsVisible: true, barHeight: $0.barHeight)
+            }
             results.append(
                 check(
                     "V16: 세 크기가 서로 다르고, 아이콘 중심은 라벨만 줄인다",
-                    distinct && ascending && paddingAscending
+                    distinct && ascending && windowHeights == heights.map { $0 + DockBarLayout.detailsHeight }
                         && DockLabelMode.iconOnly.showsItemLabels == false
                         && DockLabelMode.nameAndIcon.showsItemLabels
                         && DockAppearance.default.size == .regular,
-                    "높이=\(heights) 라벨모드=\(DockLabelMode.iconOnly.showsItemLabels)/\(DockLabelMode.nameAndIcon.showsItemLabels)"
+                    "높이=\(heights) 창높이=\(windowHeights) 라벨모드=\(DockLabelMode.iconOnly.showsItemLabels)/\(DockLabelMode.nameAndIcon.showsItemLabels)"
                 )
             )
         }

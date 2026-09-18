@@ -76,6 +76,27 @@ public struct DockItemTarget: Equatable, Sendable {
     }
 }
 
+/// 표시·선택에서 항목을 가리키는 **신원**. 순번(index)이 아니라 **범위 + ID**로 가리킨다.
+///
+/// 순번은 목록이 다시 만들어지면 다른 항목을 가리킬 수 있다. 범위와 ID를 함께 쓰면
+/// 프로젝트가 바뀌거나 순서가 달라져도 같은 항목만 실행된다.
+public struct DockItemRef: Equatable, Hashable, Sendable {
+    public var scopeID: String
+    public var itemID: String
+
+    public init(scopeID: String, itemID: String) {
+        self.scopeID = scopeID
+        self.itemID = itemID
+    }
+
+    /// 로그·검사에서 읽을 수 있는 형태.
+    public var label: String { "\(scopeID)/\(itemID)" }
+}
+
+extension DockItemTarget {
+    public var ref: DockItemRef { DockItemRef(scopeID: scopeID, itemID: itemID) }
+}
+
 /// 항목의 대상이 **형식상** 올바른지 검사한다. 존재 여부는 실행 시점에 본다
 /// (외장 볼륨처럼 잠시 없을 수 있는 대상을 저장 단계에서 막지 않는다).
 public enum DockItemValidator {

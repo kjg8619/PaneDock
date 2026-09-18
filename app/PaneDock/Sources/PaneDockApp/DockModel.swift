@@ -13,32 +13,9 @@ import UniformTypeIdentifiers
 /// - PaneDock은 스스로를 활성화하지 않는다(`activate` 호출 없음). 창은 non-activating panel이다.
 @MainActor
 final class DockModel: ObservableObject {
-    /// 키보드로 이동할 수 있는 항목. 화면에 보이는 순서와 같다.
-    enum FocusItem: Equatable {
-        case item(Int)
-        case openFolder
-        case copyPath
-        case lock
-        /// 상세 보기 열기.
-        case more
-        /// 상세 보기 닫기.
-        case detailsClose
-        case hide
-        case quit
-
-        var label: String {
-            switch self {
-            case .item(let index): return "item:\(index)"
-            case .openFolder: return "openFolder"
-            case .copyPath: return "copyPath"
-            case .lock: return "lock"
-            case .more: return "more"
-            case .detailsClose: return "detailsClose"
-            case .hide: return "hide"
-            case .quit: return "quit"
-            }
-        }
-    }
+    /// 키보드로 이동할 수 있는 곳. **화면에 있는 것만** 들어간다(코어의 `DockFocusPlan`이 정한다).
+    /// 항목은 순번이 아니라 **범위 + ID**로 가리킨다 — 목록이 다시 만들어져도 같은 항목만 실행된다.
+    typealias FocusItem = DockFocusControl
 
     /// 실행이 어디서 들어왔는지. 마우스와 키보드가 **같은 검증 경로**를 쓰는지 로그로 확인한다.
     enum ActionSource: String {
@@ -64,6 +41,14 @@ final class DockModel: ObservableObject {
         projectID: "", projectName: "", projectRoot: "", matchedCWD: "",
         commonItems: [], projectItems: [], diagnostics: []
     )
+    /// **화면에 실제로 그리는 목록**. 화면·숨김 개수·키보드 이동이 모두 이 하나를 쓴다.
+    @Published private(set) var display = DockDisplay.empty
+    /// 카드가 쓰는 현재 시각. 1초마다 갱신한다(남은 시간은 이 값과 시작 시각으로 계산한다).
+    @Published private(set) var now = Date()
+    /// 카드 id별 **실행 상태**(메모리 전용). 프로젝트 전환·접기·배치 변경으로 지우지 않는다.
+    @Published private(set) var timerStates: [String: FocusTimerState] = [:]
+    /// 지금 실행 중인 앱 번들 경로(앱 타일의 실행 중 표시).
+    @Published private(set) var runningAppPaths: Set<String> = []
     /// 설정 파일 관련 안내(손상·미래 버전 등). 없으면 nil.
     @Published private(set) var settingsNotice: String?
     /// 프로젝트 설정 상태 안내(다시 읽기 결과·경고). 없으면 nil.
@@ -151,11 +136,140 @@ final class DockModel: ObservableObject {
     /// 프로젝트 내용·실행 상태와는 별개다.
     private(set) var layout: DockLayout = .default
 
+    /// 편집창에서 **미리 보는** 배치. 저장 전에는 디스크에 쓰지 않는다.
+    @Published private(set) var previewLayout: DockLayout?
+
+    /// 화면이 실제로 쓸 배치(미리보기 우선).
+    var effectiveLayout: DockLayout { previewLayout ?? layout }
+
+    /// 저장하지 않은 배치 변경이 있는가.
+    var layoutIsDirty: Bool { previewLayout != nil && previewLayout != layout }
+
     /// 배치를 반영한다(시작 시·설정 저장 후). 구성만 바뀌고 추적·잠금·대상은 건드리지 않는다.
     func applyLayout(_ layout: DockLayout) {
         self.layout = layout
-        stateLog?.appendEvent("layout order=\(layout.order.map(\.rawValue).joined(separator: ",")) area=\(Int(layout.projectAreaWidth)) cards=\(layout.cards.count)")
+        previewLayout = nil
+        logLayout("save")
+        rebuildDisplay()
         onLayoutChange?()
+    }
+
+    /// 편집창에서 배치를 **미리** 바꾼다(디스크에는 쓰지 않는다).
+    func previewLayoutChange(_ next: DockLayout) {
+        previewLayout = next
+        logLayout("preview")
+        rebuildDisplay()
+        onLayoutChange?()
+    }
+
+    /// 미리보기를 버리고 저장된 배치로 돌아간다(취소·창 닫기).
+    func discardLayoutPreview() {
+        guard previewLayout != nil else { return }
+        previewLayout = nil
+        stateLog?.appendEvent("layout=preview result=discarded")
+        rebuildDisplay()
+        onLayoutChange?()
+    }
+
+    /// 배치 저장 요청. AppDelegate가 설정 파일에 쓰고 성공 여부를 돌려준다.
+    var onSaveLayout: ((DockLayout) -> (message: String, succeeded: Bool))?
+
+    /// 미리보기 배치를 저장한다. **성공 여부를 돌려준다.**
+    @discardableResult
+    func saveLayoutPreview() -> Bool {
+        guard let previewLayout else { return true }
+        let result = onSaveLayout?(previewLayout)
+            ?? (message: "저장할 수 없습니다: 설정을 쓸 수 없습니다", succeeded: false)
+        editorNotice = result.message
+        stateLog?.appendEvent("layout=save result=\(result.succeeded ? "ok" : "failed")")
+        if result.succeeded { self.previewLayout = nil }
+        return result.succeeded
+    }
+
+    // MARK: - 카드 실행 상태 (메모리 전용)
+
+    /// 카드 id의 타이머 상태. 없으면 처음 상태(가득 찬 25분, 멈춤)다.
+    func timerState(for cardID: String) -> FocusTimerState { timerStates[cardID] ?? FocusTimerState() }
+
+    func startTimer(cardID: String) {
+        var state = timerState(for: cardID)
+        state.start(at: now)
+        timerStates[cardID] = state
+        stateLog?.appendEvent("card=\(cardID) action=start remaining=\(state.text(at: now))")
+    }
+
+    func pauseTimer(cardID: String) {
+        var state = timerState(for: cardID)
+        state.pause(at: now)
+        timerStates[cardID] = state
+        stateLog?.appendEvent("card=\(cardID) action=pause remaining=\(state.text(at: now)) running=false")
+    }
+
+    func resetTimer(cardID: String) {
+        var state = timerState(for: cardID)
+        state.reset()
+        timerStates[cardID] = state
+        stateLog?.appendEvent("card=\(cardID) action=reset remaining=\(state.text(at: now)) running=false")
+    }
+
+    // MARK: - 편집창의 배치 조작 (저장 전에는 미리보기)
+
+    /// 편집창에서 배치를 바꾼다. 순서는 항상 **모든 구성요소를 한 번씩** 담고, 영역 폭은 승인 범위로 자른다.
+    private func mutateLayout(_ mutate: (inout DockLayout) -> Void) {
+        var next = effectiveLayout
+        mutate(&next)
+        var order = next.order.reduce(into: [DockComponent]()) { accumulated, item in
+            if !accumulated.contains(item) { accumulated.append(item) }
+        }
+        for item in DockComponent.allCases where !order.contains(item) { order.append(item) }
+        next.order = order
+        next.projectAreaWidth = min(
+            max(next.projectAreaWidth, DockLayout.minimumProjectAreaWidth),
+            DockLayout.maximumProjectAreaWidth
+        )
+        previewLayoutChange(next)
+    }
+
+    /// 구성요소(공통·카드·프로젝트 영역) 순서를 한 칸 옮긴다.
+    func editorMoveComponent(_ component: DockComponent, by offset: Int) {
+        mutateLayout { layout in
+            guard let index = layout.order.firstIndex(of: component) else { return }
+            let target = index + offset
+            guard layout.order.indices.contains(target) else { return }
+            layout.order.swapAt(index, target)
+        }
+    }
+
+    /// 프로젝트 영역 폭(항목 수와 무관하게 유지되는 값).
+    func editorSetProjectAreaWidth(_ width: Double) {
+        mutateLayout { $0.projectAreaWidth = width }
+    }
+
+    /// 카드 추가. 같은 종류를 여러 개 두어도 id로 구분한다.
+    func editorAddCard(_ kind: DockCardKind) {
+        mutateLayout { $0.cards.append(DockCardSpec.makeDefault(kind, existing: $0.cards)) }
+    }
+
+    /// 카드 제거. 실행 상태는 id로 분리돼 있고 **지우지 않는다**(같은 id가 다시 오면 이어진다).
+    func editorRemoveCard(_ id: String) {
+        mutateLayout { $0.cards.removeAll { $0.id == id } }
+    }
+
+    func editorMoveCard(_ id: String, by offset: Int) {
+        mutateLayout { layout in
+            guard let index = layout.cards.firstIndex(where: { $0.id == id }) else { return }
+            let target = index + offset
+            guard layout.cards.indices.contains(target) else { return }
+            layout.cards.swapAt(index, target)
+        }
+    }
+
+    private func logLayout(_ phase: String) {
+        let layout = effectiveLayout
+        let cards = layout.cards.map { "\($0.id):\($0.kind.rawValue)" }.joined(separator: ",")
+        stateLog?.appendEvent(
+            "layout=\(phase) order=\(layout.order.map(\.rawValue).joined(separator: ",")) area=\(Int(layout.projectAreaWidth)) cards=\(cards.isEmpty ? "-" : cards)"
+        )
     }
 
     /// **자동 접기** 상태(작은 호출 손잡이만 남긴 상태).
@@ -179,6 +293,8 @@ final class DockModel: ObservableObject {
     private var lock = DockLock()
     private var isRefreshing = false
     private var timer: Timer?
+    /// 카드(시계·타이머) 표시용 1초 타이머. 조회 주기와 별개다.
+    private var clockTimer: Timer?
     private let stateLog: StateLog?
 
     /// 사용자가 명시적으로 Dock을 호출한 상태인지.
@@ -186,8 +302,8 @@ final class DockModel: ObservableObject {
     /// 마지막 조회 시점에 **현재 대상이 포커스 확인을 받은 적 있는지**.
     /// 판정 불가일 때 "마지막으로 확인한 대상"이라고 말해도 되는지 판단하는 데 쓴다.
     private var confirmedTarget = true
-    /// 마지막으로 창 크기를 맞췄을 때의 링크 수(불필요한 리사이즈를 피한다).
-    private var lastLayoutLinkCount = 0
+    /// 마지막으로 창 크기를 맞췄을 때의 바 폭(불필요한 리사이즈를 피한다).
+    private var lastBarWidth: CGFloat = 0
     /// 호출 직전에 마지막으로 확인한 "바깥 앱 최전면" 값.
     /// 호출 중에는 이 값으로 고정해, **우리 자신의 활성화를 작업 위치 이동으로 해석하지 않는다.**
     private var frozenHostFrontmost: Bool?
@@ -213,6 +329,13 @@ final class DockModel: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: TimeInterval(intervalMilliseconds) / 1000.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshNow() }
         }
+        // 카드(시계·타이머)는 **조회 주기와 무관하게** 1초마다 갱신한다.
+        // 남은 시간은 이 값과 시작 시각으로 계산하므로 갱신이 밀려도 값이 맞는다.
+        clockTimer?.invalidate()
+        clockTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.now = Date() }
+        }
+        now = Date()
     }
 
     /// 한 번 조회한다. 이미 조회 중이면 건너뛴다(중첩 방지).
@@ -261,10 +384,11 @@ final class DockModel: ObservableObject {
             catalog: catalog,
             catalogDiagnostics: catalogDiagnostics
         )
-        // 프로젝트가 바뀌어 링크 수가 달라지면 바 너비도 달라진다.
-        let linkCount = resolution.allItems.count
-        if linkCount != lastLayoutLinkCount {
-            lastLayoutLinkCount = linkCount
+        rebuildDisplay()
+        refreshRunningApps()
+        // 바 폭이 달라졌으면 창 크기도 다시 맞춘다(프로젝트 **항목 수**로는 달라지지 않는다).
+        if display.barWidth != lastBarWidth {
+            lastBarWidth = display.barWidth
             onLayoutChange?()
         }
         stateLog?.append(
@@ -277,8 +401,42 @@ final class DockModel: ObservableObject {
             fullPath: state.fullPath ?? "-",
             paneID: state.paneID ?? "-",
             locked: state.isLocked,
-            project: resolution.hasProject ? "\(resolution.projectID)(\(resolution.allItems.count))" : "-"
+            project: resolution.hasProject ? "\(resolution.projectID)(\(resolution.allItems.count))" : "-",
+            // 화면·숨김·키보드가 같은 목록을 쓰는지 로그만 보고 확인할 수 있게 남긴다.
+            shown: displaySummary
         )
+    }
+
+    /// 표시 목록을 다시 만든다. **화면·숨김 개수·키보드 이동이 모두 이 결과를 쓴다.**
+    private func rebuildDisplay() {
+        let next = DockDisplayBuilder.make(
+            resolution: resolution,
+            layout: effectiveLayout,
+            screenWidth: ScreenGeometry.fallbackFrame.width,
+            // 가짜 모드 표시도 바 폭을 차지한다 → 기하 계산에 함께 넣는다.
+            showsFakeBadge: isFake
+        )
+        guard next != display else { return }
+        display = next
+        stateLog?.appendEvent(
+            "display shown=\(next.visibleItemCount) hidden=\(next.hiddenItemCount) "
+                + "common=\(next.common.count)/\(next.commonHidden) project=\(next.project.count)/\(next.projectHidden) "
+                + "area=\(Int(next.projectAreaWidth)) bar=\(Int(next.barWidth)) short=\(next.isSpaceShort)"
+        )
+    }
+
+    /// 로그 한 줄에 남길 표시 요약(화면 목록 그대로).
+    private var displaySummary: String {
+        let refs = display.order.map { $0.item.isCommon ? "c:\($0.ref.itemID)" : "p:\($0.ref.itemID)" }
+        return "shown=\(display.visibleItemCount) hidden=\(display.hiddenItemCount) "
+            + "area=\(Int(display.projectAreaWidth)) bar=\(Int(display.barWidth)) "
+            + "list=[\(refs.joined(separator: ","))]"
+    }
+
+    /// 실행 중인 앱 번들 경로를 갱신한다(앱 타일의 실행 중 표시).
+    private func refreshRunningApps() {
+        let running = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.path })
+        if running != runningAppPaths { runningAppPaths = running }
     }
 
     /// 지금 화면에 보이는 대상. 잠금이 걸려 있으면 잠긴 대상이다.
@@ -387,49 +545,12 @@ final class DockModel: ObservableObject {
         )
     }
 
-    /// 지금 화면에서 이동할 수 있는 항목들. 링크가 먼저, 고정 버튼이 뒤에 온다.
+    /// 지금 화면에서 이동할 수 있는 것들. **표시 목록과 같은 기준**으로 만든다(코어 `DockFocusPlan`).
     ///
-    /// 상세 보기가 열려 있으면 **모든 링크**가 이동 대상이다(인라인에서 밀린 항목 포함).
-    /// 숨기기·종료는 상세 보기 안에 있으므로 열렸을 때만 순회한다.
+    /// - 상세 보기가 닫혀 있으면 화면에 그린 항목만 순회한다(밀린 항목으로 이동하지 않는다).
+    /// - 열기·복사·잠금은 화면의 ⋯ 메뉴로 옮겼으므로 초점 목록에도 없다(표시 대상과 실행 대상 일치).
     var focusItems: [FocusItem] {
-        var items: [FocusItem] = []
-        let all = resolution.allItems
-        let count = isDetailsVisible ? all.count : visibleItemCount
-        for index in 0..<min(count, all.count) {
-            items.append(.item(index))
-        }
-        // 열기·복사·잠금은 화면의 ⋯ 메뉴로 옮겼다 → 초점 목록에도 넣지 않는다(표시 대상과 실행 대상 일치).
-        items.append(isDetailsVisible ? .detailsClose : .more)
-        if isDetailsVisible {
-            items.append(contentsOf: [.hide, .quit])
-        }
-        return items
-    }
-
-    /// 바에 인라인으로 그릴 항목 수. 화면 너비와 항목 수로 정해진다.
-    /// 구성형 화면: **공통 항목은 항상 보이고**, 프로젝트 항목 수는 **영역에 할당된 폭**이 정한다.
-    /// 전체 항목 수로 Dock 크기를 다시 계산하지 않는다 — 프로젝트가 바뀌어도 공통 구성이 밀리지 않는다.
-    var visibleItemCount: Int {
-        let common = resolution.commonItems.count
-        let budget = DockBarLayout.projectTileBudget(
-            width: layout.projectAreaWidth,
-            tileCount: resolution.projectItems.count
-        )
-        return min(common + budget.visible, resolution.allItems.count)
-    }
-
-    /// 바에 인라인으로 그릴 항목. `id`를 명시해 목록 갱신이 안정적이게 한다.
-    struct InlineItem: Identifiable, Equatable {
-        var id: String
-        var index: Int
-        var item: DockItemTarget
-    }
-
-    /// 인라인으로 보여줄 항목 목록(공통 → 프로젝트 순서).
-    func items(forInline limit: Int) -> [InlineItem] {
-        resolution.allItems.prefix(max(0, limit)).enumerated().map {
-            InlineItem(id: $0.element.itemID, index: $0.offset, item: $0.element)
-        }
+        DockFocusPlan.controls(display: display, allItems: resolution.allItems, detailsVisible: isDetailsVisible)
     }
 
     func showDetails() {
@@ -457,8 +578,9 @@ final class DockModel: ObservableObject {
     func beginEditing(scope: ItemScope? = nil) {
         // 편집을 시작할 때 **상세 보기는 접는다**(편집창과 겹쳐 화면이 복잡해지지 않게).
         hideDetails()
-        // 편집창은 **지금 저장된 외형**에서 시작한다(미리보기는 열 때 초기화).
+        // 편집창은 **지금 저장된 외형·배치**에서 시작한다(미리보기는 열 때 초기화).
         previewAppearance = nil
+        previewLayout = nil
         let chosen = scope ?? (resolution.hasProject ? ItemScope.project(id: resolution.projectID) : .common)
         // 없는 프로젝트를 가리키면 공통으로 떨어진다.
         let safe = ProjectCatalogDraft(catalog: catalog, scope: chosen).isScopeAvailable(chosen) ? chosen : .common
@@ -471,8 +593,9 @@ final class DockModel: ObservableObject {
     func cancelEditing() {
         draft = nil
         editorNotice = nil
-        // 미리보기 외형도 버린다(저장한 외형으로 돌아간다).
+        // 미리보기 외형·배치도 버린다(저장한 값으로 돌아간다).
         discardAppearancePreview()
+        discardLayoutPreview()
         stateLog?.appendEvent("editor=close result=cancelled")
         onCloseEditor?()
     }
@@ -675,7 +798,7 @@ final class DockModel: ObservableObject {
         }
     }
 
-    /// 편집창의 **저장**: 모양 미리보기와 항목 초안을 함께 저장한다.
+    /// 편집창의 **저장**: 모양 미리보기·배치 미리보기·항목 초안을 함께 저장한다.
     func saveAll() {
         var saved: [String] = []
         var failed: [String] = []
@@ -689,6 +812,17 @@ final class DockModel: ObservableObject {
                 saved.append("모양")
             } else {
                 failed.append("모양")
+            }
+        }
+        // 배치도 같은 규칙이다. 값이 같으면 설정 파일을 건드리지 않는다.
+        if let preview = previewLayout {
+            if preview == layout {
+                unchanged.append("배치")
+                previewLayout = nil
+            } else if saveLayoutPreview() {
+                saved.append("배치")
+            } else {
+                failed.append("배치")
             }
         }
         // 항목은 **창을 닫지 않고** 저장한다(모양이 실패했는데 창이 닫히면 실패가 가려진다).
@@ -771,37 +905,31 @@ final class DockModel: ObservableObject {
             return
         }
         switch focusedItem {
-        case .item(let index): performItem(at: index, source: .keyboard)
-        case .openFolder: perform(.openFolder, source: .keyboard)
-        case .copyPath: perform(.copyPath, source: .keyboard)
-        case .lock: toggleLock()
-        case .more: showDetails()
-        case .detailsClose: hideDetails()
+        case .item(let ref): performItem(ref: ref, source: .keyboard)
+        case .details: toggleDetails()
         case .hide: hideWindow()
         case .quit: NSApplication.shared.terminate(nil)
         }
     }
 
+    /// 호출 직후의 첫 선택. **화면에 있는 것 중에서만** 고른다.
+    /// (화면에서 빠진 조작을 고르면 호출 직후 Enter가 보이지 않는 동작을 실행한다.)
     private func firstAvailableItem() -> FocusItem {
-        if !resolution.allItems.isEmpty { return .item(0) }
-        if state.canOpenFolder { return .openFolder }
-        if state.canCopyPath { return .copyPath }
-        return .lock
+        if let first = display.order.first { return .item(first.ref) }
+        return .details
     }
 
     // MARK: - 항목 실행 (앱·폴더·링크)
 
     /// 항목을 실행한다. 마우스와 키보드가 **같은 검증 경로**(`DockItemActionPlanner`)를 쓴다.
     ///
-    /// **드래그·편집 중에는 호출되지 않는다** — 실행은 클릭/Enter로만 들어온다.
-    func performItem(at index: Int, source: ActionSource = .mouse) {
-        let all = resolution.allItems
-        guard all.indices.contains(index) else {
+    /// 범위 + ID로 대상을 찾으므로 목록 순서가 바뀌어도 다른 항목이 실행되지 않는다.
+    func performItem(ref: DockItemRef, source: ActionSource = .mouse) {
+        guard let target = resolution.allItems.first(where: { $0.itemID == ref.itemID && $0.scopeID == ref.scopeID }) else {
             actionMessage = "선택한 항목을 현재 표시에서 찾을 수 없습니다"
-            stateLog?.appendEvent("item=\(index) source=\(source.rawValue) result=missing")
+            stateLog?.appendEvent("item=\(ref.label) source=\(source.rawValue) result=missing")
             return
         }
-        let target = all[index]
         switch DockItemActionPlanner.plan(target: target, in: resolution, state: state, validator: validator) {
         case .openApplication(let url):
             logItem(target, source: source, result: "allowed", detail: "app")

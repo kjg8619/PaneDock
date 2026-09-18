@@ -78,6 +78,21 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             return (message: "모양을 저장했습니다.", succeeded: true)
         }
         model.onCloseEditor = { [weak self] in self?.closeEditor() }
+        // 배치 저장: 같은 규칙으로 설정 파일에만 쓴다(projects.json은 건드리지 않는다).
+        // 값이 같으면 `SettingsStore`가 파일을 쓰지 않는다(바뀐 파일만 저장).
+        model.onSaveLayout = { [weak self] layout in
+            guard let self, let settings = self.settings else {
+                return (message: "저장할 수 없습니다: 설정 저장소를 열지 못했습니다", succeeded: false)
+            }
+            if let reason = settings.writeBlockedReason {
+                return (message: "배치를 저장하지 않았습니다: \(reason)", succeeded: false)
+            }
+            guard settings.update({ $0.layout = layout }) else {
+                return (message: "배치를 저장하지 못했습니다: 설정 파일에 쓰지 못했습니다", succeeded: false)
+            }
+            self.model?.applyLayout(layout)
+            return (message: "배치를 저장했습니다.", succeeded: true)
+        }
         model.onSaveDraft = { [weak self] catalog in
             guard let self else { return (message: "저장할 수 없습니다", succeeded: false) }
             return self.saveDraft(catalog, model: model)
@@ -338,14 +353,10 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if model.isCollapsed {
             return NSSize(width: DockBarLayout.handleWidth, height: DockBarLayout.handleHeight)
         }
-        // 구성형 화면: **저장된 배치**가 너비를 정한다(항목 수로 다시 계산하지 않는다).
-        let width = DockBarLayout.widgetBarWidth(
-            layout: model.layout,
-            commonItemCount: model.resolution.commonItems.count,
-            screenWidth: ScreenGeometry.fallbackFrame.width
-        )
+        // 구성형 화면: **화면에 그리는 표시 목록과 같은 계산**이 바 폭을 정한다.
+        // 항목 수로 다시 계산하지 않으므로 프로젝트가 바뀌어도 창이 흔들리지 않는다.
         return NSSize(
-            width: width,
+            width: model.display.barWidth,
             height: DockBarLayout.windowHeight(
                 detailsVisible: model.isDetailsVisible,
                 barHeight: model.effectiveAppearance.size.barHeight
@@ -383,16 +394,19 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         )
         // 배경 드래그를 끈다. 바의 전용 드래그 영역만 창을 옮긴다(버튼과 충돌하지 않는다).
         panel.isMovableByWindowBackground = false
-        panel.contentView = NSHostingView(rootView: DockView(model: model))
-
+        let hosting = NSHostingView(rootView: DockView(model: model))
+        // **창 크기는 모델이 계산한 값이 정한다.** SwiftUI 내용의 고유 크기가 창을 끌고 가면
+        // 화면에 그린 폭과 창 폭이 어긋난다(V18.5에서 1079pt로 벌어진 것을 로그로 확인).
+        hosting.sizingOptions = []
+        panel.contentView = hosting
 
         // 저장된 위치가 있으면 그대로 쓰고, 없으면 화면 하단이 기본이다.
         let saved = settings?.settings.windowOrigin
         let origin = ScreenGeometry.resolve(
             origin: saved.map { CGPoint(x: $0.x, y: $0.y) },
-            size: panel.frame.size
+            size: size
         )
-        panel.setFrameOrigin(origin)
+        panel.setFrame(NSRect(origin: origin, size: size), display: false)
         return panel
     }
 
@@ -442,7 +456,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         guard let model else { return }
         if editorWindow == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                contentRect: NSRect(x: 0, y: 0, width: 900, height: 760),
                 styleMask: [.titled, .closable, .resizable],
                 backing: .buffered,
                 defer: false
@@ -451,7 +465,12 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             window.isReleasedWhenClosed = false
             // 창의 닫기 버튼·Cmd+W로 닫아도 **취소와 같게** 처리한다(저장하지 않은 모양·초안이 남지 않게).
             window.delegate = self
-            window.contentView = NSHostingView(rootView: ItemEditorView(model: model))
+            // 창 크기는 **창이** 정한다(내용이 커져도 저장·취소 푸터가 잘리지 않는다).
+            let hosting = NSHostingView(rootView: ItemEditorView(model: model))
+            hosting.sizingOptions = []
+            window.contentView = hosting
+            window.minSize = NSSize(width: 860, height: 560)
+            window.setContentSize(NSSize(width: 900, height: 760))
             window.center()
             editorWindow = window
         }
@@ -527,7 +546,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     func windowWillClose(_ notification: Notification) {
         if let window = notification.object as? NSWindow, window === editorWindow {
             // 저장하지 않은 초안·미리보기가 남아 있으면 취소로 정리한다(닫아도 저장되지 않는다).
-            if model?.draft != nil || model?.previewAppearance != nil {
+            if model?.draft != nil || model?.previewAppearance != nil || model?.previewLayout != nil {
                 model?.cancelEditing()
             }
             return

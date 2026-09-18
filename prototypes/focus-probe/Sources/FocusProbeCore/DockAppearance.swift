@@ -14,7 +14,6 @@ public enum DockSizeSetting: String, Codable, Sendable, CaseIterable {
         }
     }
 
-    /// 바 높이(pt). 컴포넌트 기준으로 세 단계가 실제로 구분되는 값.
     /// 바 높이(pt). **승인된 위젯 규격(104pt)이 기본값**이고, 작게·크게는 그 기준에서 움직인다.
     /// 창 생성·리사이즈·상세 보기 계산이 모두 이 값을 쓴다.
     public var barHeight: CGFloat {
@@ -22,24 +21,6 @@ public enum DockSizeSetting: String, Codable, Sendable, CaseIterable {
         case .small: return 92
         case .regular: return DockBarLayout.widgetBarHeight
         case .large: return 116
-        }
-    }
-
-    /// 칩(항목·동작 버튼)의 세로 여백. 높이에 맞춰 클릭 영역을 확보한다.
-    public var chipVerticalPadding: CGFloat {
-        switch self {
-        case .small: return 9
-        case .regular: return 13
-        case .large: return 16
-        }
-    }
-
-    /// 항목 영역이 확보해야 하는 최소 너비. 작은 모드에서 이름이 사라지지 않게 한다.
-    public var minimumItemAreaWidth: CGFloat {
-        switch self {
-        case .small: return 170
-        case .regular: return 190
-        case .large: return 210
         }
     }
 }

@@ -7,13 +7,12 @@ private func itemSymbol(for kind: DockItemKind) -> String {
     }
 }
 
-/// 앱 항목의 실제 아이콘. 폴더·링크는 기호로 구분한다.
+/// 앱 항목의 실제 아이콘. 폴더·링크는 타일 색과 기호·이니셜로 구분한다.
 private func itemIconImage(for item: DockItemTarget) -> NSImage? {
     guard item.kind == .app else { return nil }
     let image = NSWorkspace.shared.icon(forFile: item.target)
     // 실제 앱 아이콘을 **그대로** 그린다(단색 템플릿으로 바뀌면 앱을 알아볼 수 없다).
     image.isTemplate = false
-    image.size = NSSize(width: 16, height: 16)
     return image
 }
 
@@ -30,51 +29,28 @@ import AppKit
 import FocusProbeCore
 import SwiftUI
 
-/// 가로형 Dock 바 + 상세 보기.
+/// 가로형 Dock 바 + 상세 보기. **승인된 V18 위젯형 화면**이다.
 ///
 /// ## 화면 규칙
 ///
-/// - **상태는 색만으로 전달하지 않는다.** 항상 아이콘과 한국어 이름을 함께 보여준다.
-/// - 평소에는 **프로젝트/폴더 이름·소스·짧은 상태**만 보여주고,
-///   전체 경로·pane ID·경로 출처·연결 상태·상세 사유는 **상세 보기**로 보낸다.
+/// - 구성은 **저장된 배치(`layout.order`)** 가 정한다: 공통 앱 타일(68pt) · 카드(시계·타이머) ·
+///   프로젝트 영역(폭 고정, 48pt 타일). 고정된 HStack 순서를 쓰지 않는다.
+/// - **상태는 색만으로 전달하지 않는다.** 항상 아이콘·기호·한국어 이름을 함께 보여준다.
+/// - 평소에는 이름을 줄이고, 전체 경로·pane ID·경로 출처·연결 상태·상세 사유는 **상세 보기**로 보낸다.
 /// - 오류를 숨기는 것이 목적이 아니다. 확인 불가·오류는 바에서 즉시 보이고,
 ///   선택하면 구체적인 이유를 볼 수 있다.
-/// - 긴 이름은 줄여 표시하고 **툴팁과 상세 보기**로 전체 값을 확인할 수 있다.
-/// - 인라인으로 다 못 보여주는 링크는 "+N"으로 알리고 상세 보기에 **전부** 나열한다.
+/// - 영역 안에 다 못 들어간 항목은 **`+N`·`⋯` 타일로 밀린 수를 남긴다**(조용히 자르지 않는다).
+///   공간 자체가 모자라면 프로젝트 영역을 최소 폭까지 줄이고, 그 사실을 상세 보기와 메뉴에 남긴다.
 ///
 /// ## 조작
 ///
-/// 모든 버튼은 기존 실제 기능(`DockModel`)에 연결돼 있다. 동작 없는 항목은 만들지 않는다.
+/// 모든 조작은 기존 실제 기능(`DockModel`)에 연결돼 있다. 동작 없는 항목은 만들지 않는다.
 /// 마우스와 키보드가 같은 검증 경로를 쓴다. hover와 키보드 선택은 다르게 표시한다.
 struct DockView: View {
     @ObservedObject var model: DockModel
 
-    private static let timeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter
-    }()
-
     private var availableWidth: CGFloat {
         ScreenGeometry.fallbackFrame.width
-    }
-
-    private var visibleItemCount: Int {
-        DockBarLayout.linkBudget(
-            total: model.resolution.allItems.count,
-            availableWidth: availableWidth
-        ).visible
-    }
-
-    /// 공통 항목과 프로젝트 항목의 경계(구분선을 넣을 위치).
-    private var commonItemCount: Int {
-        model.resolution.commonItems.count
-    }
-
-    /// 인라인에서 밀린 항목 수(조용히 자르지 않고 "+N"으로 알린다).
-    private var hiddenItemCount: Int {
-        // 표시 수는 모델이 배치(프로젝트 영역 폭)로 정한다 → 여기서 다시 계산하지 않는다.
-        max(0, model.resolution.allItems.count - model.visibleItemCount)
     }
 
     var body: some View {
@@ -103,7 +79,7 @@ struct DockView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
         )
-        .help("Dock이 접혀 있습니다 — 마우스를 올리면 펼쳐집니다")
+        .help("Dock이 접혀 있습니다 — 마우스를 올리면 펼쳐집니다. 타이머는 계속 진행됩니다")
         .accessibilityLabel("Dock 호출 손잡이")
         .accessibilityHint("마우스를 올리거나 단축키로 Dock을 펼칩니다")
     }
@@ -127,246 +103,405 @@ struct DockView: View {
         .shadow(color: .black.opacity(0.22), radius: 14, y: 4)
     }
 
-    // MARK: - 바
+    // MARK: - 바 (배치 순서대로)
 
     private var bar: some View {
-        HStack(spacing: 10) {
-            stateBadge
-
-            if model.isFake {
-                // 창 제목 표시줄이 없어졌으므로 가짜 모드 표시를 바 안에 둔다.
-                // 압축되지 않게 고정하고, 대비를 확실히 준다(회색 배경 위 붉은 글씨는 읽히지 않았다).
-                Text("FAKE")
-                    .font(.caption2).bold()
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 7).padding(.vertical, 4)
-                    .background(Color.red.opacity(0.85))
-                    .clipShape(Capsule())
-                    .fixedSize(horizontal: true, vertical: false)
-                    .help("가짜 데이터 모드입니다. 실제 터미널에 연결되지 않았습니다")
-                    .accessibilityLabel("가짜 데이터 모드")
+        HStack(spacing: DockBarLayout.widgetGap) {
+            ForEach(renderedComponents, id: \.self) { component in
+                // 구성요소 경계는 첫 요소를 뺀 나머지 앞에만 둔다(빈 구역은 여기 오지 않는다).
+                if component != renderedComponents.first { componentSeparator }
+                componentView(component)
             }
-
-            identityBlock
-
-            if !model.items(forInline: visibleItemCount).isEmpty {
-                separator
-                itemChips
-            }
-
-            Spacer(minLength: 6)
-
-            separator
-            actionCluster
+            rightCluster
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, DockBarLayout.widgetPadding)
         .frame(height: model.effectiveAppearance.size.barHeight)
-        // 빈 영역에서만 창을 끌 수 있다. 버튼 위에서는 클릭이 그대로 동작한다.
+        // 빈 영역에서만 창을 끌 수 있다. 타일·카드 위에서는 클릭이 그대로 동작한다.
         .background(WindowDragHandle())
     }
 
-    private var separator: some View {
+    /// 실제로 그릴 구성요소(빈 구역은 자리도 차지하지 않는다). **바 폭 계산과 같은 규칙**을 쓴다.
+    private var renderedComponents: [DockComponent] {
+        DockBarLayout.renderedComponents(
+            layout: model.effectiveLayout,
+            commonItemCount: model.resolution.commonItems.count
+        )
+    }
+
+    @ViewBuilder
+    private func componentView(_ component: DockComponent) -> some View {
+        switch component {
+        case .common: commonComponent
+        case .cards: cardsComponent
+        case .project: projectComponent
+        }
+    }
+
+    private var componentSeparator: some View {
         Rectangle()
             .fill(Color.primary.opacity(0.12))
-            .frame(width: 1, height: 34)
+            .frame(width: 1, height: 52)
     }
 
-    /// 상태를 **아이콘 + 한국어 이름**으로 보여준다(색만으로 구분하지 않는다).
-    /// 상태 표시는 **작게** — 색만으로 구분하지 않는다는 규칙은 툴팁·접근성 이름과 상세 보기가 지킨다.
-    /// (승인된 배치: 큰 진단 배지 대신 작은 점)
-    private var stateBadge: some View {
-        Circle()
-            .fill(stateColor)
-            .frame(width: 10, height: 10)
-            .overlay(Circle().strokeBorder(stateColor.opacity(0.35), lineWidth: 3).padding(-3))
-            .help(shortStatusHelp)
-            .accessibilityLabel("상태: \(stateLabel)")
-    }
+    // MARK: - 공통 앱 구역 (68pt 타일)
 
-    /// 현재 프로젝트/폴더 이름과 소스·짧은 상태.
-    private var identityBlock: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(primaryTitle)
-                .font(.headline)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .help(primaryTitleHelp)
-                .accessibilityLabel("대상: \(primaryTitle)")
-
-            Text(secondaryLine)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .help(secondaryLineHelp)
+    private var commonComponent: some View {
+        HStack(spacing: DockBarLayout.tileGap) {
+            ForEach(model.display.common) { entry in
+                appTile(entry)
+            }
+            if model.display.commonHidden > 0 {
+                overflowTile(
+                    count: model.display.commonHidden,
+                    size: DockBarLayout.appTileSize,
+                    radius: 17,
+                    help: "자리가 없어 밀린 공통 항목 \(model.display.commonHidden)개 — 상세 보기에서 전부 확인할 수 있습니다"
+                )
+            }
         }
-        .frame(minWidth: DockBarLayout.projectAreaMinimumWidth, alignment: .leading)
-        // 이름 영역이 먼저 줄어들고(줄임 표시), 칩은 크기를 지킨다.
-        .layoutPriority(0)
     }
 
-    /// 등록한 항목(공통 → 프로젝트). 앱은 실제 앱 아이콘, 폴더·링크는 구분되는 기호를 쓴다.
-    private var itemChips: some View {
-        HStack(spacing: 6) {
-            ForEach(model.items(forInline: visibleItemCount)) { entry in
-                if entry.index == commonItemCount, commonItemCount > 0 {
-                    // 공통 항목과 프로젝트 항목의 경계.
-                    Rectangle().fill(Color.primary.opacity(0.12)).frame(width: 1, height: 26)
+    private func appTile(_ entry: DockDisplayItem) -> some View {
+        let item = entry.item
+        let ref = entry.ref
+        return Button(action: { model.performItem(ref: ref, source: .mouse) }) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 17, style: .continuous)
+                    .fill(tileGradient(for: item))
+                tileFace(for: item, iconSize: 40, symbolSize: 26, letterSize: 26)
+            }
+            .frame(width: DockBarLayout.appTileSize, height: DockBarLayout.appTileSize)
+            .overlay(alignment: .bottom) {
+                if model.runningAppPaths.contains(item.target) {
+                    Circle()
+                        .fill(Color.black.opacity(0.45))
+                        .frame(width: 5, height: 5)
+                        .offset(y: -5)
                 }
-                chip(
-                    icon: itemSymbol(for: entry.item.kind),
-                    image: itemIconImage(for: entry.item),
-                    label: entry.item.name,
-                    item: .item(entry.index),
-                    // 아이콘 중심 모드는 **등록 항목의 라벨만** 줄인다. 툴팁·접근성 이름은 남긴다.
-                    showsLabel: model.effectiveAppearance.labelMode.showsItemLabels,
-                    help: itemHelp(for: entry.item),
-                    action: { model.performItem(at: entry.index, source: .mouse) }
-                )
             }
-            if hiddenItemCount > 0 {
-                chip(
-                    icon: "ellipsis",
-                    label: "+\\(hiddenItemCount)",
-                    item: .more,
-                    help: "표시하지 못한 항목 \\(hiddenItemCount)개. 더보기에서 전부 확인할 수 있습니다.",
-                    action: { model.showDetails() }
-                )
-            }
-        }
-    }
-
-    /// 보조 동작은 **작은 ⋯ 메뉴**로 접는다(승인된 배치).
-    /// 열기·복사·잠금은 초점 목록에서도 빠져 있어 화면과 키보드가 어긋나지 않는다.
-    /// "더보기"는 화면에 남겨 키보드 초점의 시각 앵커로 쓴다.
-    private var actionCluster: some View {
-        HStack(spacing: 6) {
-            Menu {
-                Button("현재 폴더 열기") { model.perform(.openFolder, source: .mouse) }
-                    .disabled(!model.state.canOpenFolder)
-                Button("현재 경로 복사") { model.perform(.copyPath, source: .mouse) }
-                    .disabled(!model.state.canCopyPath)
-                Divider()
-                Button(model.state.isLocked ? "고정 해제" : "표시 대상 고정") { model.toggleLock() }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 34, height: 34)
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .help("보조 동작: 현재 폴더 열기 · 경로 복사 · 표시 대상 고정")
-            .accessibilityLabel("보조 동작 메뉴")
-
-            chip(
-                icon: "ellipsis.circle",
-                label: "더보기",
-                item: model.isDetailsVisible ? .detailsClose : .more,
-                help: model.isDetailsVisible ? "상세 보기를 닫습니다 (Esc)" : "경로·pane·연결 상태 등 상세 정보",
-                action: { model.toggleDetails() }
+            .overlay(
+                RoundedRectangle(cornerRadius: 17, style: .continuous)
+                    .strokeBorder(
+                        model.focusedItem == .item(ref) ? Color.accentColor : Color.clear,
+                        lineWidth: 2.5
+                    )
             )
-        }
-    }
-
-    /// 바에서 쓰는 공통 칩. 링크와 동작 버튼이 **같은 모양·같은 표시 규칙**을 쓴다.
-    private func chip(
-        icon: String,
-        image: NSImage? = nil,
-        label: String,
-        item: DockModel.FocusItem,
-        enabled: Bool = true,
-        showsLabel: Bool = true,
-        help: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
-                if let image {
-                    Image(nsImage: image).frame(width: 30, height: 30)
-                } else {
-                    Image(systemName: icon).font(.system(size: 22, weight: .medium))
-                }
-                if showsLabel {
-                    Text(label).font(.caption).lineLimit(1)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, model.effectiveAppearance.size.chipVerticalPadding)
-            // 칩은 **압축되지 않게** 고정한다. 압축되면 라벨이 사라져 아이콘만 남는다.
-            // 넘치는 링크는 인라인 수를 줄이고 "+N"으로 알린다.
-            .fixedSize(horizontal: true, vertical: false)
-            .background(fill(for: item))
-            .overlay(focusRing(for: item))
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .opacity(enabled ? 1 : 0.4)
+            .shadow(color: .black.opacity(0.35), radius: 6, y: 3)
         }
         .buttonStyle(.plain)
-        .disabled(!enabled)
         .onHover { inside in
-            // 벗어날 때는 **다른 항목으로 옮겨간 경우**를 덮어쓰지 않는다.
-            model.setHover(inside ? item : (model.hoveredItem == item ? nil : model.hoveredItem))
+            model.setHover(inside ? .item(ref) : (model.hoveredItem == .item(ref) ? nil : model.hoveredItem))
         }
+        .help(itemHelp(for: item))
+        .accessibilityLabel(itemHelp(for: item))
+    }
+
+    // MARK: - 카드 구역
+
+    private var cardsComponent: some View {
+        HStack(spacing: DockBarLayout.cardGap) {
+            ForEach(model.effectiveLayout.cards) { card in
+                switch card.kind {
+                case .clock:
+                    ClockCardView(now: model.now)
+                case .focusTimer:
+                    FocusTimerCardView(
+                        cardID: card.id,
+                        state: model.timerState(for: card.id),
+                        now: model.now,
+                        onStart: { model.startTimer(cardID: card.id) },
+                        onPause: { model.pauseTimer(cardID: card.id) },
+                        onReset: { model.resetTimer(cardID: card.id) }
+                    )
+                }
+            }
+        }
+    }
+
+    // MARK: - 프로젝트 영역 (폭 고정 · 내부에서 넘침 처리)
+
+    private var projectComponent: some View {
+        HStack(spacing: DockBarLayout.tileGap) {
+            if model.resolution.hasProject {
+                ForEach(model.display.project) { entry in
+                    projectTile(entry)
+                }
+                if model.display.projectHidden > 0 {
+                    overflowTile(
+                        count: model.display.projectHidden,
+                        size: DockBarLayout.projectTileSize,
+                        radius: 13,
+                        help: "이 영역에 다 들어가지 않은 항목 \(model.display.projectHidden)개 — 상세 보기에서 전부 확인할 수 있습니다"
+                    )
+                }
+            } else {
+                Text(emptyAreaText)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                addProjectTile
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(width: model.display.projectAreaWidth, height: DockBarLayout.cardHeight, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(model.resolution.hasProject ? Color.primary.opacity(0.04) : Color.orange.opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(
+                    model.resolution.hasProject ? Color.primary.opacity(0.20) : Color.orange.opacity(0.45),
+                    style: StrokeStyle(lineWidth: 1, dash: model.resolution.hasProject ? [4, 3] : [])
+                )
+        )
+        .overlay(alignment: .topLeading) { areaLabel }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(areaAccessibilityLabel)
+    }
+
+    /// 사용자가 옮길 수 있는 영역임을 알리는 라벨(승인된 배치).
+    private var areaLabel: some View {
+        Text(model.resolution.hasProject ? "프로젝트 · \(model.resolution.projectName)" : "프로젝트 · 미등록")
+            .font(.system(size: 9.5))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.primary.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+            )
+            .offset(x: 14, y: -9)
+    }
+
+    private var emptyAreaText: String {
+        let folder = model.state.folderName
+        return folder == "-"
+            ? "이 경로에 등록된 프로젝트가 없습니다"
+            : "\(folder) · 등록된 프로젝트가 없습니다"
+    }
+
+    private var areaAccessibilityLabel: String {
+        model.resolution.hasProject
+            ? "프로젝트 영역 \(model.resolution.projectName), 항목 \(model.display.project.count)개 표시"
+            : "프로젝트 영역 미등록 — \(emptyAreaText)"
+    }
+
+    private func projectTile(_ entry: DockDisplayItem) -> some View {
+        let item = entry.item
+        let ref = entry.ref
+        return Button(action: { model.performItem(ref: ref, source: .mouse) }) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(tileGradient(for: item))
+                tileFace(for: item, iconSize: 26, symbolSize: 19, letterSize: 19)
+            }
+            .frame(width: DockBarLayout.projectTileSize, height: DockBarLayout.projectTileSize)
+            .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(
+                        model.focusedItem == .item(ref) ? Color.accentColor : Color.clear,
+                        lineWidth: 2.5
+                    )
+            )
+            .shadow(color: .black.opacity(0.3), radius: 5, y: 2)
+        }
+        .buttonStyle(.plain)
+        .onHover { inside in
+            model.setHover(inside ? .item(ref) : (model.hoveredItem == .item(ref) ? nil : model.hoveredItem))
+        }
+        .help(itemHelp(for: item))
+        .accessibilityLabel(itemHelp(for: item))
+    }
+
+    /// 미등록 경로에서 프로젝트를 등록하러 가는 타일(동작 없는 타일을 두지 않는다).
+    private var addProjectTile: some View {
+        Button(action: { model.onOpenEditor?() }) {
+            Image(systemName: "plus")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: DockBarLayout.projectTileSize, height: DockBarLayout.projectTileSize)
+                .background(
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.16), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .help("Dock 편집을 열어 이 경로를 프로젝트로 등록합니다")
+        .accessibilityLabel("프로젝트 등록 — Dock 편집 열기")
+    }
+
+    /// 영역·구역에서 밀린 항목을 알리는 타일(클릭하면 상세 보기에서 전부 볼 수 있다).
+    private func overflowTile(count: Int, size: CGFloat, radius: CGFloat, help: String) -> some View {
+        Button(action: { model.showDetails() }) {
+            Text("+\(count)")
+                .font(.system(size: size > 50 ? 14 : 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: size, height: size)
+                .background(
+                    RoundedRectangle(cornerRadius: radius, style: .continuous)
+                        .fill(Color.primary.opacity(0.07))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: radius, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.16), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
         .help(help)
         .accessibilityLabel(help)
     }
 
-    /// hover는 옅은 채움, 키보드 선택은 테두리. 두 상태를 **다르게** 보여준다.
-    private func fill(for item: DockModel.FocusItem) -> some View {
-        RoundedRectangle(cornerRadius: 9, style: .continuous)
-            .fill(Color.primary.opacity(model.hoveredItem == item ? 0.12 : 0.05))
+    // MARK: - 오른쪽 조작 (상태 점 · ⋯ 메뉴)
+
+    private var rightCluster: some View {
+        HStack(spacing: DockBarLayout.controlGap) {
+            // 남는 공간은 여기서 흡수한다(타일·카드·영역은 자기 폭을 지킨다).
+            Spacer(minLength: DockBarLayout.minimumTrailingGap)
+            if model.isFake {
+                // 테두리 없는 패널이라 창 제목이 없다 → 가짜 모드 표시를 바 안에 둔다.
+                // 폭을 고정해 **바 기하 계산과 화면이 어긋나지 않게** 한다.
+                Text("FAKE")
+                    .font(.caption2).bold()
+                    .foregroundStyle(.white)
+                    .frame(width: DockBarLayout.fakeBadgeWidth)
+                    .padding(.vertical, 4)
+                    .background(Color.red.opacity(0.85))
+                    .clipShape(Capsule())
+                    .fixedSize()
+                    .help("가짜 데이터 모드입니다. 실제 터미널에 연결되지 않았습니다")
+                    .accessibilityLabel("가짜 데이터 모드")
+            }
+            stateDot
+            actionMenu
+        }
     }
 
-    @ViewBuilder
-    private func focusRing(for item: DockModel.FocusItem) -> some View {
-        if model.focusedItem == item {
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(Color.accentColor, lineWidth: 2)
+    /// 상태를 **점 하나**로 줄였다(승인된 배치). 색만으로 전달하지 않는다는 규칙은
+    /// 툴팁·접근성 이름·상세 보기로 지킨다. 클릭하면 상세 정보가 열린다(키보드 초점의 앵커).
+    private var stateDot: some View {
+        Button(action: { model.toggleDetails() }) {
+            Circle()
+                .fill(stateColor)
+                .frame(width: 10, height: 10)
+                .overlay(Circle().strokeBorder(stateColor.opacity(0.35), lineWidth: 3).padding(-3))
+                .frame(width: 30, height: 30)
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(model.focusedItem == .details ? Color.accentColor : Color.clear, lineWidth: 2)
+        )
+        .help("\(stateLabel) — \(shortStatusHelp)\n클릭하면 상세 정보를 \(model.isDetailsVisible ? "닫습니다" : "엽니다")")
+        .accessibilityLabel("상태: \(stateLabel)")
+        .accessibilityHint(model.isDetailsVisible ? "상세 정보를 닫습니다" : "상세 정보를 엽니다")
+    }
+
+    /// 보조 동작은 **작은 ⋯ 메뉴**로 접는다(승인된 배치).
+    /// 열기·복사·잠금은 초점 목록에 없고, 상세 보기 토글은 상태 점이 맡는다(표시와 조작이 어긋나지 않게).
+    private var actionMenu: some View {
+        Menu {
+            Button(model.isDetailsVisible ? "상세 보기 닫기" : "상세 보기 열기") { model.toggleDetails() }
+            Divider()
+            Button("현재 폴더 열기") { model.perform(.openFolder, source: .menu) }
+                .disabled(!model.state.canOpenFolder)
+            Button("현재 경로 복사") { model.perform(.copyPath, source: .menu) }
+                .disabled(!model.state.canCopyPath)
+            Divider()
+            Button(model.state.isLocked ? "고정 해제" : "표시 대상 고정") { model.toggleLock() }
+            if model.display.isSpaceShort {
+                Divider()
+                // 공간 부족은 **조용히 넘어가지 않는다**: 왜 항목이 밀렸는지 여기서도 밝힌다.
+                Button("공간 부족 — 배치가 화면보다 \(Int(model.display.demandWidth - model.display.barWidth))pt 넓습니다. 프로젝트 영역 폭을 줄이세요") {
+                    model.showDetails()
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 14, weight: .semibold))
+                .frame(width: 38, height: 38)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.primary.opacity(0.08))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.14), lineWidth: 1)
+                )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("보조 동작: 상세 보기 · 현재 폴더 열기 · 경로 복사 · 표시 대상 고정")
+        .accessibilityLabel("보조 동작 메뉴")
+    }
+
+    // MARK: - 타일 모양
+
+    /// 타일 배경. 폴더는 **색 + 이니셜**로 구분하고, 링크·앱은 종류가 드러나는 색을 쓴다.
+    private func tileGradient(for item: DockItemTarget) -> LinearGradient {
+        let colors: [Color]
+        switch item.kind {
+        case .app:
+            colors = [Color.primary.opacity(0.16), Color.primary.opacity(0.06)]
+        case .link:
+            colors = [Color(red: 0.50, green: 0.76, blue: 1.0), Color(red: 0.24, green: 0.50, blue: 0.85)]
+        case .folder:
+            colors = folderPalette[stableColorIndex(for: item.itemID)]
+        }
+        return LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+
+    private func tileFace(for item: DockItemTarget, iconSize: CGFloat, symbolSize: CGFloat, letterSize: CGFloat) -> some View {
+        Group {
+            if let image = itemIconImage(for: item) {
+                Image(nsImage: image).resizable().frame(width: iconSize, height: iconSize)
+            } else if item.kind == .folder {
+                Text(folderInitial(for: item.name))
+                    .font(.system(size: letterSize, weight: .bold, design: .rounded))
+                    .foregroundStyle(.black.opacity(0.72))
+                    .lineLimit(1)
+            } else {
+                Image(systemName: itemSymbol(for: item.kind))
+                    .font(.system(size: symbolSize, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+        }
+    }
+
+    private func folderInitial(for name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first else { return "?" }
+        return String(first).uppercased()
+    }
+
+    /// 항목 id로 **실행마다 같은** 색을 고른다(Swift `hashValue`는 실행마다 달라져 쓸 수 없다).
+    private func stableColorIndex(for id: String) -> Int {
+        let sum = id.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) % 9973 }
+        return sum % folderPalette.count
+    }
+
+    private var folderPalette: [[Color]] {
+        [
+            [Color(red: 1.00, green: 0.82, blue: 0.40), Color(red: 0.94, green: 0.65, blue: 0.17)],
+            [Color(red: 0.48, green: 0.83, blue: 0.63), Color(red: 0.20, green: 0.63, blue: 0.42)],
+            [Color(red: 0.78, green: 0.66, blue: 1.00), Color(red: 0.54, green: 0.39, blue: 0.88)],
+            [Color(red: 1.00, green: 0.64, blue: 0.55), Color(red: 0.85, green: 0.42, blue: 0.45)],
+            [Color(red: 0.55, green: 0.85, blue: 0.92), Color(red: 0.24, green: 0.58, blue: 0.72)],
+        ]
     }
 
     // MARK: - 문구
-
-    /// 프로젝트가 잡히면 프로젝트 이름, 아니면 폴더 이름.
-    private var primaryTitle: String {
-        if model.resolution.hasProject { return model.resolution.projectName }
-        if model.state.fullPath != nil { return model.state.folderName }
-        return "대상 확인 중"
-    }
-
-    private var primaryTitleHelp: String {
-        if model.resolution.hasProject {
-            return "프로젝트: \(model.resolution.projectName) (기준 폴더 \(model.resolution.projectRoot))"
-        }
-        return model.state.fullPath ?? "아직 대상을 확인하지 못했습니다"
-    }
-
-    /// 소스·짧은 상태. 상세 정보는 상세 보기로 보낸다.
-    ///
-    /// **아이콘 중심 모드에서 마우스를 올린 항목은 이름을 여기에 띄운다.**
-    /// 라벨을 숨긴 항목을 확인할 수 있는 수단이다(툴팁과 함께 제공).
-    private var secondaryLine: String {
-        if !model.effectiveAppearance.labelMode.showsItemLabels,
-           case .item(let index) = model.hoveredItem,
-           model.resolution.allItems.indices.contains(index) {
-            let item = model.resolution.allItems[index]
-            return "\(item.kind.label) · \(item.name)"
-        }
-        var parts: [String] = []
-        if let host = model.state.hostAppID { parts.append(host) }
-        if let folder = model.state.fullPath.map(URL.init(fileURLWithPath:)) {
-            parts.append(folder.lastPathComponent)
-        }
-        if model.isFake { parts.append("[FAKE]") }
-        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
-    }
-
-    private var secondaryLineHelp: String {
-        var lines: [String] = []
-        if let host = model.state.hostAppID { lines.append("추적 소스: \(host)") }
-        if let path = model.state.fullPath { lines.append("경로: \(path)") }
-        if let detail = model.state.detail { lines.append(detail) }
-        return lines.isEmpty ? "정보 없음" : lines.joined(separator: "\n")
-    }
 
     private var stateLabel: String {
         switch model.state.display {
@@ -375,16 +510,6 @@ struct DockView: View {
         case .locked: return "잠금"
         case .pending: return "확인 중"
         case .error: return "오류"
-        }
-    }
-
-    private var stateSymbol: String {
-        switch model.state.display {
-        case .tracked: return "scope"
-        case .held: return "pause.circle"
-        case .locked: return "lock.fill"
-        case .pending: return "clock"
-        case .error: return "exclamationmark.triangle.fill"
         }
     }
 
@@ -407,18 +532,6 @@ struct DockView: View {
         case .pending: return "아직 실행할 대상을 확인하지 못했습니다"
         case .error: return "조회에 실패했거나 경로를 사용할 수 없습니다"
         }
-    }
-
-    private var openHelp: String {
-        model.state.canOpenFolder
-            ? "현재 폴더를 Finder로 엽니다 — \(model.state.fullPath ?? "-")"
-            : "지금은 열 수 없습니다: \(model.state.detail ?? "실행할 대상을 확인하는 중입니다")"
-    }
-
-    private var copyHelp: String {
-        model.state.canCopyPath
-            ? "현재 경로를 클립보드로 복사합니다 — \(model.state.fullPath ?? "-")"
-            : "지금은 복사할 수 없습니다: \(model.state.detail ?? "실행할 대상을 확인하는 중입니다")"
     }
 }
 
@@ -459,6 +572,7 @@ struct DockDetailsView: View {
                 if let notice = model.settingsNotice {
                     labeled("설정 파일", notice, color: .orange)
                 }
+                displaySection
                 itemSection
                 Divider()
                 footer
@@ -479,11 +593,11 @@ struct DockDetailsView: View {
             }
             .buttonStyle(.plain)
             .help("상세 보기를 닫습니다 (Esc)")
-            .onHover { model.setHover($0 ? .detailsClose : nil) }
+            .onHover { model.setHover($0 ? .details : nil) }
             .overlay(
                 RoundedRectangle(cornerRadius: 6)
                     .strokeBorder(
-                        model.focusedItem == .detailsClose ? Color.accentColor : .clear,
+                        model.focusedItem == .details ? Color.accentColor : .clear,
                         lineWidth: 2
                     )
             )
@@ -508,6 +622,50 @@ struct DockDetailsView: View {
         }
     }
 
+    /// 표시 목록·배치 상태. **화면에 그린 수와 밀린 수를 같은 출처에서** 보여준다.
+    @ViewBuilder
+    private var displaySection: some View {
+        Divider()
+        HStack(spacing: 16) {
+            small("표시", "\(model.display.visibleItemCount)개")
+            small("숨김", "\(model.display.hiddenItemCount)개")
+            small("영역 폭", "\(Int(model.display.projectAreaWidth))pt")
+            small("바 폭", "\(Int(model.display.barWidth))pt")
+        }
+        small(
+            "배치",
+            model.effectiveLayout.order.map(\.label).joined(separator: " → ")
+                + " · 카드 \(model.effectiveLayout.cards.count)개"
+        )
+        if model.display.isSpaceShort {
+            labeled(
+                "공간 부족",
+                "배치가 화면보다 \(Int(model.display.demandWidth - model.display.barWidth))pt 넓어 프로젝트 영역을 \(Int(model.display.projectAreaWidth))pt로 줄였습니다. "
+                    + "밀린 항목은 위 목록과 편집기에서 확인할 수 있습니다.",
+                color: .orange,
+                selectable: false
+            )
+        }
+        if model.display.hiddenItemCount > 0 {
+            labeled(
+                "밀린 항목",
+                hiddenItemSummary,
+                color: .orange,
+                selectable: false
+            )
+        }
+    }
+
+    private var hiddenItemSummary: String {
+        var parts: [String] = []
+        if model.display.commonHidden > 0 { parts.append("공통 \(model.display.commonHidden)개") }
+        if model.display.projectHidden > 0 { parts.append("프로젝트 \(model.display.projectHidden)개") }
+        let names = model.resolution.allItems
+            .filter { target in !model.display.order.contains { $0.ref == target.ref } }
+            .map(\.name)
+        return parts.joined(separator: " · ") + (names.isEmpty ? "" : " — \(names.joined(separator: ", "))")
+    }
+
     private var connectionText: String {
         guard let info = model.state.connectionStatus else { return "-" }
         switch info {
@@ -524,7 +682,7 @@ struct DockDetailsView: View {
         return frontmost ? "최전면" : "비활성"
     }
 
-    /// 등록한 항목 전체. 바에서 "+N"으로 밀린 항목도 **여기서는 전부** 접근할 수 있다.
+    /// 등록한 항목 전체. 바에서 밀린 항목도 **여기서는 전부** 접근할 수 있다.
     @ViewBuilder
     private var itemSection: some View {
         Divider()
@@ -539,25 +697,28 @@ struct DockDetailsView: View {
             Spacer()
             Button("Dock 편집…") { model.onOpenEditor?() }
                 .buttonStyle(.bordered)
-                .help("앱·폴더·링크를 추가하고 순서를 바꿉니다")
+                .help("앱·폴더·링크를 추가하고 배치·순서를 바꿉니다")
         }
         if model.resolution.hasProject {
             labeled("프로젝트", model.resolution.projectName, selectable: false)
             labeled("기준 폴더", model.resolution.projectRoot)
         }
-        ForEach(Array(model.resolution.allItems.enumerated()), id: \.element.itemID) { index, item in
-            itemRow(item, index: index)
+        ForEach(model.resolution.allItems, id: \.ref) { item in
+            itemRow(item)
         }
         if !model.resolution.diagnostics.isEmpty {
             labeled("프로젝트 경고", model.resolution.diagnostics.prefix(2).joined(separator: "\n"), color: .orange)
         }
     }
 
-    private func itemRow(_ item: DockItemTarget, index: Int) -> some View {
-        Button(action: { model.performItem(at: index, source: .mouse) }) {
+    private func itemRow(_ item: DockItemTarget) -> some View {
+        let ref = item.ref
+        let isShown = model.display.order.contains { $0.ref == ref }
+        return Button(action: { model.performItem(ref: ref, source: .mouse) }) {
             HStack(spacing: 6) {
                 if item.kind == .app {
                     Image(nsImage: NSWorkspace.shared.icon(forFile: item.target))
+                        .resizable()
                         .frame(width: 14, height: 14)
                 } else {
                     Image(systemName: itemSymbol(for: item.kind)).font(.caption2)
@@ -565,6 +726,10 @@ struct DockDetailsView: View {
                 Text(item.name).font(.caption).bold().lineLimit(1)
                 Text(item.isCommon ? "공통" : "프로젝트")
                     .font(.caption2).foregroundStyle(.secondary)
+                if !isShown {
+                    // 바에서 밀린 항목임을 숨기지 않는다.
+                    Text("바에서 밀림").font(.caption2).foregroundStyle(.orange)
+                }
                 Text(item.target).font(.caption2).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 0)
@@ -572,16 +737,16 @@ struct DockDetailsView: View {
             .padding(.horizontal, 6).padding(.vertical, 3)
             .background(
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.primary.opacity(model.hoveredItem == .item(index) ? 0.12 : 0.04))
+                    .fill(Color.primary.opacity(model.hoveredItem == .item(ref) ? 0.12 : 0.04))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(model.focusedItem == .item(index) ? Color.accentColor : .clear, lineWidth: 2)
+                    .strokeBorder(model.focusedItem == .item(ref) ? Color.accentColor : .clear, lineWidth: 2)
             )
         }
         .buttonStyle(.plain)
         .onHover { inside in
-            model.setHover(inside ? .item(index) : (model.hoveredItem == .item(index) ? nil : model.hoveredItem))
+            model.setHover(inside ? .item(ref) : (model.hoveredItem == .item(ref) ? nil : model.hoveredItem))
         }
         .help(itemHelp(for: item))
     }
