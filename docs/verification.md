@@ -3488,10 +3488,10 @@ menu=close source=keyboard                            (Esc가 **메뉴만** 닫�
 
 | 항목 | 내용 |
 | --- | --- |
-| 빌드 식별자 | 저장소 `main` **e4daf61** 기준 작업 트리 + V19 수정. 번들 `0.2a · 빌드 44 · e4daf61 · 수정된 트리`(상세 보기 '빌드' 줄에서 확인) |
+| 빌드 식별자 | 저장소 `main` **03a8518** 기준 작업 트리 + V19 마무리 수정. 번들 `0.2.0 alpha · 빌드 46 · 03a8518 · 수정된 트리`(상세 보기 '빌드' 줄에서 확인) |
 | 실행(번들) | `bash app/PaneDock/make-app.sh` → `open app/PaneDock/dist/PaneDock.app` (ad-hoc 서명, Dock 아이콘 없이 메뉴 막대에만) |
 | 실행(개발) | `cd app/PaneDock && swift build && .build/debug/PaneDock [--fake steady\|toggle\|missing] [--adapter auto\|ghostty\|cmux] [--self-check]` |
-| 자체 검사 | `cd prototypes/focus-probe && swift build && .build/debug/focus-probe --self-test` (현재 **183/183**) |
+| 자체 검사 | `cd prototypes/focus-probe && swift build && .build/debug/focus-probe --self-test` (현재 **184/184**) |
 | 확인한 환경 | macOS 27.0(26A428) · Apple M5 Pro · 화면 1512×982pt(visible 1512×859) · Ghostty 1.3.1 · cmux(`socketControlMode=automation`, 기본값) |
 | 진단 플래그 | `--state-log <path>` · `--settings-path`(임시 설정) · `--projects-path`(임시 카탈로그) · `--details` · `--editor` · `--timer-seconds` · `--timer-autostart` · `--key-selftest` |
 | 알려진 제한 | ① 중첩 TUI(herdr·tmux) 내부 경로는 공식 조회로 알 수 없다(바깥 프로세스 경로만) ② Herdr 연동은 지원 범위 밖 ③ 타이머 상태는 앱 종료 후 복원되지 않는다 ④ 프로젝트 전환은 **부분 전환**(프로젝트 영역만) — 전체 Dock 프로필 전환은 만들지 않았다 ⑤ cmux는 읽기 전용(identify·sidebar-state)이며 이 환경에서 파이프 수집 시 멈추던 문제를 **우회**로 피한다 |
@@ -3522,7 +3522,18 @@ menu=close source=keyboard                            (Esc가 **메뉴만** 닫�
 **4) 설명 일치** — `CmuxAdapter.run()` 주석의 파이프 서술을 V18.22의 제한된 관측(시험한 Swift `Process` 경로 · Python 파이프는 정상 ·
 내부 원인 미확정)으로 맞췄다. **출력 수집 방식은 다시 구현하지 않았다.**
 
-검사: 현재 빌드로 **183/183**(신규 3건 — 버전/빌드/SHA 구분 · 수정된 트리 표시 · 번들 정보 없을 때 개발 빌드 표시).
+검사: 현재 빌드로 **184/184**(신규 4건 — 버전/빌드/SHA 구분 · 수정된 트리 표시 · 번들 정보 없을 때 개발 빌드 표시 ·
+**버전 문자열은 숫자 점 표기, 단계 표시는 분리**).
+
+**마무리 정리(2026-09-18 추가)**
+
+- **번들 버전 형식**: `CFBundleShortVersionString`은 `0.2.0`(숫자 점 표기)만 쓴다. `alpha` 같은 단계 표시는
+  `PaneDockReleaseStage`(사용자용 문구)로 분리해 버전 문자열에 섞지 않는다. 빌드 번호·SHA·dirty 표시는 그대로다.
+- **생성된 Info.plist ↔ 앱 표시 일치 확인**: plist `0.2.0 / alpha / 46 / 03a8518 / 1` ↔ 상세 보기
+  `0.2.0 alpha · 빌드 46 · 03a8518 · 수정된 트리`(`shots/v19-B-version.png`). 이 빌드는 **커밋 전 작업 트리**였으므로 그대로 표시된다.
+- **도움말 일치**: “물리 키보드 입력은 확인이 필요하다” 문구를 최신 결과(사용자 직접 확인)로 바꾸고,
+  cmux는 **CLI가 설치돼 있고 소켓 접근이 허용된 환경**에서만 읽는다고 명시했다(설치만으로 항상 연결된다고 일반화하지 않는다).
+- 실행본: `make-app.sh` 출력 `version=0.2.0 stage=alpha build=46 sha=03a8518 dirty=1`.
 
 **미검증(갱신)**: ① `pending` 화면 캡처(판정·문구는 검사로 고정) ② cmux 파이프 정지의 내부 원인 ③ 저장 시 `card=prune` 로그 줄 자체.
 **물리 키보드 입력은 이번에 사용자 확인으로 닫혔다.**
