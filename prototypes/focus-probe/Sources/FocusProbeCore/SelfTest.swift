@@ -1060,7 +1060,22 @@ public enum SelfTest {
             "보이는 카드=\(cardOverflow.visibleCards.count) 밀림=\(cardOverflow.cardHidden) 바=\(Int(cardOverflow.barWidth)) 필요=\(Int(cardOverflow.demandWidth))"
         ))
 
-        // 8d. 공통 항목이 **전부 밀려** `display.common`이 비어도 화면에는 `+N` 타일이 있으므로
+        // 8d. 프로젝트 패널(A 시안)로 바뀌어도 **바깥 폭·타일 한 줄의 폭·넘침 계산은 그대로**여야 한다.
+        let panelWidths: [Double] = [240, 300, 360, 620]
+        let panelFits = panelWidths.allSatisfy { width in
+            let budget = DockBarLayout.projectTileBudget(width: width, tileCount: 12, labelMode: .iconOnly)
+            let used = CGFloat(budget.visible) * DockBarLayout.projectTileStride - DockBarLayout.tileGap
+            return used <= CGFloat(width) - 2 * DockBarLayout.projectPanelPadding + 0.5
+        }
+        results.append(check(
+            "표시: 패널 헤더가 타일 폭·넘침 계산을 잠식하지 않는다",
+            panelFits
+                && DockBarLayout.projectPanelPadding * 2 - DockBarLayout.tileGap <= DockBarLayout.widgetPadding
+                && DockBarLayout.projectPanelHeight <= DockBarLayout.widgetBarHeight - 12,
+            "패널높이=\(Int(DockBarLayout.projectPanelHeight)) 여백=\(Int(DockBarLayout.projectPanelPadding))*2−간격=\(Int(DockBarLayout.projectPanelPadding * 2 - DockBarLayout.tileGap)) ≤ 예약=\(Int(DockBarLayout.widgetPadding)) · 넓이별 타일 맞음=\(panelFits)"
+        ))
+
+        // 8e. 공통 항목이 **전부 밀려** `display.common`이 비어도 화면에는 `+N` 타일이 있으므로
         //     키보드로도 그 타일에 갈 수 있어야 한다(계획과 화면의 구성요소 판단이 같아야 한다).
         var tight = layout
         tight.projectAreaWidth = DockLayout.maximumProjectAreaWidth

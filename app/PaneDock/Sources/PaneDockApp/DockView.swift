@@ -242,9 +242,86 @@ struct DockView: View {
 
     // MARK: - 프로젝트 영역 (폭 고정 · 내부에서 넘침 처리)
 
+    /// 프로젝트 패널(A 시안): **작은 헤더 + 아래 도구 타일**. 점선·모서리 라벨을 쓰지 않는다.
+    ///
+    /// - 외부 폭(`projectAreaWidth`)과 공통 구성 위치는 그대로다. 바깥 높이·여백·표현만 바꾼다.
+    /// - 헤더는 별도 줄이라 **타일 한 줄의 폭을 잠식하지 않는다**(더보기 계산은 그대로 유지된다).
+    /// - 진단 정보(전체 경로·pane·연결 상태)는 기존 상세 보기에서 계속 본다.
     private var projectComponent: some View {
-        HStack(spacing: DockBarLayout.tileGap) {
-            if model.display.projectRegistered {
+        VStack(alignment: .leading, spacing: 4) {
+            panelHeader
+            panelBody
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .frame(width: model.display.projectAreaWidth, height: DockBarLayout.projectPanelHeight, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(panelFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(panelStroke, lineWidth: 1)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(areaAccessibilityLabel)
+    }
+
+    /// 패널 배경: 등록된 프로젝트는 밝은 패널, 미등록은 주황 기운, 확인 실패는 붉은 기운.
+    private var panelFill: Color {
+        if model.display.projectRegistered { return Color.primary.opacity(0.07) }
+        return model.state.isActionable ? Color.orange.opacity(0.10) : Color.red.opacity(0.08)
+    }
+
+    private var panelStroke: Color {
+        if model.display.projectRegistered { return Color.primary.opacity(0.14) }
+        return model.state.isActionable ? Color.orange.opacity(0.40) : Color.red.opacity(0.35)
+    }
+
+    /// 헤더: 상태 점 · 프로젝트 이름 · 보조(호스트) 정보 · 메뉴.
+    private var panelHeader: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(panelStatusColor)
+                .frame(width: 7, height: 7)
+                .accessibilityHidden(true)
+            Text(panelTitle)
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(panelTitleHelp)
+            if let host = panelHostLabel {
+                Text(host)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.08))
+                    )
+                    .help("이 경로를 알려준 터미널 소스")
+            }
+            Spacer(minLength: 4)
+            // 헤더의 메뉴 — 바 오른쪽 `⋯`와 **같은 메뉴**를 연다(메뉴를 두 벌 만들지 않는다).
+            Button(action: { model.showActionMenu(source: .mouse) }) {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("프로젝트 영역 메뉴 — 상세 보기 · 폴더 열기 · 경로 복사 · 표시 대상 고정")
+            .accessibilityLabel("프로젝트 영역 메뉴")
+        }
+        .frame(height: DockBarLayout.projectPanelHeaderHeight)
+    }
+
+    /// 패널 본문: 등록된 프로젝트는 도구 타일, 미등록은 안내 + 조작, 확인 실패는 사유.
+    @ViewBuilder
+    private var panelBody: some View {
+        if model.display.projectRegistered {
+            HStack(spacing: DockBarLayout.tileGap) {
                 ForEach(model.display.project) { entry in
                     projectTile(entry)
                 }
@@ -258,62 +335,97 @@ struct DockView: View {
                         help: "이 영역에 다 들어가지 않은 항목 \(model.display.projectHidden)개 — 상세 보기에서 전부 확인할 수 있습니다"
                     )
                 }
-            } else {
-                Text(emptyAreaText)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.orange)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                addProjectTile
+                addToolTile
             }
+        } else if model.state.isActionable {
+            // 경로는 **유효하지만 등록된 프로젝트가 없다**(경로 확인 실패와 다른 상태).
+            HStack(spacing: 8) {
+                Text("이 경로에 등록된 프로젝트가 없습니다")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Button("폴더 열기") { model.perform(.openFolder, source: .mouse) }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!model.state.canOpenFolder)
+                    .help(model.state.canOpenFolder
+                        ? "지금 경로를 Finder로 엽니다 — \(model.state.fullPath ?? "-")"
+                        : "지금은 열 수 없습니다: \(model.state.detail ?? "실행할 대상을 확인하는 중입니다")")
+                Button("프로젝트로 등록") { model.openEditor() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .overlay(focusRing(for: .registerProject, radius: 6))
+                    .help("Dock 편집을 열어 이 경로를 프로젝트로 등록합니다")
+            }
+        } else {
+            // 경로 자체를 확인하지 못한 상태 — 미등록과 같은 문구를 쓰지 않는다.
+            Text(model.state.detail ?? "경로를 확인하는 중입니다")
+                .font(.system(size: 11))
+                .foregroundStyle(.red)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.horizontal, 12)
-        .frame(width: model.display.projectAreaWidth, height: DockBarLayout.cardHeight, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(model.display.projectRegistered ? Color.primary.opacity(0.04) : Color.orange.opacity(0.10))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(
-                    model.display.projectRegistered ? Color.primary.opacity(0.20) : Color.orange.opacity(0.45),
-                    style: StrokeStyle(lineWidth: 1, dash: model.display.projectRegistered ? [4, 3] : [])
-                )
-        )
-        .overlay(alignment: .topLeading) { areaLabel }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(areaAccessibilityLabel)
     }
 
-    /// 사용자가 옮길 수 있는 영역임을 알리는 라벨(승인된 배치).
-    private var areaLabel: some View {
-        Text(model.resolution.hasProject ? "프로젝트 · \(model.resolution.projectName)" : "프로젝트 · 미등록")
-            .font(.system(size: 9.5))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 1)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.primary.opacity(0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
-            )
-            .offset(x: 14, y: -9)
+    private var panelStatusColor: Color {
+        if model.display.projectRegistered { return .green }
+        return model.state.isActionable ? .orange : .red
     }
 
-    private var emptyAreaText: String {
-        let folder = model.state.folderName
-        return folder == "-"
-            ? "이 경로에 등록된 프로젝트가 없습니다"
-            : "\(folder) · 등록된 프로젝트가 없습니다"
+    private var panelTitle: String {
+        if model.display.projectRegistered { return model.resolution.projectName }
+        return model.state.isActionable ? "프로젝트 미등록" : "경로 확인 실패"
+    }
+
+    private var panelTitleHelp: String {
+        if model.display.projectRegistered {
+            return "프로젝트 \(model.resolution.projectName) — 기준 폴더 \(model.resolution.projectRoot)"
+        }
+        return model.state.fullPath ?? model.state.detail ?? "아직 경로를 확인하지 못했습니다"
+    }
+
+    /// 헤더의 보조 정보(어느 터미널 소스가 알려준 경로인가). 진단 상세는 상세 보기에 있다.
+    private var panelHostLabel: String? {
+        guard let host = model.state.hostAppID, !host.isEmpty else { return nil }
+        return host
+    }
+
+    /// 등록된 프로젝트에서 **추가**로 가는 타일(A 시안의 `＋ 추가`).
+    private var addToolTile: some View {
+        Button(action: { model.openEditor() }) {
+            VStack(spacing: 3) {
+                Image(systemName: "plus")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: DockBarLayout.projectTileSize, height: DockBarLayout.projectTileSize)
+                    .background(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .fill(Color.primary.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.16), lineWidth: 1)
+                    )
+                if showsLabels {
+                    Text("추가").font(.system(size: 9)).foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: DockBarLayout.projectTileWidth(model.effectiveAppearance.labelMode),
+                   height: DockBarLayout.cardHeight, alignment: .top)
+        }
+        .buttonStyle(.plain)
+        .help("Dock 편집을 열어 항목·배치를 바꿉니다")
+        .accessibilityLabel("프로젝트 도구 추가 — Dock 편집 열기")
     }
 
     private var areaAccessibilityLabel: String {
-        model.resolution.hasProject
-            ? "프로젝트 영역 \(model.resolution.projectName), 항목 \(model.display.project.count)개 표시"
-            : "프로젝트 영역 미등록 — \(emptyAreaText)"
+        if model.display.projectRegistered {
+            return "프로젝트 영역 \(model.resolution.projectName), 항목 \(model.display.project.count)개 표시"
+        }
+        return model.state.isActionable
+            ? "프로젝트 영역 — 프로젝트 미등록(폴더 열기·프로젝트로 등록 가능)"
+            : "프로젝트 영역 — 경로 확인 실패: \(model.state.detail ?? "-")"
     }
 
     private func projectTile(_ entry: DockDisplayItem) -> some View {
@@ -347,28 +459,6 @@ struct DockView: View {
         }
         .help(itemHelp(for: item))
         .accessibilityLabel(itemHelp(for: item))
-    }
-
-    /// 미등록 경로에서 프로젝트를 등록하러 가는 타일(동작 없는 타일을 두지 않는다).
-    private var addProjectTile: some View {
-        Button(action: { model.openEditor() }) {
-            Image(systemName: "plus")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: DockBarLayout.projectTileSize, height: DockBarLayout.projectTileSize)
-                .background(
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .fill(Color.primary.opacity(0.06))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.16), lineWidth: 1)
-                )
-                .overlay(focusRing(for: .registerProject, radius: 13))
-        }
-        .buttonStyle(.plain)
-        .help("Dock 편집을 열어 이 경로를 프로젝트로 등록합니다")
-        .accessibilityLabel("프로젝트 등록 — Dock 편집 열기")
     }
 
     /// 영역·구역에서 밀린 항목·카드를 알리는 타일(클릭하면 상세 보기에서 전부 볼 수 있다).

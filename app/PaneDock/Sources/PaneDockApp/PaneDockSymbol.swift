@@ -18,28 +18,41 @@ enum PaneDockSymbol {
     }
 
     /// 앱 아이콘용 컬러 렌더(A 시안의 파란 그라디언트 타일).
+    ///
+    /// 작은 크기에서도 **왼쪽 분할 pane과 오른쪽 포커스 pane**이 구분되도록,
+    /// 안쪽 도형을 크게 잡고 오른쪽 pane·점을 밝게 채운다.
     static func appIconImage(size: CGFloat) -> NSImage {
         NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
             let radius = size * 0.2
-            let background = NSBezierPath(roundedRect: rect.insetBy(dx: size * 0.02, dy: size * 0.02),
-                                          xRadius: radius, yRadius: radius)
+            let background = NSBezierPath(
+                roundedRect: rect.insetBy(dx: size * 0.02, dy: size * 0.02),
+                xRadius: radius, yRadius: radius
+            )
             let gradient = NSGradient(colors: [
-                NSColor(calibratedRed: 0.42, green: 0.62, blue: 1.00, alpha: 1),
-                NSColor(calibratedRed: 0.16, green: 0.30, blue: 0.78, alpha: 1),
+                NSColor(calibratedRed: 0.44, green: 0.65, blue: 1.00, alpha: 1),
+                NSColor(calibratedRed: 0.13, green: 0.27, blue: 0.74, alpha: 1),
             ])
             gradient?.draw(in: background, angle: -70)
-            draw(in: rect.insetBy(dx: size * 0.2, dy: size * 0.2),
-                 stroke: NSColor.white.withAlphaComponent(0.95),
-                 fill: NSColor.white.withAlphaComponent(0.16),
-                 lineWidth: max(1, size * 0.035))
+            draw(
+                in: rect.insetBy(dx: size * 0.16, dy: size * 0.16),
+                stroke: NSColor.white.withAlphaComponent(0.92),
+                fill: NSColor.white.withAlphaComponent(0.22),
+                lineWidth: max(1, size * 0.04),
+                focusRightPane: true
+            )
             return true
         }
     }
 
+    /// 오른쪽(포커스) pane·점에 쓰는 강조 채움색.
+    private static let accentFill = NSColor.white.withAlphaComponent(0.55)
+
     /// 시안의 pane 형태: 왼쪽 작은 사각형 + 오른쪽 큰 사각형(점 하나) + 아래 막대 3개.
-    private static func draw(in rect: NSRect, stroke: NSColor, fill: NSColor?, lineWidth: CGFloat) {
+    ///
+    /// `fill`이 nil이면 **아무것도 채우지 않는다**(메뉴바용 무채움). 예전 구현은 `fill()`을 무조건 불러
+    /// 남아 있던 채움색으로 칠해져, 무채움 의도와 실제 렌더가 어긋났다.
+    private static func draw(in rect: NSRect, stroke: NSColor, fill: NSColor?, lineWidth: CGFloat, focusRightPane: Bool = false) {
         stroke.setStroke()
-        fill?.setFill()
 
         let w = rect.width
         let h = rect.height
@@ -49,9 +62,7 @@ enum PaneDockSymbol {
             yRadius: h * 0.16
         )
         outer.lineWidth = lineWidth
-        outer.stroke()
-        fill?.setFill()
-        outer.fill()
+        paint(outer, fill: fill)
 
         let pad = w * 0.16
         let gap = w * 0.08
@@ -66,46 +77,56 @@ enum PaneDockSymbol {
         divider.lineWidth = lineWidth
         divider.stroke()
 
-        // 왼쪽 작은 pane.
+        // 왼쪽 작은 pane(분할 면).
         let left = NSBezierPath(
             roundedRect: NSRect(x: rect.minX + pad, y: rect.minY + bottom + gap,
                                 width: leftWidth, height: h - bottom - gap - pad),
             xRadius: w * 0.06, yRadius: w * 0.06
         )
         left.lineWidth = lineWidth
-        left.fill()
-        left.stroke()
+        paint(left, fill: fill)
 
-        // 오른쪽 큰 pane + 점.
+        // 오른쪽 큰 pane(포커스 강조) + 점.
         let right = NSBezierPath(
             roundedRect: NSRect(x: rect.minX + pad + leftWidth + gap, y: rect.minY + bottom + gap,
                                 width: rightWidth, height: h - bottom - gap - pad),
             xRadius: w * 0.06, yRadius: w * 0.06
         )
         right.lineWidth = lineWidth
-        right.fill()
-        right.stroke()
+        paint(right, fill: focusRightPane ? accentFill ?? fill : fill)
 
-        let dotSize = max(lineWidth * 1.6, w * 0.09)
-        stroke.setFill()
+        let dotSize = max(lineWidth * 1.7, w * 0.10)
+        if let dotFill = focusRightPane ? accentFill ?? fill : fill {
+            dotFill.setFill()
+        } else {
+            stroke.setFill()
+        }
         NSBezierPath(
-            ovalIn: NSRect(x: rect.maxX - pad - dotSize * 1.2, y: rect.maxY - pad - dotSize * 1.2,
+            ovalIn: NSRect(x: rect.maxX - pad - dotSize * 1.7, y: rect.maxY - pad - dotSize * 1.7,
                            width: dotSize, height: dotSize)
         ).fill()
 
         // 아래 막대 3개.
-        let barHeight = bottom * 0.5
+        let barHeight = bottom * 0.42
         let barY = rect.minY + bottom * 0.28
         let barWidth = (w - pad * 2 - gap * 2) / 3
         for index in 0..<3 {
             let bar = NSBezierPath(
                 roundedRect: NSRect(x: rect.minX + pad + CGFloat(index) * (barWidth + gap),
                                     y: barY, width: barWidth, height: barHeight),
-                xRadius: barHeight / 2, yRadius: barHeight / 2
+                xRadius: barHeight * 0.35, yRadius: barHeight * 0.35
             )
             bar.lineWidth = lineWidth
-            bar.fill()
-            bar.stroke()
+            paint(bar, fill: fill)
         }
+    }
+
+    /// 채움색이 있을 때만 채운다(`fill()`을 무조건 부르지 않는다).
+    private static func paint(_ path: NSBezierPath, fill: NSColor?) {
+        if let fill {
+            fill.setFill()
+            path.fill()
+        }
+        path.stroke()
     }
 }

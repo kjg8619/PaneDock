@@ -40,6 +40,14 @@ public enum DockBarLayout {
     /// 자리가 없어 밀린 카드를 알리는 타일의 폭(카드 높이와 같다).
     public static let cardOverflowTileWidth: CGFloat = 68
 
+    /// 프로젝트 패널(A 시안)의 내부 규격. **바깥 폭은 `projectAreaWidth`가 정하고 여기서는 다루지 않는다.**
+    ///
+    /// 헤더는 **별도 줄**이라 타일 한 줄의 폭을 잠식하지 않는다 → 더보기(넘침) 계산은 그대로다.
+    public static let projectPanelHeight: CGFloat = 88
+    public static let projectPanelHeaderHeight: CGFloat = 14
+    /// 패널 안쪽 좌우 여백. 넘침 계산이 예약하는 `widgetPadding`보다 작아 **보수적**이다.
+    public static let projectPanelPadding: CGFloat = 12
+
     /// 항목 타일 폭. **표시 모드에 따라 다르다**(아이콘 중심 48 / 아이콘+하단 이름 64).
     public static func projectTileWidth(_ mode: DockLabelMode) -> CGFloat {
         mode == .iconOnly ? projectTileSize : projectTileLabeledWidth

@@ -49,64 +49,42 @@ struct ClockCardView: View {
     private var fullText: String { Self.fullFormat.string(from: now) }
 
     var body: some View {
-        HStack(spacing: 10) {
-            ClockFace(now: now)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(Self.timeFormat.string(from: now))
-                    .font(.system(size: 23, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .lineLimit(1)
-                Text(Self.dateFormat.string(from: now))
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
+        // A 시안: **큰 디지털 시간 + 날짜**가 중심이다(초는 아래 얇은 진행선으로만 조용히 보인다).
+        VStack(alignment: .leading, spacing: 1) {
+            Text(Self.timeFormat.string(from: now))
+                .font(.system(size: 30, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .lineLimit(1)
+            Text(Self.dateFormat.string(from: now))
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            secondsLine
         }
-        .padding(.horizontal, 13)
-        .frame(width: DockBarLayout.clockCardWidth, height: DockBarLayout.cardHeight)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .frame(width: DockBarLayout.clockCardWidth, height: DockBarLayout.cardHeight, alignment: .leading)
         .background(CardBackground())
         .help("현재 시각 — \(fullText)")
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("시계: \(fullText)")
     }
-}
 
-/// 초 진행 링 + 시·분침이 있는 미니 아날로그 시계.
-private struct ClockFace: View {
-    let now: Date
-
-    var body: some View {
-        let parts = Calendar.current.dateComponents([.hour, .minute, .second], from: now)
-        let seconds = Double(parts.second ?? 0)
-        let minutes = Double(parts.minute ?? 0) + seconds / 60
-        let hours = Double((parts.hour ?? 0) % 12) + minutes / 60
-
-        ZStack {
-            Circle().strokeBorder(Color.primary.opacity(0.14), lineWidth: 3)
-            // 초 진행 링(현재 초 비율).
-            Circle()
-                .trim(from: 0, to: seconds / 60)
-                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-                .padding(1.5)
-            hand(length: 9, width: 2.5, angle: hours * 30, opacity: 1)
-            hand(length: 12, width: 2, angle: minutes * 6, opacity: 0.6)
-            Circle().fill(Color.accentColor).frame(width: 5, height: 5)
+    /// 초 진행을 2pt 선으로만 표시한다(시간·날짜를 가리지 않는다).
+    private var secondsLine: some View {
+        let seconds = Double(Calendar.current.component(.second, from: now))
+        return ZStack(alignment: .leading) {
+            Capsule().fill(Color.primary.opacity(0.12))
+            Capsule()
+                .fill(Color.accentColor)
+                .frame(width: max(2, (ClockCardView.secondsWidth) * CGFloat(seconds / 60)))
         }
-        .frame(width: 40, height: 40)
+        .frame(width: ClockCardView.secondsWidth, height: 2)
+        .padding(.top, 3)
         .accessibilityHidden(true)
     }
 
-    /// 바늘 하나. **면 중심**을 축으로 돌린다(오프셋을 준 도형을 ZStack으로 감싸 회전).
-    private func hand(length: CGFloat, width: CGFloat, angle: Double, opacity: Double) -> some View {
-        ZStack {
-            Capsule()
-                .fill(Color.primary.opacity(opacity))
-                .frame(width: width, height: length)
-                .offset(y: -length / 2)
-        }
-        .rotationEffect(.degrees(angle))
-    }
+    private static let secondsWidth: CGFloat = 44
 }
 
 /// 집중 타이머 카드. **Dock 안에서 실제로 동작한다**(시작·일시정지·재설정).
