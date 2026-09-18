@@ -27,6 +27,12 @@ public struct DockDisplay: Equatable, Sendable {
     public var commonHidden: Int
     /// 프로젝트 구역에서 자리가 없어 `⋯`로 밀린 수.
     public var projectHidden: Int
+    /// 화면에 그리는 카드(배치 순서 그대로).
+    public var visibleCards: [DockCardSpec]
+    /// 카드가 화면보다 많아 밀린 수(`+N` 타일로 알린다).
+    public var cardHidden: Int
+    /// 이 경로에 등록된 프로젝트가 있는가(영역이 타일 대신 안내·`+`를 그리는 판단).
+    public var projectRegistered: Bool
     /// 실제로 적용된 프로젝트 영역 폭(공간이 모자라면 최소 폭까지 줄어든다).
     public var projectAreaWidth: Double
     /// 창이 실제로 쓸 폭.
@@ -39,6 +45,9 @@ public struct DockDisplay: Equatable, Sendable {
         order: [DockDisplayItem],
         commonHidden: Int,
         projectHidden: Int,
+        visibleCards: [DockCardSpec],
+        cardHidden: Int,
+        projectRegistered: Bool,
         projectAreaWidth: Double,
         barWidth: CGFloat,
         demandWidth: CGFloat,
@@ -47,6 +56,9 @@ public struct DockDisplay: Equatable, Sendable {
         self.order = order
         self.commonHidden = commonHidden
         self.projectHidden = projectHidden
+        self.visibleCards = visibleCards
+        self.cardHidden = cardHidden
+        self.projectRegistered = projectRegistered
         self.projectAreaWidth = projectAreaWidth
         self.barWidth = barWidth
         self.demandWidth = demandWidth
@@ -58,6 +70,9 @@ public struct DockDisplay: Equatable, Sendable {
         order: [],
         commonHidden: 0,
         projectHidden: 0,
+        visibleCards: [],
+        cardHidden: 0,
+        projectRegistered: false,
         projectAreaWidth: DockLayout.defaultProjectAreaWidth,
         barWidth: DockBarLayout.minimumBarWidth,
         demandWidth: DockBarLayout.minimumBarWidth,
@@ -78,6 +93,8 @@ public struct DockBarFit: Equatable, Sendable {
     public var projectAreaWidth: Double
     public var commonVisible: Int
     public var commonHidden: Int
+    public var visibleCards: [DockCardSpec]
+    public var cardHidden: Int
 }
 
 extension DockBarLayout {
@@ -116,7 +133,6 @@ extension DockBarLayout {
         let components = renderedComponents(layout: layout, commonItemCount: count)
         let hasProject = components.contains(.project)
         let hasCards = components.contains(.cards)
-        let cardsWidth: CGFloat = hasCards ? cardStripWidth(layout.cards) : 0
 
         let boundaries = CGFloat(max(0, components.count - 1))
         let chrome = widgetPadding * 2
@@ -130,12 +146,13 @@ extension DockBarLayout {
             guard tiles > 0 else { return 0 }
             return CGFloat(tiles) * appTileSize + CGFloat(tiles - 1) * tileGap
         }
-        func demand(area: Double, commonTiles: CGFloat) -> CGFloat {
-            chrome + cardsWidth + commonTiles + (hasProject ? CGFloat(area) : 0)
+        func demand(area: Double, commonTiles: CGFloat, cards: CGFloat) -> CGFloat {
+            chrome + cards + commonTiles + (hasProject ? CGFloat(area) : 0)
         }
 
         // 1) 그대로 들어가는가.
-        let full = demand(area: layout.projectAreaWidth, commonTiles: commonWidth(visible: count, hidden: 0))
+        let allCards = hasCards ? cardStripWidth(layout.cards) : 0
+        let full = demand(area: layout.projectAreaWidth, commonTiles: commonWidth(visible: count, hidden: 0), cards: allCards)
         if full <= ceiling {
             return DockBarFit(
                 barWidth: max(minimumBarWidth, full),
@@ -143,7 +160,9 @@ extension DockBarLayout {
                 isSpaceShort: false,
                 projectAreaWidth: layout.projectAreaWidth,
                 commonVisible: count,
-                commonHidden: 0
+                commonHidden: 0,
+                visibleCards: layout.cards,
+                cardHidden: 0
             )
         }
 
@@ -152,7 +171,7 @@ extension DockBarLayout {
         let area = hasProject
             ? max(DockLayout.minimumProjectAreaWidth, layout.projectAreaWidth - Double(full - ceiling))
             : layout.projectAreaWidth
-        let afterArea = demand(area: area, commonTiles: commonWidth(visible: count, hidden: 0))
+        let afterArea = demand(area: area, commonTiles: commonWidth(visible: count, hidden: 0), cards: allCards)
         if afterArea <= ceiling {
             return DockBarFit(
                 barWidth: max(minimumBarWidth, afterArea),
@@ -160,23 +179,70 @@ extension DockBarLayout {
                 isSpaceShort: true,
                 projectAreaWidth: area,
                 commonVisible: count,
-                commonHidden: 0
+                commonHidden: 0,
+                visibleCards: layout.cards,
+                cardHidden: 0
             )
         }
 
-        // 3) 공통 타일도 자리가 모자란다 → 넘침 타일 자리를 하나 남기고 밀어낸다(밀린 수는 화면에 남는다).
+        // 3) **카드부터 양보한다** — 공통 앱은 마지막까지 남긴다(공통 구성은 계속 쓸 수 있어야 한다).
+        let roomForCards = max(
+            0,
+            ceiling - chrome - commonWidth(visible: count, hidden: 0) - CGFloat(hasProject ? area : 0)
+        )
+        let cardFit = hasCards
+            ? cardBudget(width: roomForCards, cards: layout.cards)
+            : (visible: 0, hidden: 0)
+        let shownCards = hasCards ? Array(layout.cards.prefix(cardFit.visible)) : []
+        let cardsWidth = hasCards
+            ? cardStripWidth(shownCards) + (cardFit.hidden > 0 ? cardGap + cardOverflowTileWidth : 0)
+            : 0
+        let afterCards = demand(
+            area: area,
+            commonTiles: commonWidth(visible: count, hidden: 0),
+            cards: cardsWidth
+        )
+        if afterCards <= ceiling {
+            return DockBarFit(
+                barWidth: min(ceiling, max(minimumBarWidth, afterCards)),
+                demandWidth: full,
+                isSpaceShort: true,
+                projectAreaWidth: area,
+                commonVisible: count,
+                commonHidden: 0,
+                visibleCards: shownCards,
+                cardHidden: cardFit.hidden
+            )
+        }
+
+        // 4) 카드를 다 밀어내도 모자라면 공통 타일도 밀어낸다(밀린 수는 화면에 남는다).
         let roomForCommon = max(0, ceiling - chrome - cardsWidth - CGFloat(hasProject ? area : 0))
         let fits = roomForCommon >= appTileSize ? Int((roomForCommon + tileGap) / appTileStride) : 0
         let visible = count <= fits ? count : max(0, fits - 1)
         let hidden = count - visible
-        let width = demand(area: area, commonTiles: commonWidth(visible: visible, hidden: hidden))
+        let commonTiles = commonWidth(visible: visible, hidden: hidden)
+        // 공통이 빠진 만큼 카드를 다시 채운다.
+        let roomForCardsAgain = max(
+            0,
+            ceiling - chrome - commonTiles - CGFloat(hasProject ? area : 0)
+        )
+        let cardFitAgain = hasCards
+            ? cardBudget(width: roomForCardsAgain, cards: layout.cards)
+            : (visible: 0, hidden: 0)
+        let shownCardsAgain = hasCards ? Array(layout.cards.prefix(cardFitAgain.visible)) : []
+        let cardsWidthAgain = hasCards
+            ? cardStripWidth(shownCardsAgain) + (cardFitAgain.hidden > 0 ? cardGap + cardOverflowTileWidth : 0)
+            : 0
+        let width = demand(area: area, commonTiles: commonTiles, cards: cardsWidthAgain)
         return DockBarFit(
             barWidth: min(ceiling, max(minimumBarWidth, width)),
             demandWidth: full,
             isSpaceShort: true,
             projectAreaWidth: area,
             commonVisible: visible,
-            commonHidden: hidden
+            commonHidden: hidden,
+            visibleCards: shownCardsAgain,
+            cardHidden: cardFitAgain.hidden
         )
     }
 
@@ -195,7 +261,8 @@ public enum DockDisplayBuilder {
         resolution: ProjectResolution,
         layout: DockLayout,
         screenWidth: CGFloat,
-        showsFakeBadge: Bool = false
+        showsFakeBadge: Bool = false,
+        labelMode: DockLabelMode = .iconOnly
     ) -> DockDisplay {
         let fit = DockBarLayout.barFit(
             layout: layout,
@@ -205,7 +272,8 @@ public enum DockDisplayBuilder {
         )
         let projectBudget = DockBarLayout.projectTileBudget(
             width: fit.projectAreaWidth,
-            tileCount: resolution.projectItems.count
+            tileCount: resolution.projectItems.count,
+            labelMode: labelMode
         )
 
         var items: [DockDisplayItem] = []
@@ -235,6 +303,9 @@ public enum DockDisplayBuilder {
             order: ordered,
             commonHidden: fit.commonHidden,
             projectHidden: projectBudget.hidden,
+            visibleCards: fit.visibleCards,
+            cardHidden: fit.cardHidden,
+            projectRegistered: resolution.hasProject,
             projectAreaWidth: fit.projectAreaWidth,
             barWidth: fit.barWidth,
             demandWidth: fit.demandWidth,
@@ -245,10 +316,40 @@ public enum DockDisplayBuilder {
 
 // MARK: - 키보드 이동 계획
 
-/// 키보드가 이동하는 곳. **화면에 있는 것만** 들어간다.
+/// 집중 타이머 카드의 조작.
+public enum DockTimerAction: String, Sendable, CaseIterable {
+    case start
+    case pause
+    case reset
+
+    public var label: String {
+        switch self {
+        case .start: return "시작"
+        case .pause: return "일시정지"
+        case .reset: return "재설정"
+        }
+    }
+}
+
+/// 자리가 없어 밀린 항목·카드를 알리는 조작(`+N`·`⋯` 타일).
+public enum DockOverflowArea: String, Sendable {
+    case common
+    case cards
+    case project
+}
+
+/// 키보드가 이동하는 곳. **화면에 있는 조작 가능한 것만** 들어간다.
 public enum DockFocusControl: Equatable, Sendable {
     case item(DockItemRef)
-    /// 상세 보기 열기/닫기(바의 상태 점). 화면에 항상 있다.
+    /// 집중 타이머 카드의 버튼(▶ ❚❚ ↺).
+    case timer(cardID: String, action: DockTimerAction)
+    /// 자리가 없어 밀린 항목·카드를 알리는 타일.
+    case overflow(DockOverflowArea)
+    /// 미등록 경로에서 프로젝트를 등록하러 가는 `+` 타일.
+    case registerProject
+    /// 오른쪽 `⋯` 보조 메뉴.
+    case menu
+    /// 상세 보기 열기/닫기(바의 상태 점).
     case details
     /// 상세 보기 안의 숨기기·종료.
     case hide
@@ -257,6 +358,10 @@ public enum DockFocusControl: Equatable, Sendable {
     public var label: String {
         switch self {
         case .item(let ref): return "item:\(ref.label)"
+        case .timer(let cardID, let action): return "timer:\(cardID):\(action.rawValue)"
+        case .overflow(let area): return "overflow:\(area.rawValue)"
+        case .registerProject: return "register"
+        case .menu: return "menu"
         case .details: return "details"
         case .hide: return "hide"
         case .quit: return "quit"
@@ -270,18 +375,51 @@ public enum DockFocusControl: Equatable, Sendable {
 }
 
 public enum DockFocusPlan {
-    /// 지금 화면에서 키보드로 이동할 수 있는 것들.
+    /// 지금 화면에서 키보드로 이동할 수 있는 것들. **배치 순서를 그대로 따른다.**
     ///
-    /// - 상세 보기가 닫혀 있으면 **표시 목록과 같은 항목**만 순회한다(화면에 없는 것을 고르지 않는다).
-    /// - 상세 보기가 열려 있으면 그 목록에 **전부** 나열되므로 밀린 항목까지 순회한다.
+    /// - 구성요소 순서(`layout.order`)대로 그 안의 조작을 순회한다: 항목 타일 → (카드면)타이머 버튼 →
+    ///   밀린 항목·카드 타일 → 미등록이면 등록 `+` 타일.
+    /// - 그 뒤에 화면 오른쪽 조작(상태 점 → `⋯` 메뉴), 상세 보기가 열려 있으면 숨기기·종료가 온다.
+    /// - 상세 보기가 열려 있으면 **밀린 항목까지 전부** 순회한다(그 목록에 다 나열되기 때문).
     public static func controls(
         display: DockDisplay,
+        layout: DockLayout,
         allItems: [DockItemTarget],
         detailsVisible: Bool
     ) -> [DockFocusControl] {
-        var controls: [DockFocusControl] = (detailsVisible ? allItems.map(\.ref) : display.order.map(\.ref))
-            .map { DockFocusControl.item($0) }
-        controls.append(.details)
+        var controls: [DockFocusControl] = []
+        // 상세 보기가 닫혀 있으면 **화면에 그린 항목만** 돈다(밀린 항목은 타일로 알리고 그 타일만 순회한다).
+        // 열려 있으면 그 목록에 전부 나열되므로 카탈로그의 모든 항목을 돈다.
+        let commonRefs = detailsVisible
+            ? allItems.filter(\.isCommon).map(\.ref)
+            : display.common.map(\.ref)
+        let projectRefs = detailsVisible
+            ? allItems.filter { !$0.isCommon }.map(\.ref)
+            : display.project.map(\.ref)
+
+        for component in DockBarLayout.renderedComponents(layout: layout, commonItemCount: commonRefs.count) {
+            switch component {
+            case .common:
+                controls.append(contentsOf: commonRefs.map { .item($0) })
+                if !detailsVisible, display.commonHidden > 0 { controls.append(.overflow(.common)) }
+            case .cards:
+                for card in display.visibleCards where card.kind == .focusTimer {
+                    // 화면에 보이는 순서 그대로 ▶ ❚❚ ↺.
+                    controls.append(contentsOf: DockTimerAction.allCases.map { .timer(cardID: card.id, action: $0) })
+                }
+                if !detailsVisible, display.cardHidden > 0 { controls.append(.overflow(.cards)) }
+            case .project:
+                if display.projectRegistered {
+                    controls.append(contentsOf: projectRefs.map { .item($0) })
+                    if !detailsVisible, display.projectHidden > 0 { controls.append(.overflow(.project)) }
+                } else {
+                    controls.append(.registerProject)
+                }
+            }
+        }
+
+        // 화면 오른쪽 순서: 상태 점(상세 보기) → `⋯` 메뉴.
+        controls.append(contentsOf: [.details, .menu])
         if detailsVisible {
             controls.append(contentsOf: [.hide, .quit])
         }

@@ -114,6 +114,19 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         model.applyAppearance(store.settings.appearance)
         // 저장된 구성형 배치(순서·프로젝트 영역 너비·카드)도 함께 반영한다.
         model.applyLayout(store.settings.layout)
+        // 진단용: 완료(00:00) 상태를 확인하기 위해 타이머 기본 시간을 바꾼다(제품 기본값은 25분).
+        if let seconds = options.timerSecondsOverride {
+            model.setTimerDuration(seconds)
+        }
+        // 진단용: 입력 없이 첫 집중 타이머를 시작한다(완료 상태까지 화면으로 관측).
+        if let delay = options.timerAutostartAfterMilliseconds {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(delay) / 1000.0) { [weak self] in
+                guard let self, let model = self.model else { return }
+                guard let card = model.effectiveLayout.cards.first(where: { $0.kind == .focusTimer }) else { return }
+                model.performTimer(.start, cardID: card.id, source: .menu)
+                model.appendEvent("timer-selftest start card=\(card.id)")
+            }
+        }
         let panel = makePanel(model: model)
         panel.delegate = self
         self.panel = panel
@@ -697,6 +710,8 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     /// true면 이벤트를 소비한다.
     private func handleKey(_ event: NSEvent) -> Bool {
+        // 보조 메뉴가 떠 있는 동안에는 메뉴가 키를 받아야 한다(우리가 가로채면 Enter/Esc가 먹히지 않는다).
+        if model?.isMenuTracking == true { return false }
         switch event.keyCode {
         case 53: // esc — 상세 보기가 열려 있으면 그것부터 닫는다
             if model?.isDetailsVisible == true {

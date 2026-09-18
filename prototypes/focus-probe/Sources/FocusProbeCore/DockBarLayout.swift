@@ -26,12 +26,70 @@ public enum DockBarLayout {
     /// 오른쪽 조작(상태 점·⋯ 메뉴)과 가짜 모드 표시의 폭. **바 기하 계산에 포함**한다
     /// (포함하지 않으면 그만큼 내용이 잘린다 — V18.5에서 오른쪽 조작이 밀려난 것을 화면으로 확인).
     public static let stateDotWidth: CGFloat = 30
-    public static let menuButtonWidth: CGFloat = 38
+    /// `⋯` 메뉴 버튼(승인 시안: 40pt · 둥근 모서리 12).
+    public static let menuButtonWidth: CGFloat = 40
     public static let fakeBadgeWidth: CGFloat = 44
     public static let controlGap: CGFloat = 6
     public static let minimumTrailingGap: CGFloat = 6
     public static let appTileStride: CGFloat = appTileSize + tileGap
     public static let projectTileStride: CGFloat = projectTileSize + tileGap
+    /// `아이콘+이름` 모드의 프로젝트 항목 칩 폭(아이콘 + 이름). 48pt 타일에는 이름이 들어가지 않는다.
+    public static let projectTileChipWidth: CGFloat = 112
+    /// 자리가 없어 밀린 카드를 알리는 타일의 폭(카드 높이와 같다).
+    public static let cardOverflowTileWidth: CGFloat = 68
+
+    /// 항목 타일 폭. **표시 모드에 따라 다르다**(아이콘 중심 48 / 아이콘+이름 112).
+    public static func projectTileWidth(_ mode: DockLabelMode) -> CGFloat {
+        mode == .iconOnly ? projectTileSize : projectTileChipWidth
+    }
+
+    public static func projectTileStride(_ mode: DockLabelMode) -> CGFloat {
+        projectTileWidth(mode) + tileGap
+    }
+
+    /// 앱 타일 폭. 두 모드 모두 68pt이고, 이름은 **타일 안**에 들어간다(아이콘이 조금 작아진다).
+    public static func appTileWidth(_ mode: DockLabelMode) -> CGFloat {
+        _ = mode
+        return appTileSize
+    }
+
+    /// 할당 폭 안에 들어가는 프로젝트 항목 수와 밀린 수(표시 모드 반영).
+    public static func projectTileBudget(
+        width: Double,
+        tileCount: Int,
+        labelMode: DockLabelMode = .iconOnly
+    ) -> (visible: Int, hidden: Int) {
+        let stride = projectTileStride(labelMode)
+        let fits = max(0, Int((width - widgetPadding) / stride))
+        guard tileCount > fits else { return (tileCount, 0) }
+        let visible = max(0, fits - 1)
+        return (visible, tileCount - visible)
+    }
+
+    /// 할당 폭 안에 들어가는 카드 수와 밀린 수. 밀린 카드가 있으면 **`+N` 타일 자리를 남긴다**.
+    ///
+    /// 여러 카드를 두어 화면보다 넓어지는 구성에서 조용히 잘리지 않게 하는 규칙이다.
+    public static func cardBudget(width: CGFloat, cards: [DockCardSpec]) -> (visible: Int, hidden: Int) {
+        guard !cards.isEmpty else { return (0, 0) }
+        let total = cardStripWidth(cards)
+        guard total > width else { return (cards.count, 0) }
+
+        let limit = width - (cardGap + cardOverflowTileWidth)
+        var used: CGFloat = 0
+        var visible = 0
+        for (index, card) in cards.enumerated() {
+            let step = (index > 0 ? cardGap : 0) + cardWidth(card)
+            if used + step > max(0, limit) { break }
+            used += step
+            visible = index + 1
+        }
+        return (visible, cards.count - visible)
+    }
+
+    /// 카드 하나의 폭.
+    public static func cardWidth(_ card: DockCardSpec) -> CGFloat {
+        card.kind == .clock ? clockCardWidth : timerCardWidth
+    }
     /// 시계 카드는 **아날로그 시계 + 큰 시간 + 날짜**가 함께 들어가야 한다.
     /// 104pt에서는 날짜가 잘려 "9월…"까지만 보였다(화면 확인). 승인 시안의 내용 폭에 맞춘다.
     public static let clockCardWidth: CGFloat = 152
@@ -64,15 +122,6 @@ public enum DockBarLayout {
         screenWidth: CGFloat
     ) -> CGFloat {
         barFit(layout: layout, commonItemCount: commonItemCount, screenWidth: screenWidth).barWidth
-    }
-
-    /// 프로젝트 영역에 할당된 너비 안에 들어가는 타일 수와, 넘쳐서 `더보기`로 보낼 수.
-    /// 넘침이 있으면 `더보기` 타일 자리를 하나 남긴다.
-    public static func projectTileBudget(width: Double, tileCount: Int) -> (visible: Int, hidden: Int) {
-        let fits = max(0, Int((width - widgetPadding) / projectTileStride))
-        guard tileCount > fits else { return (tileCount, 0) }
-        let visible = max(0, fits - 1)
-        return (visible, tileCount - visible)
     }
 
     /// 바 최소 너비. 항목이 없어도 주요 조작이 뭉개지지 않게 한다.

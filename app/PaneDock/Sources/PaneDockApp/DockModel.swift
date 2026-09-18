@@ -4,6 +4,19 @@ import FocusProbeCore
 import Foundation
 import UniformTypeIdentifiers
 
+/// `NSMenu` 항목의 실행 대상을 감싼다(메뉴가 닫힌 뒤에도 살아 있게 메뉴가 붙잡는다).
+final class MenuActionTarget: NSObject {
+    private let action: () -> Void
+
+    init(_ action: @escaping () -> Void) {
+        self.action = action
+    }
+
+    @objc func fire() {
+        action()
+    }
+}
+
 /// 화면 상태를 소유한다. 추적은 백그라운드 큐에서 돌리고, 결과만 메인으로 가져온다.
 ///
 /// 지키는 것:
@@ -79,15 +92,20 @@ final class DockModel: ObservableObject {
 
     /// 저장된 외형을 반영한다(시작 시·저장 후).
     func applyAppearance(_ appearance: DockAppearance) {
+        let labelModeChanged = appearance.labelMode != effectiveAppearance.labelMode
         self.appearance = appearance
         previewAppearance = nil
+        if labelModeChanged { rebuildDisplay() }
         onLayoutChange?()
     }
 
     /// 편집창에서 외형을 **미리** 바꾼다. 디스크에는 쓰지 않는다.
     func previewAppearanceChange(_ appearance: DockAppearance) {
+        let labelModeChanged = appearance.labelMode != effectiveAppearance.labelMode
         previewAppearance = appearance
         stateLog?.appendEvent("appearance=preview size=\(appearance.size.rawValue) label=\(appearance.labelMode.rawValue) color=\(appearance.colorMode.rawValue) display=\(appearance.displayMode.rawValue)")
+        // 표시 방식(아이콘+이름/아이콘 중심)은 타일 폭·개수를 바꾼다 → 표시 목록을 다시 만든다.
+        if labelModeChanged { rebuildDisplay() }
         onLayoutChange?()
     }
 
@@ -97,9 +115,16 @@ final class DockModel: ObservableObject {
     /// 미리보기를 버리고 저장된 외형으로 돌아간다(취소·창 닫기).
     func discardAppearancePreview() {
         guard previewAppearance != nil else { return }
+        let labelModeChanged = previewAppearance?.labelMode != appearance.labelMode
         previewAppearance = nil
         stateLog?.appendEvent("appearance=preview result=discarded")
+        if labelModeChanged { rebuildDisplay() }
         onLayoutChange?()
+    }
+
+    /// Dock 편집창을 연다(미등록 영역의 `+` 타일도 이 경로를 쓴다).
+    func openEditor() {
+        onOpenEditor?()
     }
 
     /// 미리보기 외형을 저장한다. **성공 여부를 돌려준다.**
@@ -139,6 +164,10 @@ final class DockModel: ObservableObject {
     /// 편집창에서 **미리 보는** 배치. 저장 전에는 디스크에 쓰지 않는다.
     @Published private(set) var previewLayout: DockLayout?
 
+    /// 이번 실행에서 **한 번이라도 쓴** 카드 id. 삭제한 뒤 다시 추가해도 같은 id를 재사용하지 않는다
+    /// (그러지 않으면 새 카드가 지운 카드의 실행 상태를 물려받는다).
+    private var usedCardIDs: Set<String> = []
+
     /// 화면이 실제로 쓸 배치(미리보기 우선).
     var effectiveLayout: DockLayout { previewLayout ?? layout }
 
@@ -149,9 +178,22 @@ final class DockModel: ObservableObject {
     func applyLayout(_ layout: DockLayout) {
         self.layout = layout
         previewLayout = nil
+        // 이번 실행에서 써 본 카드 id를 기억한다(삭제 후 다시 추가할 때 같은 id를 재사용하지 않는다).
+        usedCardIDs.formUnion(layout.cards.map(\.id))
+        // 저장된 배치에 없는 카드의 실행 상태는 버린다(지운 카드가 되살아난 것처럼 보이지 않게).
+        pruneCardStates(keeping: layout.cards)
         logLayout("save")
         rebuildDisplay()
         onLayoutChange?()
+    }
+
+    /// 저장된 배치에 없는 카드 id의 실행 상태를 버린다.
+    private func pruneCardStates(keeping cards: [DockCardSpec]) {
+        let kept = Set(cards.map(\.id))
+        let removed = timerStates.keys.filter { !kept.contains($0) }
+        guard !removed.isEmpty else { return }
+        for id in removed { timerStates[id] = nil }
+        stateLog?.appendEvent("card=prune removed=\(removed.sorted().joined(separator: ","))")
     }
 
     /// 편집창에서 배치를 **미리** 바꾼다(디스크에는 쓰지 않는다).
@@ -189,27 +231,118 @@ final class DockModel: ObservableObject {
     // MARK: - 카드 실행 상태 (메모리 전용)
 
     /// 카드 id의 타이머 상태. 없으면 처음 상태(가득 찬 25분, 멈춤)다.
-    func timerState(for cardID: String) -> FocusTimerState { timerStates[cardID] ?? FocusTimerState() }
-
-    func startTimer(cardID: String) {
-        var state = timerState(for: cardID)
-        state.start(at: now)
-        timerStates[cardID] = state
-        stateLog?.appendEvent("card=\(cardID) action=start remaining=\(state.text(at: now))")
+    func timerState(for cardID: String) -> FocusTimerState {
+        timerStates[cardID] ?? FocusTimerState(duration: timerDuration)
     }
 
-    func pauseTimer(cardID: String) {
-        var state = timerState(for: cardID)
-        state.pause(at: now)
-        timerStates[cardID] = state
-        stateLog?.appendEvent("card=\(cardID) action=pause remaining=\(state.text(at: now)) running=false")
+    /// 타이머 기본 시간(초). 진단용 재정의가 없으면 제품 기본값(25분)이다.
+    func setTimerDuration(_ seconds: Int) {
+        timerDuration = TimeInterval(seconds)
+        stateLog?.appendEvent("timer=duration seconds=\(seconds)")
     }
 
-    func resetTimer(cardID: String) {
+    /// 타이머 조작. **마우스와 키보드가 같은 경로**로 들어온다.
+    func performTimer(_ action: DockTimerAction, cardID: String, source: ActionSource = .mouse) {
         var state = timerState(for: cardID)
-        state.reset()
+        switch action {
+        case .start: state.start(at: now)
+        case .pause: state.pause(at: now)
+        case .reset: state.reset()
+        }
         timerStates[cardID] = state
-        stateLog?.appendEvent("card=\(cardID) action=reset remaining=\(state.text(at: now)) running=false")
+        stateLog?.appendEvent(
+            "card=\(cardID) action=\(action.rawValue) source=\(source.rawValue) "
+                + "remaining=\(state.text(at: now)) running=\(state.isRunning(at: now))"
+        )
+    }
+
+    /// 00:00에 도달한 타이머를 **완료 상태로 확정**한다(실행 중 표시가 남지 않게).
+    /// 남은 시간은 시각으로 계산하므로, 조회가 밀려도 이 판정은 정확하다.
+    private func completeFinishedTimers() {
+        for card in effectiveLayout.cards where card.kind == .focusTimer {
+            guard let state = timerStates[card.id],
+                  state.isRunning,
+                  state.isFinished(at: now) else { continue }
+            var completed = state
+            completed.complete(at: now)
+            timerStates[card.id] = completed
+            stateLog?.appendEvent("card=\(card.id) action=complete remaining=00:00 running=false")
+        }
+    }
+
+    // MARK: - 보조 메뉴 (⋯)
+
+    /// `⋯` 보조 메뉴가 떠 있는가. 그동안은 **키 입력을 가로채지 않는다**(메뉴가 Enter/Esc를 받아야 한다).
+    private(set) var isMenuTracking = false
+
+    /// `⋯` 보조 메뉴가 뜰 자리(화면 좌표가 아니라 **창 안 좌표**). 화면이 알려준다.
+    private var menuAnchor: CGRect = .zero
+
+    /// 화면에서 `⋯` 버튼 위치를 알려준다(키보드로 열 때 같은 자리에 띄우기 위해).
+    func reportMenuAnchor(_ rect: CGRect) { menuAnchor = rect }
+
+    /// 보조 메뉴를 띄운다. **마우스와 키보드가 같은 메뉴·같은 실행 경로를 쓴다.**
+    func showActionMenu(source: ActionSource = .mouse) {
+        stateLog?.appendEvent("menu=open source=\(source.rawValue)")
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        addMenuItem(menu, title: isDetailsVisible ? "상세 보기 닫기" : "상세 보기 열기", enabled: true) {
+            self.toggleDetails()
+        }
+        menu.addItem(.separator())
+        addMenuItem(menu, title: "현재 폴더 열기", enabled: state.canOpenFolder) {
+            self.perform(.openFolder, source: .menu)
+        }
+        addMenuItem(menu, title: "현재 경로 복사", enabled: state.canCopyPath) {
+            self.perform(.copyPath, source: .menu)
+        }
+        menu.addItem(.separator())
+        addMenuItem(menu, title: state.isLocked ? "고정 해제" : "표시 대상 고정", enabled: true) {
+            self.toggleLock()
+        }
+        if display.isSpaceShort {
+            menu.addItem(.separator())
+            addMenuItem(
+                menu,
+                title: "공간 부족 — 배치가 화면보다 \(Int(display.demandWidth - display.barWidth))pt 넓습니다",
+                enabled: true
+            ) {
+                self.showDetails()
+            }
+        }
+
+        let point = screenPoint(forMenuAnchor: menuAnchor)
+        // 메뉴가 떠 있는 동안에는 **키 입력을 우리가 가로채지 않는다**(메뉴가 Enter/Esc를 받아야 한다).
+        isMenuTracking = true
+        defer { isMenuTracking = false }
+        menu.popUp(positioning: nil, at: point, in: nil)
+        stateLog?.appendEvent("menu=close source=\(source.rawValue)")
+    }
+
+    private func addMenuItem(
+        _ menu: NSMenu,
+        title: String,
+        enabled: Bool,
+        action: @escaping () -> Void
+    ) {
+        let item = NSMenuItem(title: title, action: #selector(MenuActionTarget.fire), keyEquivalent: "")
+        let target = MenuActionTarget(action)
+        item.target = target
+        item.isEnabled = enabled
+        // 메뉴가 닫힌 뒤에도 대상이 살아 있게 메뉴가 붙잡는다.
+        item.representedObject = target
+        menu.addItem(item)
+    }
+
+    /// 창 안 좌표(SwiftUI 전역, 왼쪽 위 기준) → 화면 좌표(NSMenu가 쓰는 좌표).
+    private func screenPoint(forMenuAnchor rect: CGRect) -> NSPoint {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow, let content = window.contentView else {
+            return NSEvent.mouseLocation
+        }
+        let inWindow = NSPoint(x: rect.minX, y: content.bounds.height - rect.maxY)
+        let inScreen = window.convertPoint(toScreen: inWindow)
+        // 메뉴가 버튼 아래로 펼쳐지게 조금 내린다.
+        return NSPoint(x: inScreen.x, y: inScreen.y - 4)
     }
 
     // MARK: - 편집창의 배치 조작 (저장 전에는 미리보기)
@@ -245,9 +378,11 @@ final class DockModel: ObservableObject {
         mutateLayout { $0.projectAreaWidth = width }
     }
 
-    /// 카드 추가. 같은 종류를 여러 개 두어도 id로 구분한다.
+    /// 카드 추가. 같은 종류를 여러 개 두어도 id로 구분하고, **지운 카드의 id는 다시 쓰지 않는다**.
     func editorAddCard(_ kind: DockCardKind) {
-        mutateLayout { $0.cards.append(DockCardSpec.makeDefault(kind, existing: $0.cards)) }
+        let card = DockCardSpec.makeDefault(kind, usedIDs: usedCardIDs)
+        usedCardIDs.insert(card.id)
+        mutateLayout { $0.cards.append(card) }
     }
 
     /// 카드 제거. 실행 상태는 id로 분리돼 있고 **지우지 않는다**(같은 id가 다시 오면 이어진다).
@@ -295,6 +430,8 @@ final class DockModel: ObservableObject {
     private var timer: Timer?
     /// 카드(시계·타이머) 표시용 1초 타이머. 조회 주기와 별개다.
     private var clockTimer: Timer?
+    /// 타이머 기본 시간(초). 제품 기본값은 25분이고, 진단용으로만 바뀐다.
+    private var timerDuration: TimeInterval = FocusTimerState.defaultDuration
     private let stateLog: StateLog?
 
     /// 사용자가 명시적으로 Dock을 호출한 상태인지.
@@ -333,7 +470,12 @@ final class DockModel: ObservableObject {
         // 남은 시간은 이 값과 시작 시각으로 계산하므로 갱신이 밀려도 값이 맞는다.
         clockTimer?.invalidate()
         clockTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.now = Date() }
+            Task { @MainActor in
+                guard let self else { return }
+                self.now = Date()
+                // 00:00에 도달한 타이머는 여기서 완료로 확정한다(실행 중 표시가 남지 않게).
+                self.completeFinishedTimers()
+            }
         }
         now = Date()
     }
@@ -414,7 +556,9 @@ final class DockModel: ObservableObject {
             layout: effectiveLayout,
             screenWidth: ScreenGeometry.fallbackFrame.width,
             // 가짜 모드 표시도 바 폭을 차지한다 → 기하 계산에 함께 넣는다.
-            showsFakeBadge: isFake
+            showsFakeBadge: isFake,
+            // 표시 방식(아이콘+이름/아이콘 중심)이 타일 폭·개수를 정한다.
+            labelMode: effectiveAppearance.labelMode
         )
         guard next != display else { return }
         display = next
@@ -545,12 +689,16 @@ final class DockModel: ObservableObject {
         )
     }
 
-    /// 지금 화면에서 이동할 수 있는 것들. **표시 목록과 같은 기준**으로 만든다(코어 `DockFocusPlan`).
+    /// 지금 화면에서 이동할 수 있는 것들. **표시 목록·배치 순서와 같은 기준**으로 만든다(코어 `DockFocusPlan`).
     ///
-    /// - 상세 보기가 닫혀 있으면 화면에 그린 항목만 순회한다(밀린 항목으로 이동하지 않는다).
-    /// - 열기·복사·잠금은 화면의 ⋯ 메뉴로 옮겼으므로 초점 목록에도 없다(표시 대상과 실행 대상 일치).
+    /// 항목 타일뿐 아니라 타이머 버튼·밀린 항목(`+N`)·등록(`+`)·오른쪽 `⋯` 메뉴까지 포함한다.
     var focusItems: [FocusItem] {
-        DockFocusPlan.controls(display: display, allItems: resolution.allItems, detailsVisible: isDetailsVisible)
+        DockFocusPlan.controls(
+            display: display,
+            layout: effectiveLayout,
+            allItems: resolution.allItems,
+            detailsVisible: isDetailsVisible
+        )
     }
 
     func showDetails() {
@@ -906,6 +1054,10 @@ final class DockModel: ObservableObject {
         }
         switch focusedItem {
         case .item(let ref): performItem(ref: ref, source: .keyboard)
+        case .timer(let cardID, let action): performTimer(action, cardID: cardID, source: .keyboard)
+        case .overflow: showDetails()
+        case .registerProject: openEditor()
+        case .menu: showActionMenu(source: .keyboard)
         case .details: toggleDetails()
         case .hide: hideWindow()
         case .quit: NSApplication.shared.terminate(nil)
@@ -915,8 +1067,7 @@ final class DockModel: ObservableObject {
     /// 호출 직후의 첫 선택. **화면에 있는 것 중에서만** 고른다.
     /// (화면에서 빠진 조작을 고르면 호출 직후 Enter가 보이지 않는 동작을 실행한다.)
     private func firstAvailableItem() -> FocusItem {
-        if let first = display.order.first { return .item(first.ref) }
-        return .details
+        focusItems.first ?? .details
     }
 
     // MARK: - 항목 실행 (앱·폴더·링크)

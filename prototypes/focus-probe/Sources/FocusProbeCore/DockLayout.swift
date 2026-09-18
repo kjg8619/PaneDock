@@ -40,9 +40,17 @@ public struct DockCardSpec: Codable, Equatable, Sendable, Identifiable {
 
     /// 처음 추가할 때 쓰는 기본 카드. 같은 종류를 여러 개 두어도 id로 구분한다.
     public static func makeDefault(_ kind: DockCardKind, existing: [DockCardSpec]) -> DockCardSpec {
+        makeDefault(kind, usedIDs: Set(existing.map(\.id)))
+    }
+
+    /// 이번 실행에서 **한 번이라도 쓴** id와 겹치지 않는 새 카드를 만든다.
+    ///
+    /// 삭제한 카드의 id를 곧바로 다시 쓰면 그 카드의 **이전 실행 상태를 물려받는다**.
+    /// 그래서 지금 배치에 있는 id가 아니라 **써 본 id 전체**를 기준으로 고른다.
+    public static func makeDefault(_ kind: DockCardKind, usedIDs: Set<String>) -> DockCardSpec {
         let prefix = kind == .clock ? "time" : "focus"
         var index = 1
-        while existing.contains(where: { $0.id == "\(prefix)-\(index)" }) { index += 1 }
+        while usedIDs.contains("\(prefix)-\(index)") { index += 1 }
         return DockCardSpec(id: "\(prefix)-\(index)", kind: kind)
     }
 }

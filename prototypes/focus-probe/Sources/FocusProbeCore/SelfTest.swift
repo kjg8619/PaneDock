@@ -844,8 +844,8 @@ public enum SelfTest {
             screenWidth: screen
         )
         // 승인 배치의 필요 폭: 여백 32 + 공통 3타일(220) + 구분선 2개(50) + 카드(152+8+168) + 영역 360
-        //                    + 오른쪽 조작(86) + 사이 간격 12
-        let expectedWidth = 32 + 220 + 50 + 328 + 360 + 86 + 12
+        //                    + 오른쪽 조작(88 = 여백 6 + 점 30 + 간격 12 + ⋯ 40) + 사이 간격 12
+        let expectedWidth = 32 + 220 + 50 + 328 + 360 + 88 + 12
         results.append(check(
             "표시: 회귀(1512·공통3·프로젝트2·영역360)에서 5개를 보여주고 숨김이 없다",
             regression.visibleItemCount == 5 && regression.hiddenItemCount == 0
@@ -882,16 +882,65 @@ public enum SelfTest {
         ))
 
         // 3. 화면·키보드가 같은 목록을 쓴다(상세 보기가 닫혀 있을 때).
+        //    카드·밀린 항목·등록·메뉴 조작도 **배치 순서대로** 들어간다.
         let all = regression.order.isEmpty ? [] : ProjectResolver.resolve(
             cwd: "/work/shop",
             catalog: makeCatalog(common: 3, project: 2)
         ).allItems
-        let closed = DockFocusPlan.controls(display: regression, allItems: all, detailsVisible: false)
+        let closed = DockFocusPlan.controls(display: regression, layout: layout, allItems: all, detailsVisible: false)
         let closedRefs = closed.compactMap(\.itemRef)
+        let closedTimers = closed.compactMap { control -> String? in
+            if case .timer(let cardID, let action) = control { return "\(cardID):\(action.rawValue)" }
+            return nil
+        }
         results.append(check(
-            "표시: 키보드 목록이 화면 목록과 같다",
-            closedRefs == regression.order.map(\.ref) && closed.last == .details,
-            "키보드=\(closedRefs.map(\.label).joined(separator: ",")) 화면=\(regression.order.map(\.ref.label).joined(separator: ","))"
+            "표시: 키보드 목록이 화면 목록·배치 순서와 같다(타이머 조작·메뉴 포함)",
+            closedRefs == regression.order.map(\.ref)
+                && closedTimers == [
+                    "focus-1:start", "focus-1:pause", "focus-1:reset",
+                ]
+                && closed.suffix(2) == [.details, .menu],
+            "키보드=\(closed.map(\.label).joined(separator: ","))"
+        ))
+
+        // 3b. 배치 순서가 바뀌면 **조작 순서도** 바뀐다(카드가 앞으로 오면 타이머 버튼이 먼저 온다).
+        var cardsFirst = layout
+        cardsFirst.order = [.cards, .common, .project]
+        let cardsFirstFocus = DockFocusPlan.controls(
+            display: DockDisplayBuilder.make(
+                resolution: makeResolution(common: 3, project: 2),
+                layout: cardsFirst,
+                screenWidth: screen
+            ),
+            layout: cardsFirst,
+            allItems: all,
+            detailsVisible: false
+        )
+        results.append(check(
+            "표시: 배치 순서를 바꾸면 조작 순서도 바뀐다",
+            cardsFirstFocus.first == .timer(cardID: "focus-1", action: .start)
+                && cardsFirstFocus.prefix(3).allSatisfy { if case .timer = $0 { return true } else { return false } }
+                && cardsFirstFocus.dropFirst(3).first?.itemRef != nil,
+            "앞 4개=\(cardsFirstFocus.prefix(4).map(\.label).joined(separator: ","))"
+        ))
+
+        // 3c. 미등록 경로에서는 등록(`+`) 조작이 키보드 목록에 들어간다.
+        let unregistered = DockDisplayBuilder.make(
+            resolution: ProjectResolver.resolve(cwd: "/work/other", catalog: makeCatalog(common: 3, project: 2)),
+            layout: layout,
+            screenWidth: screen
+        )
+        let unregisteredFocus = DockFocusPlan.controls(
+            display: unregistered,
+            layout: layout,
+            allItems: ProjectResolver.resolve(cwd: "/work/other", catalog: makeCatalog(common: 3, project: 2)).allItems,
+            detailsVisible: false
+        )
+        results.append(check(
+            "표시: 미등록 경로에서는 등록 조작이 키보드 목록에 들어간다",
+            unregisteredFocus.contains(.registerProject)
+                && !unregisteredFocus.contains(.overflow(.project)),
+            "포함=\(unregisteredFocus.contains(.registerProject)) 항목=\(unregisteredFocus.map(\.label).joined(separator: ","))"
         ))
 
         // 4. 프로젝트 항목이 밀리면 **화면에 없는 항목은 키보드로도 갈 수 없다**.
@@ -901,9 +950,9 @@ public enum SelfTest {
             screenWidth: screen
         )
         let overflowAll = ProjectResolver.resolve(cwd: "/work/shop", catalog: makeCatalog(common: 3, project: 8)).allItems
-        let overflowFocus = DockFocusPlan.controls(display: overflow, allItems: overflowAll, detailsVisible: false)
+        let overflowFocus = DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: false)
         let hiddenRefs = overflowAll.map(\.ref).filter { !overflow.order.map(\.ref).contains($0) }
-        let detailsOpen = DockFocusPlan.controls(display: overflow, allItems: overflowAll, detailsVisible: true)
+        let detailsOpen = DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: true)
         results.append(check(
             "표시: 영역을 넘긴 항목은 화면·키보드에서 함께 빠지고 상세 보기에는 있다",
             overflow.projectHidden == 3 && overflow.project.count == 5
@@ -912,6 +961,14 @@ public enum SelfTest {
                 && detailsOpen.compactMap(\.itemRef).count == overflowAll.count
                 && overflow.projectAreaWidth == 360,
             "영역=\(Int(overflow.projectAreaWidth)) 보이는 프로젝트=\(overflow.project.count) 숨김=\(overflow.projectHidden) 상세=\(detailsOpen.compactMap(\.itemRef).count)개"
+        ))
+
+        // 4b. 밀린 항목이 있으면 **밀린 수를 알리는 타일**도 키보드 목록에 있다.
+        results.append(check(
+            "표시: 밀린 항목을 알리는 타일이 키보드 목록에 있다",
+            DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: false)
+                .contains(.overflow(.project)),
+            "목록=\(DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: false).map(\.label).joined(separator: ","))"
         ))
 
         // 5. 프로젝트 항목 수가 달라져도 공통 구성 위치(바 폭·공통 타일 수)는 그대로다.
@@ -960,7 +1017,50 @@ public enum SelfTest {
             "영역=\(Int(short.projectAreaWidth)) 공통 보임=\(short.common.count)/숨김=\(short.commonHidden) 바=\(Int(short.barWidth)) 필요=\(Int(short.demandWidth))"
         ))
 
-        // 8. 저장된 영역 폭을 그대로 쓸 수 없어 줄여야 하는 경우도 **공간 부족으로 남긴다**.
+        // 8. 표시 방식(아이콘+이름 / 아이콘 중심)이 **실제로 다른 기하**를 만든다.
+        let labelChips = DockDisplayBuilder.make(
+            resolution: makeResolution(common: 2, project: 6),
+            layout: layout,
+            screenWidth: screen,
+            labelMode: .nameAndIcon
+        )
+        let iconOnly = DockDisplayBuilder.make(
+            resolution: makeResolution(common: 2, project: 6),
+            layout: layout,
+            screenWidth: screen,
+            labelMode: .iconOnly
+        )
+        results.append(check(
+            "표시: 표시 방식이 프로젝트 타일 폭·개수를 바꾼다",
+            DockBarLayout.projectTileWidth(.nameAndIcon) == DockBarLayout.projectTileChipWidth
+                && DockBarLayout.projectTileWidth(.iconOnly) == DockBarLayout.projectTileSize
+                && labelChips.project.count < iconOnly.project.count
+                && labelChips.project.count + labelChips.projectHidden == 6,
+            "아이콘중심=\(iconOnly.project.count)개/\(Int(DockBarLayout.projectTileWidth(.iconOnly)))pt "
+                + "아이콘+이름=\(labelChips.project.count)개/\(Int(DockBarLayout.projectTileWidth(.nameAndIcon)))pt"
+        ))
+
+        // 8b. 카드가 화면보다 많으면 **밀린 수를 남긴다**(조용히 잘리지 않는다).
+        var manyCards = layout
+        manyCards.cards = (1...8).map { DockCardSpec(id: "focus-\($0)", kind: .focusTimer) }
+        let cardOverflow = DockDisplayBuilder.make(
+            resolution: makeResolution(common: 3, project: 2),
+            layout: manyCards,
+            screenWidth: screen
+        )
+        results.append(check(
+            "표시: 카드가 화면보다 많으면 들어가는 만큼만 그리고 밀린 수를 남긴다",
+            cardOverflow.cardHidden > 0
+                && cardOverflow.visibleCards.count + cardOverflow.cardHidden == 8
+                && cardOverflow.isSpaceShort
+                && cardOverflow.barWidth <= DockBarLayout.screenCeiling(screenWidth: screen)
+                && DockFocusPlan.controls(
+                    display: cardOverflow, layout: manyCards, allItems: [], detailsVisible: false
+                ).contains(.overflow(.cards)),
+            "보이는 카드=\(cardOverflow.visibleCards.count) 밀림=\(cardOverflow.cardHidden) 바=\(Int(cardOverflow.barWidth)) 필요=\(Int(cardOverflow.demandWidth))"
+        ))
+
+        // 8c. 저장된 영역 폭을 그대로 쓸 수 없어 줄여야 하는 경우도 **공간 부족으로 남긴다**.
         var wideArea = layout
         wideArea.projectAreaWidth = DockLayout.maximumProjectAreaWidth
         let areaShort = DockDisplayBuilder.make(
@@ -1107,6 +1207,38 @@ public enum SelfTest {
             "남은=\(Int(backwards.remaining(at: start.addingTimeInterval(-60))))초"
         ))
 
+        // 00:00에서는 상태 문구·실행 표시·버튼 동작이 **끝난 상태**로 맞춰진다.
+        var finishedRun = FocusTimerState()
+        finishedRun.start(at: start)
+        let finishAt = start.addingTimeInterval(FocusTimerState.defaultDuration + 30)
+        let textAtEnd = finishedRun.text(at: finishAt)
+        let statusAtEnd = finishedRun.statusText(at: finishAt)
+        let runningAtEnd = finishedRun.isRunning(at: finishAt)
+        var restarted = finishedRun
+        restarted.complete(at: finishAt)
+        restarted.start(at: finishAt)
+        results.append(check(
+            "카드: 00:00에서 완료 상태·문구가 맞고, ▶는 처음부터 다시 시작한다",
+            textAtEnd == "00:00" && statusAtEnd == "끝남" && !runningAtEnd
+                && finishedRun.remainingFraction(at: finishAt) == 0
+                && restarted.isRunning(at: finishAt)
+                && restarted.remaining(at: finishAt) == FocusTimerState.defaultDuration
+                && restarted.statusText(at: finishAt) == "집중 중",
+            "끝=\(textAtEnd)/\(statusAtEnd) 다시시작=\(restarted.text(at: finishAt))"
+        ))
+
+        // 완료 확정은 흐르는 표시를 지우고 0으로 고정한다(일시정지로 되살아나지 않는다).
+        var completed = finishedRun
+        completed.complete(at: finishAt)
+        results.append(check(
+            "카드: 완료로 확정하면 0에서 멈춘 상태로 남는다",
+            !completed.isRunning
+                && completed.remaining(at: finishAt) == 0
+                && completed.statusText(at: finishAt) == "끝남"
+                && completed.remaining(at: finishAt.addingTimeInterval(600)) == 0,
+            "표시=\(completed.statusText(at: finishAt)) 남은=\(Int(completed.remaining(at: finishAt.addingTimeInterval(600))))"
+        ))
+
         // 카드 id가 다르면 상태도 따로 둔다(같은 종류를 여러 개 두어도 섞이지 않는다).
         let first = DockCardSpec.makeDefault(.clock, existing: [])
         let second = DockCardSpec.makeDefault(.clock, existing: [first])
@@ -1119,6 +1251,15 @@ public enum SelfTest {
                 && states[first.id]?.isRunning == true
                 && states[second.id] == nil,
             "id=\(first.id)/\(second.id) 진행중=\(states[first.id]?.isRunning == true)"
+        ))
+
+        // 지운 카드의 id는 다시 쓰지 않는다(새 카드가 이전 실행 상태를 물려받지 않게).
+        let used: Set<String> = ["time-1", "focus-1", "focus-2"]
+        let fresh = DockCardSpec.makeDefault(.focusTimer, usedIDs: used)
+        results.append(check(
+            "카드: 지운 카드의 id를 다시 쓰지 않는다",
+            !used.contains(fresh.id),
+            "새 id=\(fresh.id) 사용중=\(used.sorted().joined(separator: ","))"
         ))
 
         return results

@@ -30,6 +30,11 @@ struct LaunchOptions {
     var editorCancelAfterMilliseconds: Int?
     /// 추적할 터미널 소스. 기본은 자동(최전면 앱을 따라간다).
     var hostSource: HostSource = .auto
+    /// 진단용: 집중 타이머의 기본 시간(초)을 바꾼다. **완료(00:00) 상태를 실제 화면에서 확인**하기 위한 것이다.
+    /// 값이 없으면 25분(제품 기본값)이다.
+    var timerSecondsOverride: Int?
+    /// 진단용: 시작 후 이 시간(ms) 뒤에 첫 집중 타이머를 **시작**한다(입력 없이 완료 상태까지 관측하기 위한 것).
+    var timerAutostartAfterMilliseconds: Int?
 
     var isFake: Bool { fake != nil }
 }
@@ -66,6 +71,8 @@ PaneDock — 포커스된 터미널 pane을 따라가는 최소 Dock
   --adapter <name>  추적 소스. auto(기본)=최전면 앱을 따라간다 | ghostty | cmux
   --fake <mode>     가짜 입력 모드. 실제 터미널에 붙지 않으며 창에 [FAKE]로 표시된다
   --self-check      창을 띄우지 않고 1회 조회 결과와 실행 계획만 출력한다
+  --timer-seconds <n>  (진단용) 집중 타이머 기본 시간(초). 완료 상태 확인용
+  --timer-autostart <ms>  (진단용) 시작 후 이 시간 뒤에 첫 타이머를 시작한다
   --help            이 도움말
 
 추적 소스:
@@ -169,6 +176,20 @@ func parseLaunchOptions(_ arguments: [String]) -> LaunchOptions? {
                 exit(2)
             }
             options.reloadAfterMilliseconds = value
+        case "--timer-seconds":
+            index += 1
+            guard index < arguments.count, let value = Int(arguments[index]), value > 0 else {
+                FileHandle.standardError.write(Data("--timer-seconds requires seconds\n".utf8))
+                exit(2)
+            }
+            options.timerSecondsOverride = value
+        case "--timer-autostart":
+            index += 1
+            guard index < arguments.count, let value = Int(arguments[index]), value > 0 else {
+                FileHandle.standardError.write(Data("--timer-autostart requires milliseconds\n".utf8))
+                exit(2)
+            }
+            options.timerAutostartAfterMilliseconds = value
         case "--help", "-h":
             return nil
         default:

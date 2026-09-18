@@ -24,6 +24,11 @@ public struct FocusTimerState: Equatable, Sendable {
 
     public var isRunning: Bool { runningSince != nil }
 
+    /// 지금 시각 기준으로 흐르고 있는가. **끝난 타이머는 흐르지 않는 것으로 본다**(00:00에서 멈춘다).
+    public func isRunning(at now: Date) -> Bool {
+        runningSince != nil && remaining(at: now) > 0
+    }
+
     /// 지금까지 흐른 시간.
     public func elapsed(at now: Date) -> TimeInterval {
         guard let runningSince else { return accumulated }
@@ -44,15 +49,25 @@ public struct FocusTimerState: Equatable, Sendable {
 
     public func isFinished(at now: Date) -> Bool { remaining(at: now) <= 0 }
 
+    /// 카드에 보여줄 상태 문구. **`00:00`에서는 "끝남"이고 버튼도 그 상태에 맞는다.**
+    public func statusText(at now: Date) -> String {
+        if isFinished(at: now) { return "끝남" }
+        if isRunning(at: now) { return "집중 중" }
+        if elapsed(at: now) > 0 { return "일시정지" }
+        return "집중 타이머"
+    }
+
     /// `mm:ss`. 남은 시간을 **올림**해 보여준다(시작 직후 25:00, 끝에서 00:00).
     public func text(at now: Date) -> String {
         let total = Int(remaining(at: now).rounded(.up))
         return String(format: "%02d:%02d", total / 60, total % 60)
     }
 
-    /// 시작. 이미 흐르고 있으면 아무것도 하지 않는다(두 번 눌러도 시간이 늘지 않는다).
+    /// 시작. 끝난(00:00) 상태에서 누르면 **처음부터 다시 시작**한다.
+    /// 이미 흐르고 있으면 아무것도 하지 않는다(두 번 눌러도 시간이 늘지 않는다).
     public mutating func start(at now: Date) {
         guard runningSince == nil else { return }
+        if isFinished(at: now) { accumulated = 0 }
         runningSince = now
     }
 
@@ -60,6 +75,14 @@ public struct FocusTimerState: Equatable, Sendable {
     public mutating func pause(at now: Date) {
         guard runningSince != nil else { return }
         accumulated = elapsed(at: now)
+        runningSince = nil
+    }
+
+    /// 00:00에 도달한 것을 확정한다. 흐르는 표시를 지우고 남은 시간을 0으로 고정한다.
+    /// (`pause`와 달리 남은 시간을 되살리지 않는다 — 끝난 타이머는 끝난 상태로 남는다.)
+    public mutating func complete(at now: Date) {
+        guard isFinished(at: now) else { return }
+        accumulated = duration
         runningSince = nil
     }
 

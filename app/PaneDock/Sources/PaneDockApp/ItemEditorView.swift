@@ -507,7 +507,8 @@ struct DockLayoutPreview: View {
             resolution: model.resolution,
             layout: model.effectiveLayout,
             screenWidth: ScreenGeometry.fallbackFrame.width,
-            showsFakeBadge: model.isFake
+            showsFakeBadge: model.isFake,
+            labelMode: model.effectiveAppearance.labelMode
         )
     }
 

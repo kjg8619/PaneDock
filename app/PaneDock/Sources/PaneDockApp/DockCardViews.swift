@@ -112,20 +112,19 @@ private struct ClockFace: View {
 /// 집중 타이머 카드. **Dock 안에서 실제로 동작한다**(시작·일시정지·재설정).
 ///
 /// 남은 시간은 `FocusTimerState`가 시작 시각으로 계산한다(표시 갱신 횟수에 의존하지 않는다).
+/// `00:00`에서는 상태 문구·버튼 표시가 **끝난 상태**로 맞춰진다(▶ = 처음부터 다시 시작).
 struct FocusTimerCardView: View {
     let cardID: String
     let state: FocusTimerState
     let now: Date
-    let onStart: () -> Void
-    let onPause: () -> Void
-    let onReset: () -> Void
+    let focusedControl: DockFocusControl?
+    let hoveredControl: DockFocusControl?
+    let onAction: (DockTimerAction) -> Void
+    let onHover: (DockFocusControl?) -> Void
 
-    private var statusText: String {
-        if state.isRunning { return "집중 중" }
-        if state.isFinished(at: now) { return "끝남" }
-        if state.elapsed(at: now) > 0 { return "일시정지" }
-        return "집중 타이머"
-    }
+    private var isRunning: Bool { state.isRunning(at: now) }
+    private var isFinished: Bool { state.isFinished(at: now) }
+    private var statusText: String { state.statusText(at: now) }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -133,26 +132,28 @@ struct FocusTimerCardView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(statusText)
                     .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isFinished ? Color.orange : Color.secondary)
                     .lineLimit(1)
                 HStack(spacing: 6) {
                     control(
-                        symbol: "play.fill",
-                        help: "타이머 시작 (남은 \(state.text(at: now)))",
-                        isOn: state.isRunning,
-                        action: onStart
+                        .start,
+                        symbol: isFinished ? "arrow.clockwise" : "play.fill",
+                        help: isFinished
+                            ? "끝났습니다 — 처음부터 다시 시작 (25분)"
+                            : "타이머 시작 (남은 \(state.text(at: now)))",
+                        isOn: isRunning
                     )
                     control(
+                        .pause,
                         symbol: "pause.fill",
                         help: "일시정지 (남은 \(state.text(at: now)))",
-                        isOn: !state.isRunning && state.elapsed(at: now) > 0,
-                        action: onPause
+                        isOn: !isRunning && !isFinished && state.elapsed(at: now) > 0
                     )
                     control(
+                        .reset,
                         symbol: "arrow.counterclockwise",
                         help: "재설정 — 25분으로 되돌립니다",
-                        isOn: false,
-                        action: onReset
+                        isOn: false
                     )
                 }
             }
@@ -172,7 +173,7 @@ struct FocusTimerCardView: View {
             Circle()
                 .trim(from: 0, to: state.remainingFraction(at: now))
                 .stroke(
-                    state.isRunning ? Color.green : Color.primary.opacity(0.45),
+                    isFinished ? Color.orange : (isRunning ? Color.green : Color.primary.opacity(0.45)),
                     style: StrokeStyle(lineWidth: 4, lineCap: .round)
                 )
                 .rotationEffect(.degrees(-90))
@@ -185,9 +186,10 @@ struct FocusTimerCardView: View {
         .accessibilityHidden(true)
     }
 
-    /// 카드 조작 버튼. 상태는 **모양(채움)** 과 아이콘으로 구분하고 색만으로 전달하지 않는다.
-    private func control(symbol: String, help: String, isOn: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+    /// 카드 조작 버튼. 상태는 **모양(채움)·아이콘·문구**로 구분하고 색만으로 전달하지 않는다.
+    private func control(_ action: DockTimerAction, symbol: String, help: String, isOn: Bool) -> some View {
+        let focus = DockFocusControl.timer(cardID: cardID, action: action)
+        return Button(action: { onAction(action) }) {
             Image(systemName: symbol)
                 .font(.system(size: 10, weight: .semibold))
                 .frame(width: 22, height: 22)
@@ -197,8 +199,21 @@ struct FocusTimerCardView: View {
                 .overlay(
                     Circle().strokeBorder(isOn ? Color.green.opacity(0.5) : Color.primary.opacity(0.15), lineWidth: 1)
                 )
+                .overlay(
+                    Circle().strokeBorder(
+                        hoveredControl == focus ? Color.primary.opacity(0.35) : Color.clear,
+                        lineWidth: 2
+                    )
+                )
+                .overlay(
+                    Circle().strokeBorder(
+                        focusedControl == focus ? Color.accentColor : Color.clear,
+                        lineWidth: 2.5
+                    )
+                )
         }
         .buttonStyle(.plain)
+        .onHover { onHover($0 ? focus : nil) }
         .help(help)
         .accessibilityLabel(help)
     }
