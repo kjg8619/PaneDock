@@ -267,15 +267,28 @@ struct DockView: View {
         .accessibilityLabel(areaAccessibilityLabel)
     }
 
-    /// 패널 배경: 등록된 프로젝트는 밝은 패널, 미등록은 주황 기운, 확인 실패는 붉은 기운.
+    /// 패널 상태 — 코어의 한 곳(`DockPanelStatus`)에서만 판단한다.
+    private var panelStatus: DockPanelStatus {
+        DockPanelStatus.from(state: model.state, hasProject: model.display.projectRegistered)
+    }
+
+    /// 패널 배경: 등록은 밝은 패널, 미등록은 주황 기운, 확인 중은 중립, 오류는 붉은 기운.
     private var panelFill: Color {
-        if model.display.projectRegistered { return Color.primary.opacity(0.07) }
-        return model.state.isActionable ? Color.orange.opacity(0.10) : Color.red.opacity(0.08)
+        switch panelStatus {
+        case .registered: return Color.primary.opacity(0.07)
+        case .unregistered: return Color.orange.opacity(0.10)
+        case .pending: return Color.primary.opacity(0.05)
+        case .failure: return Color.red.opacity(0.08)
+        }
     }
 
     private var panelStroke: Color {
-        if model.display.projectRegistered { return Color.primary.opacity(0.14) }
-        return model.state.isActionable ? Color.orange.opacity(0.40) : Color.red.opacity(0.35)
+        switch panelStatus {
+        case .registered: return Color.primary.opacity(0.14)
+        case .unregistered: return Color.orange.opacity(0.40)
+        case .pending: return Color.primary.opacity(0.20)
+        case .failure: return Color.red.opacity(0.35)
+        }
     }
 
     /// 헤더: 상태 점 · 프로젝트 이름 · 보조(호스트) 정보 · 메뉴.
@@ -320,7 +333,7 @@ struct DockView: View {
     /// 패널 본문: 등록된 프로젝트는 도구 타일, 미등록은 안내 + 조작, 확인 실패는 사유.
     @ViewBuilder
     private var panelBody: some View {
-        if model.display.projectRegistered {
+        if panelStatus == .registered {
             HStack(spacing: DockBarLayout.tileGap) {
                 ForEach(model.display.project) { entry in
                     projectTile(entry)
@@ -337,8 +350,8 @@ struct DockView: View {
                 }
                 addToolTile
             }
-        } else if model.state.isActionable {
-            // 경로는 **유효하지만 등록된 프로젝트가 없다**(경로 확인 실패와 다른 상태).
+        } else if panelStatus == .unregistered {
+            // 경로는 **유효하지만 등록된 프로젝트가 없다**(확인 중·오류와 다른 상태).
             HStack(spacing: 8) {
                 Text("이 경로에 등록된 프로젝트가 없습니다")
                     .font(.system(size: 11))
@@ -348,6 +361,7 @@ struct DockView: View {
                 Button("폴더 열기") { model.perform(.openFolder, source: .mouse) }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .overlay(focusRing(for: .projectOpenFolder, radius: 6))
                     .disabled(!model.state.canOpenFolder)
                     .help(model.state.canOpenFolder
                         ? "지금 경로를 Finder로 엽니다 — \(model.state.fullPath ?? "-")"
@@ -359,8 +373,8 @@ struct DockView: View {
                     .help("Dock 편집을 열어 이 경로를 프로젝트로 등록합니다")
             }
         } else {
-            // 경로 자체를 확인하지 못한 상태 — 미등록과 같은 문구를 쓰지 않는다.
-            Text(model.state.detail ?? "경로를 확인하는 중입니다")
+            // 확인 중(pending)과 오류(failure) — 미등록과 같은 문구를 쓰지 않고, 실행 제한도 풀지 않는다.
+            Text(model.state.detail ?? (panelStatus == .pending ? "경로를 확인하는 중입니다" : "경로를 확인할 수 없습니다"))
                 .font(.system(size: 11))
                 .foregroundStyle(.red)
                 .lineLimit(2)
@@ -369,13 +383,21 @@ struct DockView: View {
     }
 
     private var panelStatusColor: Color {
-        if model.display.projectRegistered { return .green }
-        return model.state.isActionable ? .orange : .red
+        switch panelStatus {
+        case .registered: return .green
+        case .unregistered: return .orange
+        case .pending: return .gray
+        case .failure: return .red
+        }
     }
 
     private var panelTitle: String {
-        if model.display.projectRegistered { return model.resolution.projectName }
-        return model.state.isActionable ? "프로젝트 미등록" : "경로 확인 실패"
+        switch panelStatus {
+        case .registered: return model.resolution.projectName
+        case .unregistered: return "프로젝트 미등록"
+        case .pending: return "경로 확인 중"
+        case .failure: return "경로 확인 실패"
+        }
     }
 
     private var panelTitleHelp: String {
@@ -407,6 +429,7 @@ struct DockView: View {
                         RoundedRectangle(cornerRadius: 13, style: .continuous)
                             .strokeBorder(Color.primary.opacity(0.16), lineWidth: 1)
                     )
+                    .overlay(focusRing(for: .projectAdd, radius: 13))
                 if showsLabels {
                     Text("추가").font(.system(size: 9)).foregroundStyle(.secondary)
                 }
@@ -423,9 +446,16 @@ struct DockView: View {
         if model.display.projectRegistered {
             return "프로젝트 영역 \(model.resolution.projectName), 항목 \(model.display.project.count)개 표시"
         }
-        return model.state.isActionable
-            ? "프로젝트 영역 — 프로젝트 미등록(폴더 열기·프로젝트로 등록 가능)"
-            : "프로젝트 영역 — 경로 확인 실패: \(model.state.detail ?? "-")"
+        switch panelStatus {
+        case .registered:
+            return "프로젝트 영역 \(model.resolution.projectName)"
+        case .unregistered:
+            return "프로젝트 영역 — 프로젝트 미등록(폴더 열기·프로젝트로 등록 가능)"
+        case .pending:
+            return "프로젝트 영역 — 경로 확인 중"
+        case .failure:
+            return "프로젝트 영역 — 경로 확인 실패: \(model.state.detail ?? "-")"
+        }
     }
 
     private func projectTile(_ entry: DockDisplayItem) -> some View {

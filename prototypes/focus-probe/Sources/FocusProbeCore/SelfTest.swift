@@ -887,7 +887,7 @@ public enum SelfTest {
             cwd: "/work/shop",
             catalog: makeCatalog(common: 3, project: 2)
         ).allItems
-        let closed = DockFocusPlan.controls(display: regression, layout: layout, allItems: all, detailsVisible: false)
+        let closed = DockFocusPlan.controls(display: regression, layout: layout, allItems: all, detailsVisible: false, canActOnPath: true)
         let closedRefs = closed.compactMap(\.itemRef)
         let closedTimers = closed.compactMap { control -> String? in
             if case .timer(let cardID, let action) = control { return "\(cardID):\(action.rawValue)" }
@@ -899,7 +899,7 @@ public enum SelfTest {
                 && closedTimers == [
                     "focus-1:start", "focus-1:pause", "focus-1:reset",
                 ]
-                && closed.suffix(2) == [.details, .menu],
+                && closed.suffix(3) == [.projectAdd, .details, .menu],
             "키보드=\(closed.map(\.label).joined(separator: ","))"
         ))
 
@@ -914,7 +914,8 @@ public enum SelfTest {
             ),
             layout: cardsFirst,
             allItems: all,
-            detailsVisible: false
+            detailsVisible: false,
+            canActOnPath: true
         )
         results.append(check(
             "표시: 배치 순서를 바꾸면 조작 순서도 바뀐다",
@@ -934,7 +935,8 @@ public enum SelfTest {
             display: unregistered,
             layout: layout,
             allItems: ProjectResolver.resolve(cwd: "/work/other", catalog: makeCatalog(common: 3, project: 2)).allItems,
-            detailsVisible: false
+            detailsVisible: false,
+            canActOnPath: true
         )
         results.append(check(
             "표시: 미등록 경로에서는 등록 조작이 키보드 목록에 들어간다",
@@ -950,12 +952,12 @@ public enum SelfTest {
             screenWidth: screen
         )
         let overflowAll = ProjectResolver.resolve(cwd: "/work/shop", catalog: makeCatalog(common: 3, project: 8)).allItems
-        let overflowFocus = DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: false)
+        let overflowFocus = DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: false, canActOnPath: true)
         let hiddenRefs = overflowAll.map(\.ref).filter { !overflow.order.map(\.ref).contains($0) }
-        let detailsOpen = DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: true)
+        let detailsOpen = DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: true, canActOnPath: true)
         results.append(check(
             "표시: 영역을 넘긴 항목은 화면·키보드에서 함께 빠지고 상세 보기에는 있다",
-            overflow.projectHidden == 3 && overflow.project.count == 5
+            overflow.projectHidden == 4 && overflow.project.count == 4
                 && !hiddenRefs.isEmpty
                 && hiddenRefs.allSatisfy { ref in !overflowFocus.compactMap(\.itemRef).contains(ref) }
                 && detailsOpen.compactMap(\.itemRef).count == overflowAll.count
@@ -966,9 +968,9 @@ public enum SelfTest {
         // 4b. 밀린 항목이 있으면 **밀린 수를 알리는 타일**도 키보드 목록에 있다.
         results.append(check(
             "표시: 밀린 항목을 알리는 타일이 키보드 목록에 있다",
-            DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: false)
+            DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: false, canActOnPath: true)
                 .contains(.overflow(.project)),
-            "목록=\(DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: false).map(\.label).joined(separator: ","))"
+            "목록=\(DockFocusPlan.controls(display: overflow, layout: layout, allItems: overflowAll, detailsVisible: false, canActOnPath: true).map(\.label).joined(separator: ","))"
         ))
 
         // 5. 프로젝트 항목 수가 달라져도 공통 구성 위치(바 폭·공통 타일 수)는 그대로다.
@@ -1055,27 +1057,108 @@ public enum SelfTest {
                 && cardOverflow.isSpaceShort
                 && cardOverflow.barWidth <= DockBarLayout.screenCeiling(screenWidth: screen)
                 && DockFocusPlan.controls(
-                    display: cardOverflow, layout: manyCards, allItems: [], detailsVisible: false
+                    display: cardOverflow, layout: manyCards, allItems: [], detailsVisible: false, canActOnPath: true
                 ).contains(.overflow(.cards)),
             "보이는 카드=\(cardOverflow.visibleCards.count) 밀림=\(cardOverflow.cardHidden) 바=\(Int(cardOverflow.barWidth)) 필요=\(Int(cardOverflow.demandWidth))"
         ))
 
-        // 8d. 프로젝트 패널(A 시안)로 바뀌어도 **바깥 폭·타일 한 줄의 폭·넘침 계산은 그대로**여야 한다.
-        let panelWidths: [Double] = [240, 300, 360, 620]
-        let panelFits = panelWidths.allSatisfy { width in
-            let budget = DockBarLayout.projectTileBudget(width: width, tileCount: 12, labelMode: .iconOnly)
-            let used = CGFloat(budget.visible) * DockBarLayout.projectTileStride - DockBarLayout.tileGap
-            return used <= CGFloat(width) - 2 * DockBarLayout.projectPanelPadding + 0.5
+        // 8d. 프로젝트 패널 한 줄은 **항목·넘침·추가·간격·패딩을 모두 포함**해 영역 안에 들어가야 한다.
+        //     (이전에는 추가 타일 자리를 예약하지 않아 360pt·이름 모드·항목 4개에서 352 > 336으로 밀렸다.)
+        let rowModes: [DockLabelMode] = [.iconOnly, .nameAndIcon]
+        var rowProblems: [String] = []
+        for mode in rowModes {
+            for areaWidth in [240.0, 300.0, 360.0, 620.0] {
+                for count in 0...14 {
+                    let budget = DockBarLayout.projectTileBudget(width: areaWidth, tileCount: count, labelMode: mode)
+                    let used = DockBarLayout.projectRowWidth(
+                        visible: budget.visible,
+                        hidden: budget.hidden,
+                        labelMode: mode
+                    )
+                    let available = CGFloat(areaWidth)
+                    if used > available + 0.5 {
+                        rowProblems.append("\(mode.rawValue)·\(Int(areaWidth))pt·\(count)개 → \(Int(used))>\(Int(available))")
+                    }
+                    if budget.visible + budget.hidden != count {
+                        rowProblems.append("\(mode.rawValue)·\(Int(areaWidth))pt·\(count)개 합이 안 맞음")
+                    }
+                    // 밀린 항목이 있는데 넘침 타일 자리가 없으면 안 된다.
+                    if budget.hidden > 0, budget.visible < 0 {
+                        rowProblems.append("\(mode.rawValue)·\(Int(areaWidth))pt·\(count)개 넘침 표현 없음")
+                    }
+                }
+            }
         }
         results.append(check(
-            "표시: 패널 헤더가 타일 폭·넘침 계산을 잠식하지 않는다",
-            panelFits
-                && DockBarLayout.projectPanelPadding * 2 - DockBarLayout.tileGap <= DockBarLayout.widgetPadding
-                && DockBarLayout.projectPanelHeight <= DockBarLayout.widgetBarHeight - 12,
-            "패널높이=\(Int(DockBarLayout.projectPanelHeight)) 여백=\(Int(DockBarLayout.projectPanelPadding))*2−간격=\(Int(DockBarLayout.projectPanelPadding * 2 - DockBarLayout.tileGap)) ≤ 예약=\(Int(DockBarLayout.widgetPadding)) · 넓이별 타일 맞음=\(panelFits)"
+            "표시: 프로젝트 한 줄(항목·넘침·추가·간격·패딩)이 영역 안에 들어간다",
+            rowProblems.isEmpty,
+            rowProblems.isEmpty
+                ? "두 모드 × 넓이 4종 × 항목 0~14개 모두 맞음 · 360pt·이름모드·4개 → 보임=\(DockBarLayout.projectTileBudget(width: 360, tileCount: 4, labelMode: .nameAndIcon).visible) 넓이=\(Int(DockBarLayout.projectRowWidth(visible: DockBarLayout.projectTileBudget(width: 360, tileCount: 4, labelMode: .nameAndIcon).visible, hidden: DockBarLayout.projectTileBudget(width: 360, tileCount: 4, labelMode: .nameAndIcon).hidden, labelMode: .nameAndIcon)))pt/360pt"
+                : rowProblems.prefix(3).joined(separator: " / ")
         ))
 
-        // 8e. 공통 항목이 **전부 밀려** `display.common`이 비어도 화면에는 `+N` 타일이 있으므로
+        // 8d-2. 경계값: 딱 맞는 개수는 넘침이 없고, 하나 더 많으면 넘침 타일이 생긴다.
+        let boundaryIcon = DockBarLayout.projectRowTileCapacity(width: 360, labelMode: .iconOnly)
+        let exactlyFits = DockBarLayout.projectTileBudget(width: 360, tileCount: boundaryIcon - 1, labelMode: .iconOnly)
+        let oneMore = DockBarLayout.projectTileBudget(width: 360, tileCount: boundaryIcon, labelMode: .iconOnly)
+        let emptyList = DockBarLayout.projectTileBudget(width: 360, tileCount: 0, labelMode: .iconOnly)
+        results.append(check(
+            "표시: 경계 개수·빈 목록에서 넘침 표현이 맞다",
+            exactlyFits.hidden == 0 && exactlyFits.visible == boundaryIcon - 1
+                && oneMore.hidden == 2 && oneMore.visible == boundaryIcon - 2
+                && emptyList == (0, 0)
+                && DockBarLayout.projectRowWidth(visible: exactlyFits.visible, hidden: exactlyFits.hidden, labelMode: .iconOnly) <= 360,
+            "한 줄 타일 수=\(boundaryIcon) · 딱 맞음=\(exactlyFits.visible)+\(exactlyFits.hidden) · 하나 더=\(oneMore.visible)+\(oneMore.hidden) · 빈 목록=\(emptyList.visible)+\(emptyList.hidden)"
+        ))
+
+        // 8e. 프로젝트 영역의 버튼도 **화면과 같은 기준**으로 초점 목록에 들어간다.
+        let registeredFocus = DockFocusPlan.controls(
+            display: regression, layout: layout, allItems: all, detailsVisible: false, canActOnPath: true
+        )
+        let unregisteredCatalog = makeCatalog(common: 3, project: 2)
+        let unregisteredItems = ProjectResolver.resolve(cwd: "/work/other", catalog: unregisteredCatalog).allItems
+        let unregisteredDisplay = DockDisplayBuilder.make(
+            resolution: ProjectResolver.resolve(cwd: "/work/other", catalog: unregisteredCatalog),
+            layout: layout,
+            screenWidth: screen
+        )
+        let unregisteredButtons = DockFocusPlan.controls(
+            display: unregisteredDisplay, layout: layout, allItems: unregisteredItems,
+            detailsVisible: false, canActOnPath: true
+        )
+        let blockedButtons = DockFocusPlan.controls(
+            display: unregisteredDisplay, layout: layout, allItems: unregisteredItems,
+            detailsVisible: false, canActOnPath: false
+        )
+        results.append(check(
+            "표시: 프로젝트 영역 버튼이 화면과 같은 기준으로 키보드 목록에 들어간다",
+            registeredFocus.contains(.projectAdd)
+                && registeredFocus.firstIndex(of: .projectAdd).map { index in
+                    index > (registeredFocus.filter { $0.itemRef != nil }.count - 1)
+                } ?? false
+                && unregisteredButtons.contains(.projectOpenFolder)
+                && unregisteredButtons.contains(.registerProject)
+                && !blockedButtons.contains(.projectOpenFolder)
+                && !blockedButtons.contains(.registerProject)
+                && !blockedButtons.contains(.projectAdd),
+            "등록=\(registeredFocus.suffix(3).map(\.label).joined(separator: ",")) · 미등록=\(unregisteredButtons.suffix(4).map(\.label).joined(separator: ",")) · 차단=\(blockedButtons.suffix(2).map(\.label).joined(separator: ","))"
+        ))
+
+        // 8e-2. 상태 판정: 미등록·확인 중·오류를 서로 다른 상태로 둔다(확인 중을 정상 작업으로 올리지 않는다).
+        let trackedState = makeWorkState(display: .tracked)
+        let pendingState = makeWorkState(display: .pending)
+        let errorState = makeWorkState(display: .error)
+        results.append(check(
+            "표시: 미등록·확인 중·오류가 서로 다른 패널 상태로 구분된다",
+            DockPanelStatus.from(state: trackedState, hasProject: true) == .registered
+                && DockPanelStatus.from(state: trackedState, hasProject: false) == .unregistered
+                && DockPanelStatus.from(state: pendingState, hasProject: false) == .pending
+                && DockPanelStatus.from(state: errorState, hasProject: false) == .failure
+                && !pendingState.isActionable && !errorState.isActionable,
+            "등록=\(DockPanelStatus.from(state: trackedState, hasProject: true)) 미등록=\(DockPanelStatus.from(state: trackedState, hasProject: false)) 확인중=\(DockPanelStatus.from(state: pendingState, hasProject: false)) 오류=\(DockPanelStatus.from(state: errorState, hasProject: false))"
+        ))
+
+        // 8f. 공통 항목이 **전부 밀려** `display.common`이 비어도 화면에는 `+N` 타일이 있으므로
         //     키보드로도 그 타일에 갈 수 있어야 한다(계획과 화면의 구성요소 판단이 같아야 한다).
         var tight = layout
         tight.projectAreaWidth = DockLayout.maximumProjectAreaWidth
@@ -1091,7 +1174,8 @@ public enum SelfTest {
             display: zeroCommon,
             layout: tight,
             allItems: zeroCommonAll,
-            detailsVisible: false
+            detailsVisible: false,
+            canActOnPath: true
         )
         results.append(check(
             "표시: 공통이 전부 밀려도 화면의 +N 타일을 키보드로 고를 수 있다",
@@ -1111,10 +1195,10 @@ public enum SelfTest {
             screenWidth: screen
         )
         let cardFocusClosed = DockFocusPlan.controls(
-            display: cardShort, layout: manyTimers, allItems: [], detailsVisible: false
+            display: cardShort, layout: manyTimers, allItems: [], detailsVisible: false, canActOnPath: true
         )
         let cardFocusOpen = DockFocusPlan.controls(
-            display: cardShort, layout: manyTimers, allItems: [], detailsVisible: true
+            display: cardShort, layout: manyTimers, allItems: [], detailsVisible: true, canActOnPath: true
         )
         let hiddenCardID = manyTimers.cards.last!.id
         results.append(check(
@@ -1177,6 +1261,27 @@ public enum SelfTest {
                     }
                 )
             ]
+        )
+    }
+
+    /// 패널 상태 판정 검사용 DockState(표시 상태만 다르게).
+    private static func makeWorkState(display: DockDisplayState) -> DockState {
+        DockState(
+            display: display,
+            folderName: "shop",
+            fullPath: "/work/shop",
+            previousPath: nil,
+            paneID: "w1:p1",
+            hostAppID: "ghostty",
+            adapterID: "ghostty",
+            cwdSource: "ghostty:terminal.workingDirectory",
+            connectionStatus: .connected,
+            hostFrontmost: display == .tracked,
+            observedAt: now,
+            detail: nil,
+            isLocked: display == .locked,
+            canOpenFolder: display == .tracked || display == .held || display == .locked,
+            canCopyPath: display == .tracked || display == .held || display == .locked
         )
     }
 

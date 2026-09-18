@@ -345,7 +345,11 @@ public enum DockFocusControl: Equatable, Sendable {
     case timer(cardID: String, action: DockTimerAction)
     /// 자리가 없어 밀린 항목·카드를 알리는 타일.
     case overflow(DockOverflowArea)
-    /// 미등록 경로에서 프로젝트를 등록하러 가는 `+` 타일.
+    /// 등록된 프로젝트의 **추가** 타일(Dock 편집 열기).
+    case projectAdd
+    /// 미등록 경로의 **폴더 열기** 버튼.
+    case projectOpenFolder
+    /// 미등록 경로의 **프로젝트로 등록** 버튼.
     case registerProject
     /// 오른쪽 `⋯` 보조 메뉴.
     case menu
@@ -360,7 +364,9 @@ public enum DockFocusControl: Equatable, Sendable {
         case .item(let ref): return "item:\(ref.label)"
         case .timer(let cardID, let action): return "timer:\(cardID):\(action.rawValue)"
         case .overflow(let area): return "overflow:\(area.rawValue)"
-        case .registerProject: return "register"
+        case .projectAdd: return "project.add"
+        case .projectOpenFolder: return "project.openFolder"
+        case .registerProject: return "project.register"
         case .menu: return "menu"
         case .details: return "details"
         case .hide: return "hide"
@@ -378,14 +384,15 @@ public enum DockFocusPlan {
     /// 지금 화면에서 키보드로 이동할 수 있는 것들. **배치 순서를 그대로 따른다.**
     ///
     /// - 구성요소 순서(`layout.order`)대로 그 안의 조작을 순회한다: 항목 타일 → (카드면)타이머 버튼 →
-    ///   밀린 항목·카드 타일 → 미등록이면 등록 `+` 타일.
+    ///   밀린 항목·카드 타일 → 프로젝트 영역의 **추가**(등록) 또는 **폴더 열기·프로젝트로 등록**(미등록).
+    /// - `canActOnPath`가 false면(경로 확인 중·오류) 화면에 등록·폴더 열기 버튼이 없으므로 초점 목록에도 넣지 않는다.
     /// - 그 뒤에 화면 오른쪽 조작(상태 점 → `⋯` 메뉴), 상세 보기가 열려 있으면 숨기기·종료가 온다.
-    /// - 상세 보기가 열려 있으면 **밀린 항목까지 전부** 순회한다(그 목록에 다 나열되기 때문).
     public static func controls(
         display: DockDisplay,
         layout: DockLayout,
         allItems: [DockItemTarget],
-        detailsVisible: Bool
+        detailsVisible: Bool,
+        canActOnPath: Bool
     ) -> [DockFocusControl] {
         var controls: [DockFocusControl] = []
         // 상세 보기가 닫혀 있으면 **화면에 그린 항목만** 돈다(밀린 항목은 타일로 알리고 그 타일만 순회한다).
@@ -417,7 +424,11 @@ public enum DockFocusPlan {
                 if display.projectRegistered {
                     controls.append(contentsOf: projectRefs.map { .item($0) })
                     if !detailsVisible, display.projectHidden > 0 { controls.append(.overflow(.project)) }
-                } else {
+                    // 화면에 항상 있는 **추가** 타일.
+                    controls.append(.projectAdd)
+                } else if canActOnPath {
+                    // 화면의 두 버튼(폴더 열기 · 프로젝트로 등록)과 같은 순서.
+                    controls.append(.projectOpenFolder)
                     controls.append(.registerProject)
                 }
             }
@@ -429,5 +440,26 @@ public enum DockFocusPlan {
             controls.append(contentsOf: [.hide, .quit])
         }
         return controls
+    }
+}
+
+/// 프로젝트 패널이 보여줄 상태. **미등록·확인 중·오류를 서로 다른 상태로 둔다.**
+public enum DockPanelStatus: Equatable, Sendable {
+    /// 프로젝트가 잡혔다.
+    case registered
+    /// 경로는 유효하지만 등록된 프로젝트가 없다(등록·폴더 열기 가능).
+    case unregistered
+    /// 아직 대상을 확인하지 못했다(확인 중) — **정상 작업으로 승격하지 않는다.**
+    case pending
+    /// 경로가 없거나 조회에 실패했다.
+    case failure
+
+    public static func from(state: DockState, hasProject: Bool) -> DockPanelStatus {
+        if hasProject { return .registered }
+        switch state.display {
+        case .tracked, .held, .locked: return .unregistered
+        case .pending: return .pending
+        case .error: return .failure
+        }
     }
 }

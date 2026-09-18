@@ -697,7 +697,9 @@ final class DockModel: ObservableObject {
             display: display,
             layout: effectiveLayout,
             allItems: resolution.allItems,
-            detailsVisible: isDetailsVisible
+            detailsVisible: isDetailsVisible,
+            // 화면에 등록·폴더 열기 버튼이 있는가(경로 확인 중·오류면 없다).
+            canActOnPath: state.isActionable
         )
     }
 
@@ -1086,6 +1088,10 @@ final class DockModel: ObservableObject {
         case .item(let ref): performItem(ref: ref, source: .keyboard)
         case .timer(let cardID, let action): performTimer(action, cardID: cardID, source: .keyboard)
         case .overflow: showDetails()
+        case .projectAdd: openEditor()
+        case .projectOpenFolder:
+            // 화면 버튼과 **같은 검증 경로**(isAllowed + DockActionPlanner)를 쓴다.
+            perform(.openFolder, source: .keyboard)
         case .registerProject: openEditor()
         case .menu: showActionMenu(source: .keyboard)
         case .details: toggleDetails()

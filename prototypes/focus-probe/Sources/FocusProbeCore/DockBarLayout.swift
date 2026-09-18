@@ -63,16 +63,40 @@ public enum DockBarLayout {
         return appTileSize
     }
 
+    /// 프로젝트 패널 본문 **한 줄 전체**의 폭 — 항목·넘침 타일·**추가 타일**·간격·안쪽 여백을 모두 포함한다.
+    ///
+    /// 화면이 실제로 그리는 것과 같은 계산이어야 한다. 항목만 세면 추가 타일이 들어갈 자리가 없어
+    /// 줄이 영역 밖으로 밀린다(V18.20에서 360pt·이름 모드·항목 4개일 때 352 > 336으로 확인).
+    public static func projectRowWidth(visible: Int, hidden: Int, labelMode: DockLabelMode) -> CGFloat {
+        let tileWidth = projectTileWidth(labelMode)
+        let tiles = max(0, visible) + (hidden > 0 ? 1 : 0) + 1   // 항목 + 넘침 + **추가**
+        return CGFloat(tiles) * tileWidth + CGFloat(max(0, tiles - 1)) * tileGap
+            + projectPanelPadding * 2
+    }
+
+    /// 패널 안쪽에 들어가는 **한 줄 타일 수**(추가 타일 포함). 항목·넘침·추가가 같은 폭을 쓴다.
+    public static func projectRowTileCapacity(width: Double, labelMode: DockLabelMode) -> Int {
+        let available = CGFloat(width) - projectPanelPadding * 2
+        let tileWidth = projectTileWidth(labelMode)
+        guard available >= tileWidth else { return 0 }
+        // n 타일 폭 = n*w + (n-1)*gap ≤ available
+        return Int((available + tileGap) / (tileWidth + tileGap))
+    }
+
     /// 할당 폭 안에 들어가는 프로젝트 항목 수와 밀린 수(표시 모드 반영).
+    ///
+    /// **추가 타일 자리를 항상 남긴다.** 넘침 타일은 밀린 항목이 있을 때만 자리를 쓴다.
     public static func projectTileBudget(
         width: Double,
         tileCount: Int,
         labelMode: DockLabelMode = .iconOnly
     ) -> (visible: Int, hidden: Int) {
-        let stride = projectTileStride(labelMode)
-        let fits = max(0, Int((width - widgetPadding) / stride))
-        guard tileCount > fits else { return (tileCount, 0) }
-        let visible = max(0, fits - 1)
+        guard tileCount > 0 else { return (0, 0) }
+        let capacity = projectRowTileCapacity(width: width, labelMode: labelMode)
+        // 항목이 전부 들어가고 추가 타일까지 자리가 있으면 넘침이 없다.
+        if tileCount + 1 <= capacity { return (tileCount, 0) }
+        // 넘침 타일과 추가 타일 자리를 남기고 항목을 줄인다.
+        let visible = max(0, capacity - 2)
         return (visible, tileCount - visible)
     }
 
