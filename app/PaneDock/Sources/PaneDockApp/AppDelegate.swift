@@ -25,6 +25,9 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private var isUserHidden = false
     /// 마우스 버튼을 놓는 순간을 우리 앱 안에서만 본다(전역 감시 아님).
     private var mouseUpMonitor: Any?
+    /// 마우스가 Dock 위에 있는지 주기적으로 확인하는 타이머와 직전 값.
+    private var presenceTimer: Timer?
+    private var wasMouseInside: Bool?
     /// 프로그램이 마지막으로 크기를 맞춘 시각. 알림이 늦게 도착하는 경우까지 막는다.
     private var lastProgrammaticLayout: Date?
     private var statusItem: NSStatusItem?
@@ -148,6 +151,7 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             self?.scheduleCollapseCheck()
             return event
         }
+        startPresenceTimer()
         installStatusItem(model: model)
         installHotKey(model: model)
         model.start(intervalMilliseconds: options.intervalMilliseconds)
@@ -368,16 +372,6 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         panel.isMovableByWindowBackground = false
         panel.contentView = NSHostingView(rootView: DockView(model: model))
 
-        // 마우스가 Dock·호출 손잡이를 떠난 것을 **우리 창의 추적 영역**으로 안다.
-        // 전역 마우스 감시도, 화면 읽기도 쓰지 않는다(입력 포커스도 건드리지 않는다).
-        panel.contentView?.addTrackingArea(
-            NSTrackingArea(
-                rect: .zero,
-                options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-                owner: self,
-                userInfo: nil
-            )
-        )
 
         // 저장된 위치가 있으면 그대로 쓰고, 없으면 화면 하단이 기본이다.
         let saved = settings?.settings.windowOrigin
@@ -572,21 +566,36 @@ final class PaneDockAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         model.setCollapsed(true)
     }
 
-    /// 마우스가 들어왔다(호출 손잡이 포함). **포커스를 빼앗지 않고** 펼치기만 한다.
-    @objc func mouseEntered(with event: NSEvent) {
-        model?.appendEvent("mouse=entered")
-        collapseWork?.cancel()
-        collapseScheduler.cancel()
-        guard let model else { return }
-        guard DockCollapsePolicy.shouldExpandForHover(collapseContext()) else { return }
-        model.appendEvent("expand source=hover")
-        model.setCollapsed(false)
+    /// 마우스가 Dock·호출 손잡이 위에 있는지 **0.2초마다 위치만** 본다.
+    ///
+    /// 추적 영역(`NSTrackingArea`)은 이 비활성 패널에서 enter/exit를 주지 않았다(값으로 확인).
+    /// 전역 키 감시도, 화면 읽기도 아니다 — 우리 창 좌표와 마우스 위치만 비교한다.
+    private func evaluateMousePresence() {
+        guard let panel, let model, panel.isVisible else {
+            wasMouseInside = nil   // 숨김/닫힘: 다음에 보일 때 다시 기준을 잡는다
+            return
+        }
+        let inside = panel.frame.contains(NSEvent.mouseLocation)
+        defer { wasMouseInside = inside }
+        guard let previous = wasMouseInside, previous != inside else { return }
+        if inside {
+            // 손잡이로 들어왔다. **포커스를 빼앗지 않고** 펼치기만 한다.
+            collapseWork?.cancel()
+            collapseScheduler.cancel()
+            guard DockCollapsePolicy.shouldExpandForHover(collapseContext()) else { return }
+            model.appendEvent("expand source=hover")
+            model.setCollapsed(false)
+        } else {
+            model.appendEvent("mouse=exited")
+            scheduleCollapseCheck()
+        }
     }
 
-    /// 마우스가 떠났다. **바로 접지 않고** 잠시 뒤 조건을 다시 본다.
-    @objc func mouseExited(with event: NSEvent) {
-        model?.appendEvent("mouse=exited")
-        scheduleCollapseCheck()
+    private func startPresenceTimer() {
+        presenceTimer?.invalidate()
+        presenceTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            self?.evaluateMousePresence()
+        }
     }
 
     // MARK: - 호출/숨김
