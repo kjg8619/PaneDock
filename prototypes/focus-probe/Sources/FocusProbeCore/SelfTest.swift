@@ -1368,13 +1368,15 @@ public enum SelfTest {
         var results: [CheckResult] = []
 
         let clean = BuildIdentity.from(infoDictionary: [
-            "CFBundleShortVersionString": "0.2a",
+            "CFBundleShortVersionString": "0.2.0",
+            "PaneDockReleaseStage": "alpha",
             "CFBundleVersion": "44",
             "PaneDockGitSHA": "e4daf61",
             "PaneDockGitDirty": "0",
         ])
         let dirty = BuildIdentity.from(infoDictionary: [
-            "CFBundleShortVersionString": "0.2a",
+            "CFBundleShortVersionString": "0.2.0",
+            "PaneDockReleaseStage": "alpha",
             "CFBundleVersion": "44",
             "PaneDockGitSHA": "e4daf61",
             "PaneDockGitDirty": "1",
@@ -1384,8 +1386,10 @@ public enum SelfTest {
 
         results.append(check(
             "빌드: 제품 버전·빌드 번호·커밋을 구분해 보여준다",
-            clean.displayText == "0.2a · 빌드 44 · e4daf61"
-                && clean.productVersion == "0.2a"
+            clean.displayText == "0.2.0 alpha · 빌드 44 · e4daf61"
+                && clean.productVersion == "0.2.0"
+                && clean.releaseStage == "alpha"
+                && !clean.productVersion.contains("alpha")
                 && clean.buildNumber == "44"
                 && clean.gitSHA == "e4daf61"
                 && !clean.isDirtyTree,
@@ -1409,14 +1413,24 @@ public enum SelfTest {
                 && development.gitSHA == nil
                 && partial.hasBundleInfo
                 && partial.buildNumber == nil
-                && partial.displayText == "0.3",
+                && partial.displayText == "0.3 alpha",
             "개발=\(development.displayText) · 부분=\(partial.displayText)"
+        ))
+
+        results.append(check(
+            "빌드: 번들 버전 문자열은 숫자 점 표기이고 단계 표시는 분리돼 있다",
+            BuildIdentity.productVersion.split(separator: ".").allSatisfy { part in
+                !part.isEmpty && part.allSatisfy(\.isNumber)
+            }
+                && BuildIdentity.productVersion.split(separator: ".").count >= 3
+                && !BuildIdentity.productVersion.lowercased().contains("alpha")
+                && BuildIdentity.defaultReleaseStage.lowercased().contains("alpha")
+                && clean.displayText.contains("0.2.0 alpha"),
+            "버전=\(BuildIdentity.productVersion) 단계=\(BuildIdentity.defaultReleaseStage) 표시=\(clean.displayText)"
         ))
 
         return results
     }
-
-    // MARK: - 카드 실행 상태 (V18.6)
 
     /// 타이머가 **갱신 횟수가 아니라 시각**으로 남은 시간을 정하는지 고정한다.
     private static func focusCardChecks() -> [CheckResult] {

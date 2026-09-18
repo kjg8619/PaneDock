@@ -15,10 +15,11 @@ BIN_PATH="$(swift build -c release --show-bin-path)"
 VERSION_SOURCE="../../prototypes/focus-probe/Sources/FocusProbeCore/BuildIdentity.swift"
 PRODUCT_VERSION="$(sed -n 's/.*static let productVersion = "\([^"]*\)".*/\1/p' "$VERSION_SOURCE" | head -1)"
 [ -n "$PRODUCT_VERSION" ] || PRODUCT_VERSION="0.0"
+RELEASE_STAGE="$(sed -n 's/.*static let defaultReleaseStage = "\([^"]*\)".*/\1/p' "$VERSION_SOURCE" | head -1)"
 BUILD_NUMBER="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if [ -n "$(git status --porcelain 2>/dev/null)" ]; then GIT_DIRTY="1"; else GIT_DIRTY="0"; fi
-echo "식별: version=$PRODUCT_VERSION build=$BUILD_NUMBER sha=$GIT_SHA dirty=$GIT_DIRTY"
+echo "식별: version=$PRODUCT_VERSION stage=$RELEASE_STAGE build=$BUILD_NUMBER sha=$GIT_SHA dirty=$GIT_DIRTY"
 
 echo "빌드 중 (release)..."
 swift build -c release
@@ -54,6 +55,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 	<string>__PRODUCT_VERSION__</string>
 	<key>CFBundleVersion</key>
 	<string>__BUILD_NUMBER__</string>
+	<!-- 단계 표시는 **사용자용 문구**다. 버전 문자열(CFBundleShortVersionString)에 섞지 않는다. -->
+	<key>PaneDockReleaseStage</key>
+	<string>__RELEASE_STAGE__</string>
 	<!-- 실행 중인 빌드를 진단 화면에서 확인할 수 있게 한다. 수정된 작업 트리로 만든 빌드는 dirty=1이다. -->
 	<key>PaneDockGitSHA</key>
 	<string>__GIT_SHA__</string>
@@ -75,7 +79,8 @@ PLIST
 sed -i '' -e "s/__PRODUCT_VERSION__/$PRODUCT_VERSION/" \
           -e "s/__BUILD_NUMBER__/$BUILD_NUMBER/" \
           -e "s/__GIT_SHA__/$GIT_SHA/" \
-          -e "s/__GIT_DIRTY__/$GIT_DIRTY/" "$APP/Contents/Info.plist"
+          -e "s/__GIT_DIRTY__/$GIT_DIRTY/" \
+          -e "s/__RELEASE_STAGE__/$RELEASE_STAGE/" "$APP/Contents/Info.plist"
 
 # ad-hoc 서명. TCC가 번들 단위로 권한을 기억할 수 있게 한다.
 if codesign --force --sign - "$APP" 2>/dev/null; then

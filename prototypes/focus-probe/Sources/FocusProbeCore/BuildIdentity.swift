@@ -5,10 +5,15 @@ import Foundation
 /// **제품 버전·빌드 번호·짧은 Git SHA를 구분**하고, **수정된 작업 트리로 만든 빌드를 깨끗한 커밋 빌드처럼 보이지 않게** 한다.
 /// 형식은 순수 함수라 검사로 고정할 수 있다(코어에 두는 이유).
 public struct BuildIdentity: Equatable, Sendable {
-    /// 제품 버전(사람이 정한다). 빌드 스크립트도 이 값을 읽어 Info.plist에 넣는다.
-    public static let productVersion = "0.2a"
+    /// 제품 버전 — **숫자 점 표기**만 쓴다(번들 `CFBundleShortVersionString` 규격).
+    /// alpha 같은 단계 표시는 여기 넣지 않고 `releaseStage`(사용자용 문구)로 분리한다.
+    public static let productVersion = "0.2.0"
+    /// 단계 표시(사용자용 문구). 버전 문자열에 섞지 않는다.
+    public static let defaultReleaseStage = "alpha"
 
     public var productVersion: String
+    /// 사용자용 단계 문구(예: alpha). 비어 있으면 표시하지 않는다.
+    public var releaseStage: String?
     /// 빌드 번호(저장소 커밋 수). 번들에 기록되지 않았으면 nil.
     public var buildNumber: String?
     /// 짧은 Git SHA. 번들에 기록되지 않았으면 nil.
@@ -20,12 +25,14 @@ public struct BuildIdentity: Equatable, Sendable {
 
     public init(
         productVersion: String = BuildIdentity.productVersion,
+        releaseStage: String? = BuildIdentity.defaultReleaseStage,
         buildNumber: String? = nil,
         gitSHA: String? = nil,
         isDirtyTree: Bool = false,
         hasBundleInfo: Bool = false
     ) {
         self.productVersion = productVersion
+        self.releaseStage = releaseStage
         self.buildNumber = buildNumber
         self.gitSHA = gitSHA
         self.isDirtyTree = isDirtyTree
@@ -38,11 +45,13 @@ public struct BuildIdentity: Equatable, Sendable {
             return BuildIdentity(hasBundleInfo: false)
         }
         let version = (info["CFBundleShortVersionString"] as? String)?.trimmingCharacters(in: .whitespaces)
+        let stage = (info["PaneDockReleaseStage"] as? String)?.trimmingCharacters(in: .whitespaces)
         let build = (info["CFBundleVersion"] as? String)?.trimmingCharacters(in: .whitespaces)
         let sha = (info["PaneDockGitSHA"] as? String)?.trimmingCharacters(in: .whitespaces)
         let dirty = (info["PaneDockGitDirty"] as? String)?.trimmingCharacters(in: .whitespaces)
         return BuildIdentity(
             productVersion: (version?.isEmpty == false ? version! : BuildIdentity.productVersion),
+            releaseStage: (stage?.isEmpty == false ? stage : BuildIdentity.defaultReleaseStage),
             buildNumber: (build?.isEmpty == false ? build : nil),
             gitSHA: (sha?.isEmpty == false ? sha : nil),
             isDirtyTree: dirty == "1",
@@ -55,7 +64,8 @@ public struct BuildIdentity: Equatable, Sendable {
         guard hasBundleInfo else {
             return "\(productVersion) · 개발 빌드(번들 정보 없음)"
         }
-        var parts: [String] = [productVersion]
+        // 제품 버전(숫자)과 단계 문구를 **분리해서** 보여준다: "0.2.0 alpha · 빌드 44 · …".
+        var parts: [String] = [releaseStage.map { "\(productVersion) \($0)" } ?? productVersion]
         if let buildNumber { parts.append("빌드 \(buildNumber)") }
         if let gitSHA { parts.append(gitSHA) }
         var text = parts.joined(separator: " · ")
@@ -65,7 +75,7 @@ public struct BuildIdentity: Equatable, Sendable {
 
     /// 로그 한 줄에 쓰는 형태(`key=value`).
     public var logText: String {
-        var fields = ["version=\(productVersion)"]
+        var fields = ["version=\(productVersion)", "stage=\(releaseStage ?? "-")"]
         fields.append("build=\(buildNumber ?? "-")")
         fields.append("sha=\(gitSHA ?? "-")")
         fields.append("dirty=\(isDirtyTree)")

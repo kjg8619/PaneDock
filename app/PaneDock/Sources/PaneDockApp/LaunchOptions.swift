@@ -101,12 +101,15 @@ PaneDock — 포커스된 터미널 pane을 따라가는 최소 Dock
   6) 종료:   메뉴 막대 › PaneDock 종료 (⌘Q)
 
 연동 전제:
-  Ghostty 1.3.0+ (공식 AppleScript로 포커스 pane과 경로를 읽는다) · cmux(읽기 전용 socket CLI).
-  두 터미널 모두 셸 설정 변경·별도 설치가 필요 없다. 중첩 TUI(herdr·tmux) 내부 경로는 알 수 없다.
+  Ghostty 1.3.0+ — 공식 AppleScript로 포커스 pane과 경로를 읽는다. 셸 설정 변경·별도 설치가 필요 없다.
+  cmux — **CLI가 설치돼 있고 소켓 접근이 허용된 환경**에서만 읽는다(읽기 전용 socket CLI: identify · sidebar-state).
+  설치돼 있어도 소켓 접근이 준비되지 않으면 연결되지 않는다(그때는 '미실행' 또는 '연결 실패'로 표시).
+  중첩 TUI(herdr·tmux) 내부 경로는 공식 조회로 알 수 없다.
 
 현재 제한:
   프로젝트 전환은 **영역만** 바뀐다(전체 Dock 프로필 전환 없음) · 타이머 상태는 앱 종료 후 복원되지 않는다 ·
-  확인 중(pending) 화면은 실제 흐름에서 잠깐이라 캡처하지 못했다 · 물리 키보드 입력은 사용자 확인이 필요하다.
+  확인 중(pending) 화면은 실제 흐름에서 잠깐이라 캡처하지 못했다.
+  키보드 조작(⌃⌥⌘D → Tab → Enter → Esc)은 사용자가 직접 확인했다(타이머 시작·⋯ 메뉴 열기 포함).
 
 상태:
   추적 중(tracked) 유지 중(held) 잠금(locked) 확인 중(pending) 오류(error)
