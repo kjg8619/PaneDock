@@ -3308,6 +3308,41 @@ PASS 표시: 영역을 줄여야 하는 경우도 공간 부족으로 드러난�
 **규칙 보존:** 공통 구성·프로젝트 영역의 폭·위치 규칙(영역 폭 고정, 항목 수와 무관, 넘침은 영역 안)은 그대로다.
 사용자 설정 파일은 건드리지 않았고(임시 `--settings-path`만 사용), 저장은 사용자가 편집창에서 저장할 때만 일어난다.
 
+### V18.19 A 시안 잔여 적용 (프로젝트 패널·미등록/실패 분리·디지털 시계·심볼 채움)
+
+| 적용 | 내용 | 화면 |
+| --- | --- | --- |
+| 프로젝트 패널 | 점선·모서리 라벨 제거 → **작은 헤더**(상태 점·프로젝트 이름·호스트 칩·`⋯`) + **아래 도구 타일**(타일+하단 이름, `+N`, `＋ 추가`) | `shots/v18-A-registered.png`, `shots/v18-B-other.png` |
+| 미등록 | 주황 점 + `프로젝트 미등록` + 안내문 + **[폴더 열기] [프로젝트로 등록]** (`perform(.openFolder)`·`openEditor()` 재사용) | `shots/v18-C-unregistered.png` |
+| 경로 확인 실패 | **붉은 점 + `경로 확인 실패` + 사유**(등록 버튼 없음) — 미등록과 다른 상태로 표시 | `shots/v18-D-pathfail.png` |
+| 시계 카드 | 아날로그 면 제거 → **큰 디지털 시간(30pt) + 날짜** + 초 진행 얇은 선(2pt) | 네 화면 모두 |
+| 타이머 카드 | 진행 링 + 가운데 시간 + `▶ ❚❚ ↺` 유지(변경 없음) | 같음 |
+| 메뉴바 심볼 채움 버그 | `fill: nil`인데도 `fill()`을 무조건 호출해 남은 채움색으로 칠해지던 것을 `paint(_:fill:)`로 분리 — **무채움 의도와 실제 렌더 일치** | 18pt 렌더 검증(아래) |
+| 앱 아이콘 다듬기 | 안쪽 도형 확대 + **오른쪽 pane·점 강조 채움**으로 16pt에서도 좌우 분할·포커스가 보임 | `/tmp/v18c/symbol/icon-16.png`, `icon-128.png` |
+
+**규격 보존:** 프로젝트 영역의 **바깥 폭·공통 구성 위치는 그대로**다. 헤더는 별도 줄이라 타일 한 줄 폭을 잠식하지 않아
+넘침(더보기) 계산이 바뀌지 않는다. 자체 검사 1건 추가(총 **172/172**): 넓이 240·300·360·620에서 보이는 타일이 패널 안쪽 폭을 넘지 않고,
+패널 여백·높이가 예약 범위 안에 있다.
+
+**심볼 18pt 실측:** 메뉴바 심볼을 템플릿 해제해 렌더해 보니 **두 pane의 빈 공간·분할선·점이 구분**된다(`/tmp/v18c/symbol/menu-18pt-raw.png`).
+예전 구현은 채움색이 남아 있어 무채움 의도와 실제 렌더가 어긋났다(수정 후 윤곽만 그려진다).
+
+**V18 새 카드·메뉴의 실제 키 입력(합성 키 이벤트가 앱에 전달됨 — 함수 직접 호출 아님):**
+앱을 `open -a dist/PaneDock.app`(LaunchServices 실행)로 띄우면 macOS가 활성화를 허용해 **키 이벤트가 실제로 앱에 전달**된다.
+
+```
+invoke frozenFrontmost=true focus=item:common/c1
+focus=item:common/c2 … c3 → timer:focus-1:start/pause/reset → timer:focus-3:start/pause/reset
+→ overflow:cards → item:p-a/a1 → item:p-a/a2 → details → menu → (순환)
+activate control=timer:focus-1:start source=keyboard  →  card=focus-1 action=start source=keyboard
+activate control=menu source=keyboard                 →  menu=open source=keyboard
+menu=close source=keyboard                            (Esc가 **메뉴만** 닫고 패널은 유지 — isMenuTracking 가드 확인)
+```
+초점 목록이 배치 순서와 일치하고, 새 조작(타이머 버튼·`+N`·`⋯`)이 키로 동작한다. 화면: `shots/v18-E-menu-keyboard.png`(⋯에 파란 초점 링 + 열린 메뉴).
+
+**cmux: 미확인(실행은 했음).** `open -a cmux`로 실행해도 어댑터가 `connection=unavailable (앱 미실행 또는 조회 실패)` —
+소켓 CLI가 없어 pane 정보를 읽지 못한다. cmux 설정(Settings > Automation)을 바꾸는 것은 사용자 설정 변경이라 하지 않았다. cmux는 확인 후 종료했다.
+
 ### V17.7 보존 확인
 
 | 규칙 | 상태 |
